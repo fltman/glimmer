@@ -9,12 +9,14 @@ import type { CreateJobRequest, UpscaleInputs } from "@aips/shared-types";
 import { idempotencyKey, presignUpload } from "../apiClient";
 import { engine, useEngineSnapshot } from "../../state/useEngine";
 import { useAiJob } from "../useAiJob";
-import { JobStatus } from "../AiSectionShell";
+import { Field, JobStatus } from "../AiSectionShell";
 
 export function UpscaleSection() {
   const snap = useEngineSnapshot();
   const job = useAiJob();
   const [pending, setPending] = useState<2 | 4 | null>(null);
+  // Slider is 0..100 (%); the contract wants creativity as 0..1.
+  const [creativityPct, setCreativityPct] = useState(0);
 
   const activeId = snap.activeLayerId;
   const geo = activeId ? engine.getLayerGeometry(activeId) : null;
@@ -27,7 +29,11 @@ export function UpscaleSection() {
     const imageBlob = await engine.exportLayerRegionPNG(activeId, g);
     const image = await presignUpload(imageBlob);
 
-    const inputs: UpscaleInputs = { image, scale };
+    const creativity = creativityPct / 100;
+    // Only send `creativity` when the user dialed in some enhancement, so a
+    // plain resample keeps the same idempotency key as before.
+    const inputs: UpscaleInputs =
+      creativity > 0 ? { image, scale, creativity } : { image, scale };
     const key = await idempotencyKey({ capability: "upscale", inputs });
     const req: CreateJobRequest<"upscale"> = {
       capability: "upscale",
@@ -67,6 +73,28 @@ export function UpscaleSection() {
           {geo.width * 4}×{geo.height * 4} (4×)
         </p>
       )}
+
+      <Field
+        label="Creativity"
+        hint="0% = faithful resample. Higher adds invented detail — sharper textures and synthesized fine detail (color-matched back to avoid drift)."
+      >
+        <div className="flex items-center gap-2.5">
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={5}
+            value={creativityPct}
+            onChange={(e) => setCreativityPct(Number(e.target.value))}
+            disabled={job.busy}
+            className="h-1.5 w-full cursor-pointer appearance-none rounded bg-edge accent-accent disabled:cursor-not-allowed disabled:opacity-60"
+            aria-label="Creativity"
+          />
+          <span className="w-9 shrink-0 text-right text-[11px] tabular-nums text-muted">
+            {creativityPct}%
+          </span>
+        </div>
+      </Field>
 
       <div className="grid grid-cols-2 gap-1.5">
         <button

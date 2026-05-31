@@ -65,6 +65,28 @@ def _build_instruction(mode: str, prompt: str) -> str:
     return f"{base} Task: replace ONLY the white region with: {p}."
 
 
+def _build_reference_instruction(prompt: str) -> str:
+    """Instruction for reference-image generative fill (fill mode only).
+
+    Three images go on the wire in this order: FIRST = source ROI, SECOND = mask,
+    THIRD = reference. The model must paint the masked region with the object from
+    the reference, preserving its identity but adapting it to the scene.
+    """
+    base = (
+        "You are editing the FIRST image. The SECOND image is a mask: pure white "
+        "marks the ONLY region you may change; black pixels must stay byte-for-byte "
+        "identical. The THIRD image is a REFERENCE showing the object to insert. "
+        "Fill ONLY the masked (white) region with the object shown in the reference "
+        "image; match its identity and appearance while adapting its scale, "
+        "perspective, lighting and color to the scene. Do not recompose, crop, "
+        "rotate or resize the FIRST image, and keep every unmasked pixel identical."
+    )
+    p = (prompt or "").strip()
+    if p:
+        return f"{base} Additional guidance: {p}."
+    return base
+
+
 def run_inpaint(
     *,
     image_bytes: bytes,
@@ -73,9 +95,17 @@ def run_inpaint(
     mode: str,
     roi: dict,
     seed: int | None,
+    reference_bytes: bytes | None = None,
     provider: OpenRouterImageProvider | None = None,
 ) -> InpaintResult:
-    """Execute the full inpaint pipeline and return the composited ROI."""
+    """Execute the full inpaint pipeline and return the composited ROI.
+
+    When `reference_bytes` is given (fill mode), the masked region is filled with
+    the object shown in the reference image — the source ROI, mask and reference
+    are sent together in one edit call. Everything after the creative step
+    (re-align, color-match against the trusted pixels, feather + composite) is the
+    same as a normal inpaint, so the result still blends seamlessly.
+    """
     provider = provider or OpenRouterImageProvider()
 
     src = imaging.decode_rgba(image_bytes)
@@ -97,15 +127,29 @@ def run_inpaint(
     crop_size = roi_img.size  # (w, h) of the region actually sent to the model
     mask_img = imaging.decode_mask_l(mask_bytes, crop_size)
 
-    # 2) creative step — one image + strong instruction. Send the mask too so the
-    # model has the exact region; we still post-process as if it ignored it.
-    instruction = _build_instruction(mode, prompt)
-    edit_result: ImageResult = provider.image_edit_with_mask(
-        image_bytes=imaging.encode_png(roi_img),
-        mask_bytes=imaging.encode_png(mask_img.convert("RGBA")),
-        instruction=instruction,
-        seed=seed,
-    )
+    # 2) creative step — send the source + mask (+ optional reference) with a
+    # strong instruction; we still post-process as if the model ignored the mask.
+    if reference_bytes is not None and mode == "fill":
+        # Reference-image generative fill: [source, mask, reference] in one call.
+        ref_img = imaging.decode_rgba(reference_bytes)
+        instruction = _build_reference_instruction(prompt)
+        edit_result: ImageResult = provider.image_edit_multi(
+            images=[
+                imaging.encode_png(roi_img),
+                imaging.encode_png(mask_img.convert("RGBA")),
+                imaging.encode_png(ref_img),
+            ],
+            instruction=instruction,
+            seed=seed,
+        )
+    else:
+        instruction = _build_instruction(mode, prompt)
+        edit_result = provider.image_edit_with_mask(
+            image_bytes=imaging.encode_png(roi_img),
+            mask_bytes=imaging.encode_png(mask_img.convert("RGBA")),
+            instruction=instruction,
+            seed=seed,
+        )
 
     # 3) re-align to the exact ROI grid — never trust the model's output size.
     result_img = imaging.resize_to(imaging.decode_rgba(edit_result.png_bytes), crop_size)

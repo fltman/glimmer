@@ -1,6 +1,7 @@
 /**
  * AI panel — the right-hand action surface, organized into tabs:
- *   GENERATE (text-to-image) · EDIT (inpaint) · CUTOUT (remove bg) ·
+ *   GENERATE (text-to-image) · EDIT (inpaint + reference-image fill) ·
+ *   HARMONIZE (relight/grade a subject into the scene) · CUTOUT (remove bg) ·
  *   EXPAND (outpaint) · UPSCALE.
  *
  * Each tab is a self-contained section that owns its own job lifecycle via the
@@ -11,15 +12,23 @@
 import { useState } from "react";
 import { GenerateSection } from "./sections/GenerateSection";
 import { EditSection } from "./sections/EditSection";
+import { HarmonizeSection } from "./harmonize/HarmonizeSection";
 import { CutoutSection } from "./sections/CutoutSection";
 import { ExpandSection } from "./sections/ExpandSection";
 import { UpscaleSection } from "./sections/UpscaleSection";
 
-type TabId = "generate" | "edit" | "cutout" | "expand" | "upscale";
+type TabId =
+  | "generate"
+  | "edit"
+  | "harmonize"
+  | "cutout"
+  | "expand"
+  | "upscale";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "generate", label: "Generate" },
   { id: "edit", label: "Edit" },
+  { id: "harmonize", label: "Harmonize" },
   { id: "cutout", label: "Cutout" },
   { id: "expand", label: "Expand" },
   { id: "upscale", label: "Upscale" },
@@ -51,6 +60,7 @@ export function AIPanel() {
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
         {tab === "generate" && <GenerateSection />}
         {tab === "edit" && <EditSection />}
+        {tab === "harmonize" && <HarmonizeSection />}
         {tab === "cutout" && <CutoutSection />}
         {tab === "expand" && <ExpandSection />}
         {tab === "upscale" && <UpscaleSection />}

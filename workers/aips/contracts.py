@@ -27,6 +27,7 @@ CAPABILITIES: tuple[str, ...] = (
     "segment",
     "upscale",
     "remove_background",
+    "harmonize",
 )
 
 Capability = Literal[
@@ -37,6 +38,7 @@ Capability = Literal[
     "segment",
     "upscale",
     "remove_background",
+    "harmonize",
 ]
 
 ExecutionLocation = Literal["server", "client"]
@@ -85,9 +87,56 @@ class Rect(TypedDict):
     height: int
 
 
+class AssetRef(TypedDict, total=False):
+    """Mirror of the TS AssetRef — a reference to an uploaded binary asset."""
+
+    key: str
+    sha256: str
+    contentType: str
+    width: int
+    height: int
+
+
 class Placement(TypedDict, total=False):
     roi: Rect
     suggestedLayerName: str
+
+
+# ── Per-capability input shapes (mirror CapabilityInputsMap) ──────
+# The worker reads `inputs` as a plain dict; these TypedDicts document the wire
+# shape and the optional fields the pipelines look for. Tasks tolerate missing
+# optional keys (referenceImage / creativity / strength / roi) gracefully.
+
+
+class InpaintInputs(TypedDict, total=False):
+    image: AssetRef
+    mask: AssetRef
+    prompt: str
+    mode: Literal["fill", "remove"]
+    roi: Rect
+    #: Optional reference image for generative fill (identity-preserving fill).
+    referenceImage: AssetRef
+    seed: int
+
+
+class UpscaleInputs(TypedDict, total=False):
+    image: AssetRef
+    scale: Literal[2, 4]
+    #: 0..1 creative-enhance strength applied after the base upscale.
+    creativity: float
+    seed: int
+
+
+class HarmonizeInputs(TypedDict, total=False):
+    #: Inserted subject as an RGBA cutout (alpha defines the silhouette).
+    foreground: AssetRef
+    #: Flattened composite of the layers below the subject (same size).
+    background: AssetRef
+    #: Optional ROI the subject occupies, for placing the result back.
+    roi: Rect
+    #: 0..1 relight/grade aggressiveness (default ~0.6).
+    strength: float
+    seed: int
 
 
 class JobArtifact(TypedDict, total=False):

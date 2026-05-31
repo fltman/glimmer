@@ -136,6 +136,24 @@ def blend_masked(
     return Image.fromarray(out, mode="RGBA")
 
 
+def composite_over(foreground: Image.Image, background: Image.Image) -> Image.Image:
+    """Alpha-composite an RGBA `foreground` over `background` (background opaque).
+
+    Resizes the foreground to the background grid if they differ. Returns an RGBA
+    image (fully opaque) suitable for sending to an img2img model.
+    """
+    bg = background.convert("RGBA")
+    fg = foreground.convert("RGBA")
+    if fg.size != bg.size:
+        fg = fg.resize(bg.size, Image.LANCZOS)
+    return Image.alpha_composite(bg, fg)
+
+
+def alpha_channel(img: Image.Image) -> Image.Image:
+    """Return the alpha channel of an image as a single-channel L image."""
+    return img.convert("RGBA").split()[-1]
+
+
 def clamp_roi(
     roi: dict, img_w: int, img_h: int, pad_frac: float = 0.30
 ) -> tuple[int, int, int, int]:

@@ -2,6 +2,7 @@
 
 from . import (  # noqa: F401
     echo,
+    harmonize,
     image_edit,
     inpaint,
     outpaint,

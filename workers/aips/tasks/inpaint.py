@@ -43,6 +43,7 @@ def inpaint(self, *, job_id: str, inputs: dict, user_id: str = "anon", idempoten
     inputs = inputs or {}
     image_ref = inputs.get("image") or {}
     mask_ref = inputs.get("mask") or {}
+    reference_ref = inputs.get("referenceImage") or {}
     roi = inputs.get("roi") or {}
     mode = inputs.get("mode") or "fill"
     prompt = inputs.get("prompt") or ""
@@ -53,8 +54,14 @@ def inpaint(self, *, job_id: str, inputs: dict, user_id: str = "anon", idempoten
     if mode not in ("fill", "remove"):
         _fail(job, "invalid_inputs", f"inpaint mode must be 'fill' or 'remove', got {mode!r}")
         return {"jobId": job_id, "status": "failed"}
-    if mode == "fill" and not prompt.strip():
-        _fail(job, "invalid_inputs", "inpaint mode 'fill' requires a non-empty 'prompt'")
+    has_reference = bool(reference_ref.get("key"))
+    # A "fill" needs *something* to fill with: a text prompt or a reference image.
+    if mode == "fill" and not prompt.strip() and not has_reference:
+        _fail(
+            job,
+            "invalid_inputs",
+            "inpaint mode 'fill' requires a non-empty 'prompt' or a 'referenceImage'",
+        )
         return {"jobId": job_id, "status": "failed"}
 
     job["status"] = "running"
@@ -62,10 +69,15 @@ def inpaint(self, *, job_id: str, inputs: dict, user_id: str = "anon", idempoten
     job["progress"] = 0.15
     publish_progress(job)
 
-    # 1) download ROI image + mask
+    # 1) download ROI image + mask (+ optional reference for generative fill)
     try:
         image_bytes = download_object(image_ref["key"])
         mask_bytes = download_object(mask_ref["key"])
+        reference_bytes = (
+            download_object(reference_ref["key"])
+            if has_reference and mode == "fill"
+            else None
+        )
     except Exception as exc:  # noqa: BLE001
         log.exception("inpaint download failed job=%s", job_id)
         _fail(job, "storage_error", f"Could not download inputs: {exc}")
@@ -82,6 +94,7 @@ def inpaint(self, *, job_id: str, inputs: dict, user_id: str = "anon", idempoten
             mode=mode,
             roi=roi,
             seed=inputs.get("seed"),
+            reference_bytes=reference_bytes,
         )
     except ProviderError as exc:
         log.warning("inpaint provider error job=%s code=%s: %s", job_id, exc.code, exc.message)
@@ -117,7 +130,11 @@ def inpaint(self, *, job_id: str, inputs: dict, user_id: str = "anon", idempoten
         "height": out.height,
         "placement": {
             "roi": out.placement_roi,
-            "suggestedLayerName": "Inpaint" if mode == "fill" else "Removed",
+            "suggestedLayerName": (
+                "Removed"
+                if mode == "remove"
+                else ("Reference fill" if has_reference else "Inpaint")
+            ),
         },
     }
     job["artifacts"] = [artifact]

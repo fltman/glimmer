@@ -26,6 +26,7 @@ export const CAPABILITIES = [
   "segment",
   "upscale",
   "remove_background",
+  "harmonize",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -81,6 +82,32 @@ export interface InpaintInputs {
   mode: "fill" | "remove";
   /** ROI offset/scale in the original document, so the result can be placed back. */
   roi: Rect;
+  /**
+   * Optional reference image for generative fill: the masked region is filled
+   * with the object/appearance shown here (identity preserved, scale/perspective/
+   * lighting adapted to the scene). The text `prompt` becomes optional in spirit
+   * when a reference is supplied, but the wire schema still requires a string —
+   * send an empty string if you have nothing to add.
+   */
+  referenceImage?: AssetRef;
+  seed?: number;
+}
+
+export interface HarmonizeInputs {
+  /**
+   * The inserted subject as an RGBA cutout (its alpha channel defines the
+   * subject silhouette). Same pixel dimensions as `background`.
+   */
+  foreground: AssetRef;
+  /**
+   * Flattened composite of the layers BELOW the subject (the scene the subject
+   * is being dropped into). Same pixel dimensions as `foreground`.
+   */
+  background: AssetRef;
+  /** Optional region of interest the subject occupies, for placing the result back. */
+  roi?: Rect;
+  /** 0..1 — how aggressively to relight/grade the subject (default ~0.6). */
+  strength?: number;
   seed?: number;
 }
 
@@ -102,6 +129,13 @@ export interface SegmentInputs {
 export interface UpscaleInputs {
   image: AssetRef;
   scale: 2 | 4;
+  /**
+   * 0..1 — creative-enhance strength applied AFTER the base upscale. 0 (or
+   * omitted) = pure resample, no invented detail. Higher values run a Gemini
+   * img2img "enhance" pass that sharpens textures and synthesizes fine detail;
+   * the result is color-matched back to the base upscale to avoid drift.
+   */
+  creativity?: number;
 }
 
 export interface RemoveBackgroundInputs {
@@ -116,6 +150,7 @@ export interface CapabilityInputsMap {
   segment: SegmentInputs;
   upscale: UpscaleInputs;
   remove_background: RemoveBackgroundInputs;
+  harmonize: HarmonizeInputs;
 }
 
 // ──────────────────────────────────────────────────────────────

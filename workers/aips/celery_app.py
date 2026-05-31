@@ -2,8 +2,8 @@
 
 Queues (mirrors the routing in the plan):
   - fast  : quick ops (segment, remove_background fallback, echo)
-  - gen   : generative model calls (text_to_image, image_edit, inpaint, outpaint)
-  - heavy : long-running pixel pipelines (upscale)
+  - gen   : generative model calls (text_to_image, image_edit, inpaint, outpaint, harmonize)
+  - heavy : long-running pixel pipelines (upscale, incl. creative-enhance pass)
 
 Tasks are registered by importing the `aips.tasks.*` modules below.
 """
@@ -27,6 +27,7 @@ app = Celery(
         "aips.tasks.outpaint",
         "aips.tasks.upscale",
         "aips.tasks.segment",
+        "aips.tasks.harmonize",
     ],
 )
 
@@ -44,6 +45,7 @@ CAPABILITY_TASKS: dict[str, str] = {
     "outpaint": "aips.outpaint",
     "upscale": "aips.upscale",
     "segment": "aips.segment",
+    "harmonize": "aips.harmonize",
     # remove_background runs client-side (ONNX) via a client_directive; no task.
 }
 
@@ -53,6 +55,7 @@ CAPABILITY_QUEUES: dict[str, str] = {
     "image_edit": QUEUE_GEN,
     "inpaint": QUEUE_GEN,
     "outpaint": QUEUE_GEN,
+    "harmonize": QUEUE_GEN,
     "segment": QUEUE_FAST,
     "remove_background": QUEUE_FAST,
     "upscale": QUEUE_HEAVY,

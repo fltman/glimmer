@@ -117,6 +117,30 @@ class OpenRouterImageProvider:
         ]
         return self._generate(content, seed=seed)
 
+    def image_edit_multi(
+        self,
+        *,
+        images: list[bytes],
+        instruction: str,
+        seed: int | None = None,
+    ) -> ImageResult:
+        """Edit using several input images sent in a single message.
+
+        Gemini-style models accept multiple images per message; the order is
+        significant and the instruction must spell out the role of each (e.g.
+        "FIRST = source, SECOND = mask, THIRD = reference"). Used by the
+        reference-image generative fill and harmonize pipelines. The caller
+        post-processes the result (re-align / color-match / composite) so a model
+        that under-uses an input still produces a usable, blendable image.
+        """
+        if not images:
+            raise ProviderError("invalid_inputs", "image_edit_multi requires at least one image")
+        content: list[dict] = [{"type": "text", "text": instruction}]
+        for img in images:
+            data_url = "data:image/png;base64," + base64.b64encode(img).decode("ascii")
+            content.append({"type": "image_url", "image_url": {"url": data_url}})
+        return self._generate(content, seed=seed)
+
     # ── internals ─────────────────────────────────────────────
 
     def _generate(self, content: list[dict], *, seed: int | None) -> ImageResult:

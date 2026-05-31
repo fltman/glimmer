@@ -38,14 +38,30 @@ const ImageEditInputs = z.object({
   seed: z.number().int().optional(),
 });
 
-const InpaintInputs = z.object({
-  image: AssetRefSchema,
-  mask: AssetRefSchema,
-  prompt: z.string().min(1),
-  mode: z.enum(["fill", "remove"]),
-  roi: RectSchema,
-  seed: z.number().int().optional(),
-});
+const InpaintInputs = z
+  .object({
+    image: AssetRefSchema,
+    mask: AssetRefSchema,
+    // Prompt may be empty when a referenceImage drives the fill; the cross-field
+    // refine below enforces "at least one of prompt/referenceImage for fill".
+    prompt: z.string(),
+    mode: z.enum(["fill", "remove"]),
+    roi: RectSchema,
+    /** Optional reference image for identity-preserving generative fill. */
+    referenceImage: AssetRefSchema.optional(),
+    seed: z.number().int().optional(),
+  })
+  .superRefine((val, ctx) => {
+    // A "fill" needs *something* to fill with: either a text prompt or a
+    // reference image. "remove" needs neither.
+    if (val.mode === "fill" && val.prompt.trim().length === 0 && !val.referenceImage) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["prompt"],
+        message: "inpaint mode 'fill' requires a non-empty 'prompt' or a 'referenceImage'",
+      });
+    }
+  });
 
 const OutpaintInputs = z.object({
   image: AssetRefSchema,
@@ -76,10 +92,25 @@ const SegmentInputs = z.object({
 const UpscaleInputs = z.object({
   image: AssetRefSchema,
   scale: z.union([z.literal(2), z.literal(4)]),
+  /** 0..1 creative-enhance strength applied after the base upscale. */
+  creativity: z.number().min(0).max(1).optional(),
+  seed: z.number().int().optional(),
 });
 
 const RemoveBackgroundInputs = z.object({
   image: AssetRefSchema,
+});
+
+const HarmonizeInputs = z.object({
+  /** Inserted subject as an RGBA cutout (alpha defines the silhouette). */
+  foreground: AssetRefSchema,
+  /** Flattened composite of the layers below the subject (same size). */
+  background: AssetRefSchema,
+  /** Optional ROI the subject occupies, for placing the result back. */
+  roi: RectSchema.optional(),
+  /** 0..1 relight/grade aggressiveness. */
+  strength: z.number().min(0).max(1).optional(),
+  seed: z.number().int().optional(),
 });
 
 /**
@@ -95,6 +126,7 @@ const CAPABILITY_INPUTS = {
   segment: SegmentInputs,
   upscale: UpscaleInputs,
   remove_background: RemoveBackgroundInputs,
+  harmonize: HarmonizeInputs,
 } as const;
 
 export const CreateJobRequestSchema = z
