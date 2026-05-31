@@ -30,6 +30,7 @@ CAPABILITIES: tuple[str, ...] = (
     "harmonize",
     "relight",
     "color_match",
+    "remove_reflections",
 )
 
 Capability = Literal[
@@ -43,6 +44,7 @@ Capability = Literal[
     "harmonize",
     "relight",
     "color_match",
+    "remove_reflections",
 ]
 
 ExecutionLocation = Literal["server", "client"]
@@ -168,6 +170,16 @@ class ColorMatchInputs(TypedDict, total=False):
     reference: AssetRef
     #: 0..1 — amount of the reference grade to apply (default 1.0).
     strength: float
+
+
+class RemoveReflectionsInputs(TypedDict, total=False):
+    #: The active image to clean reflections/glare out of.
+    image: AssetRef
+    #: Optional ROI to confine the edit to (whole image when omitted).
+    roi: Rect
+    #: 0..1 — how aggressively to suppress reflections/glare (default 0.7).
+    strength: float
+    seed: int
 
 
 class JobArtifact(TypedDict, total=False):

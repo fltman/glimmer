@@ -138,6 +138,16 @@ const ColorMatchInputs = z.object({
   strength: z.number().min(0).max(1).optional(),
 });
 
+const RemoveReflectionsInputs = z.object({
+  /** The active image to clean reflections/glare out of. */
+  image: AssetRefSchema,
+  /** Optional ROI to confine the edit to (whole image when omitted). */
+  roi: RectSchema.optional(),
+  /** 0..1 — how aggressively to suppress reflections (default 0.7 server-side). */
+  strength: z.number().min(0).max(1).optional(),
+  seed: z.number().int().optional(),
+});
+
 /**
  * Discriminated request schema. We validate `inputs` against the matching
  * per-capability schema via a refine + transform so the parsed result is
@@ -154,6 +164,7 @@ const CAPABILITY_INPUTS = {
   harmonize: HarmonizeInputs,
   relight: RelightInputs,
   color_match: ColorMatchInputs,
+  remove_reflections: RemoveReflectionsInputs,
 } as const;
 
 export const CreateJobRequestSchema = z

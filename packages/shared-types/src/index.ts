@@ -29,6 +29,7 @@ export const CAPABILITIES = [
   "harmonize",
   "relight",
   "color_match",
+  "remove_reflections",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -201,6 +202,27 @@ export interface ColorMatchInputs {
   strength?: number;
 }
 
+export interface RemoveReflectionsInputs {
+  /** The active image (composite or layer region) to clean up. */
+  image: AssetRef;
+  /**
+   * Optional region of interest to confine the edit to (e.g. just the glass /
+   * window / screen / pair of eyeglasses). When omitted, the whole image is
+   * processed. When given, the worker crops with context padding, runs the
+   * reflection-removal edit on the crop, then color-matches + feather-blends the
+   * cleaned crop back into the original so untouched pixels stay byte-stable. The
+   * result is placed back at this `roi`.
+   */
+  roi?: Rect;
+  /**
+   * 0..1 — how aggressively to suppress reflections/glare. 0 ≈ a light touch that
+   * only knocks back the strongest hotspots; 1 ≈ remove reflections completely
+   * and fully reveal what is behind the glass. Defaults to 0.7 when omitted.
+   */
+  strength?: number;
+  seed?: number;
+}
+
 export interface CapabilityInputsMap {
   text_to_image: TextToImageInputs;
   image_edit: ImageEditInputs;
@@ -212,6 +234,7 @@ export interface CapabilityInputsMap {
   harmonize: HarmonizeInputs;
   relight: RelightInputs;
   color_match: ColorMatchInputs;
+  remove_reflections: RemoveReflectionsInputs;
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -639,4 +662,56 @@ export interface AgentRequest {
 /** Response body for POST /ai/agent (synchronous text-model call). */
 export interface AgentResponse {
   plan: AgentPlan;
+}
+
+// ──────────────────────────────────────────────────────────────
+// Distraction analysis (vision text-model contract)
+//
+// POST /ai/analyze-distractions is SYNCHRONOUS (mirrors /ai/agent — it is NOT a
+// job-queue capability). The API downloads the image bytes server-side, sends
+// them to the MULTIMODAL text model (config.openrouter.textModel), and asks it
+// to point out distracting elements a retoucher would remove. The model returns
+// candidate regions; the user reviews/adjusts the selection before actually
+// removing anything (e.g. via inpaint mode:"remove" / remove_reflections).
+// ──────────────────────────────────────────────────────────────
+
+/** How visually distracting / worth-removing a region is. */
+export type DistractionSeverity = "low" | "medium" | "high";
+
+/**
+ * A single distracting element the vision model flagged.
+ *
+ * COORDINATE CONVENTION: `box` is in NORMALIZED image coordinates — x, y, width
+ * and height are fractions in [0, 1] of the image width/height (origin = top-
+ * left). LLMs are imprecise at exact pixels, so the contract is normalized + the
+ * expectation that the user reviews and fine-tunes the selection before removal.
+ * The web client multiplies by the image's pixel dimensions to seed a marquee.
+ */
+export interface DistractionRegion {
+  /** Stable id for this region within the response (e.g. "d1"). */
+  id: string;
+  /** Short human label, e.g. "photobomber", "power line", "litter". */
+  label: string;
+  /** Optional one-line explanation of why it's distracting. */
+  rationale?: string;
+  severity: DistractionSeverity;
+  /** Bounding box in NORMALIZED [0,1] image coordinates (top-left origin). */
+  box: { x: number; y: number; width: number; height: number };
+}
+
+/** Request body for POST /ai/analyze-distractions. */
+export interface AnalyzeDistractionsRequest {
+  /** The image to analyze (already uploaded to object storage). */
+  image: AssetRef;
+}
+
+/** Response body for POST /ai/analyze-distractions (synchronous text-model call). */
+export interface AnalyzeDistractionsResponse {
+  /** Flagged regions, possibly empty when nothing distracting was found. */
+  distractions: DistractionRegion[];
+  /**
+   * Optional note for the user — e.g. a "nothing found" message when the list is
+   * empty, or a reminder that boxes are approximate and should be reviewed.
+   */
+  message?: string;
 }

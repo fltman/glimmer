@@ -73,6 +73,28 @@ export async function presignGet(key: string): Promise<string> {
   });
 }
 
+/**
+ * Download an object's raw bytes server-side (via the internal endpoint).
+ *
+ * Used by synchronous endpoints that must read pixels themselves (e.g.
+ * /ai/analyze-distractions base64-encodes the image for the vision model). The
+ * bytes never transit the browser; only the provider key is used, server-side.
+ */
+export async function getObjectBytes(key: string): Promise<Buffer> {
+  const out = await internalClient.send(
+    new GetObjectCommand({ Bucket: minio.bucket, Key: key }),
+  );
+  const body = out.Body;
+  if (!body) {
+    throw new Error(`object ${key} has no body`);
+  }
+  // The Node.js SDK exposes a helper to collect the stream into a byte array.
+  const bytes = await (
+    body as { transformToByteArray(): Promise<Uint8Array> }
+  ).transformToByteArray();
+  return Buffer.from(bytes);
+}
+
 /** Whether an object already exists (content-addressed dedup check). */
 export async function objectExists(key: string): Promise<boolean> {
   try {

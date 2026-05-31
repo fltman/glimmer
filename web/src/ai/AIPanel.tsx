@@ -20,7 +20,9 @@ import { EditSection } from "./sections/EditSection";
 import { HarmonizeSection } from "./harmonize/HarmonizeSection";
 import { RelightSection } from "./sections/RelightSection";
 import { ColorMatchSection } from "./sections/ColorMatchSection";
+import { ReflectionSection } from "./sections/ReflectionSection";
 import { CutoutSection } from "./sections/CutoutSection";
+import { DistractionsSection } from "./distractions/DistractionsSection";
 import { ExpandSection } from "./sections/ExpandSection";
 import { UpscaleSection } from "./sections/UpscaleSection";
 import { PresetsSection } from "./presets/PresetsSection";
@@ -32,7 +34,9 @@ type TabId =
   | "harmonize"
   | "relight"
   | "colormatch"
+  | "reflection"
   | "cutout"
+  | "distractions"
   | "expand"
   | "upscale"
   | "presets";
@@ -44,7 +48,9 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "harmonize", label: "Harmonize" },
   { id: "relight", label: "Relight" },
   { id: "colormatch", label: "Color Match" },
+  { id: "reflection", label: "Reflections" },
   { id: "cutout", label: "Cutout" },
+  { id: "distractions", label: "Cleanup" },
   { id: "expand", label: "Expand" },
   { id: "upscale", label: "Upscale" },
   { id: "presets", label: "Presets" },
@@ -86,7 +92,9 @@ export function AIPanel() {
           {tab === "harmonize" && <HarmonizeSection />}
           {tab === "relight" && <RelightSection />}
           {tab === "colormatch" && <ColorMatchSection />}
+          {tab === "reflection" && <ReflectionSection />}
           {tab === "cutout" && <CutoutSection />}
+          {tab === "distractions" && <DistractionsSection />}
           {tab === "expand" && <ExpandSection />}
           {tab === "upscale" && <UpscaleSection />}
           {tab === "presets" && <PresetsSection />}

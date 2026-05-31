@@ -2,7 +2,7 @@
 
 Queues (mirrors the routing in the plan):
   - fast  : quick ops (segment, remove_background fallback, echo, color_match local grade)
-  - gen   : generative model calls (text_to_image, image_edit, inpaint, outpaint, harmonize, relight)
+  - gen   : generative model calls (text_to_image, image_edit, inpaint, outpaint, harmonize, relight, remove_reflections)
   - heavy : long-running pixel pipelines (upscale, incl. creative-enhance pass)
 
 Tasks are registered by importing the `aips.tasks.*` modules below.
@@ -30,6 +30,7 @@ app = Celery(
         "aips.tasks.harmonize",
         "aips.tasks.relight",
         "aips.tasks.color_match",
+        "aips.tasks.remove_reflections",
     ],
 )
 
@@ -50,6 +51,7 @@ CAPABILITY_TASKS: dict[str, str] = {
     "harmonize": "aips.harmonize",
     "relight": "aips.relight",
     "color_match": "aips.color_match",
+    "remove_reflections": "aips.remove_reflections",
     # remove_background runs client-side (ONNX) via a client_directive; no task.
 }
 
@@ -62,6 +64,8 @@ CAPABILITY_QUEUES: dict[str, str] = {
     "harmonize": QUEUE_GEN,
     # relight is a generative img2img call (like image_edit/harmonize) -> gen.
     "relight": QUEUE_GEN,
+    # remove_reflections is a generative img2img edit (Gemini) -> gen.
+    "remove_reflections": QUEUE_GEN,
     "segment": QUEUE_FAST,
     "remove_background": QUEUE_FAST,
     # color_match is a pure local numpy/Pillow op (no model) -> fast queue.

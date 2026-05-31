@@ -24,15 +24,29 @@ export class OpenRouterTextError extends Error {
 /** Wall-clock budget for the planning call. */
 const REQUEST_TIMEOUT_MS = 30_000;
 
+/**
+ * A multimodal content part. Text-only messages may pass a plain string for
+ * `content`; messages that carry an image use the OpenAI-shaped parts array
+ * (`{type:"text"}` / `{type:"image_url", image_url:{url}}`). The image url is a
+ * `data:` URL (base64) so no bytes leave this process unsigned.
+ */
+export type ChatContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: string | ChatContentPart[];
 }
 
 /**
  * Call the configured text model with the given messages and return the
  * assistant's text content. Requests `response_format: json_object` so the
  * model returns parseable JSON; callers still defensively parse.
+ *
+ * Messages may be multimodal (text + image parts): the configured
+ * `OPENROUTER_TEXT_MODEL` default (google/gemini-2.5-flash) accepts images, so
+ * vision endpoints (e.g. /ai/analyze-distractions) share this transport.
  */
 export async function chatCompletion(messages: ChatMessage[]): Promise<string> {
   const baseUrl = config.openrouter.baseUrl.replace(/\/+$/, "");
