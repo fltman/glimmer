@@ -34,6 +34,8 @@ import {
   Document,
   BLEND_MODE_INDEX,
   isAdjustmentLayer,
+  isPixelLayer,
+  isTextLayer,
   type DocumentSnapshot,
   type LayerId,
   type LayerNode,
@@ -41,6 +43,10 @@ import {
   type AdjustmentLayer,
   type AdjustmentType,
   type AdjustmentParams,
+  type TextLayer,
+  type PixelLayer,
+  type TextLayerSnapshot,
+  type TextLayerPatch,
 } from "../model/Document";
 import * as m3 from "./math/mat3";
 import { Selection } from "./Selection";
@@ -53,6 +59,7 @@ import {
   selectionOpFromEvent,
   type ToolId,
   type RGBAColor,
+  type ShapeKind,
 } from "../state/tools";
 import {
   ADJUSTMENTS,
@@ -83,6 +90,48 @@ interface MaskTexEntry {
   tex: TextureHandle;
   version: number;
 }
+
+/** A document-space rectangle (top-left origin). */
+interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * The live free-transform expressed relative to the layer's base footprint:
+ * translate (doc px), independent X/Y scale, rotation (degrees, CW on screen).
+ * Identity = {dx:0,dy:0,scaleX:1,scaleY:1,rotDeg:0}.
+ */
+export interface TransformState {
+  dx: number;
+  dy: number;
+  scaleX: number;
+  scaleY: number;
+  rotDeg: number;
+}
+
+/** The eight box handles + the four rotate zones outside the corners. */
+export type TransformHandleId =
+  | "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
+
+/** What a transform drag is doing. */
+type TransformDragMode = "move" | "scale" | "rotate";
+
+/** What a crop drag is doing (which edge/corner, or move/new). */
+type CropDragMode =
+  | "new"
+  | "move"
+  | "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
+
+const IDENTITY_TRANSFORM: TransformState = {
+  dx: 0,
+  dy: 0,
+  scaleX: 1,
+  scaleY: 1,
+  rotDeg: 0,
+};
 
 export class EditorEngine {
   private canvas: HTMLCanvasElement | null = null;
@@ -156,7 +205,10 @@ export class EditorEngine {
     | { kind: "paint"; layerId: LayerId; onMask: boolean }
     | { kind: "marquee"; shape: "rect" | "ellipse"; startDoc: { x: number; y: number }; op: ReturnType<typeof selectionOpFromEvent> }
     | { kind: "lasso"; pts: number[]; op: ReturnType<typeof selectionOpFromEvent> }
-    | { kind: "gradient"; layerId: LayerId; from: { x: number; y: number }; to: { x: number; y: number } } = {
+    | { kind: "gradient"; layerId: LayerId; from: { x: number; y: number }; to: { x: number; y: number } }
+    | { kind: "transform"; mode: TransformDragMode; startDoc: { x: number; y: number }; start: TransformState; handle: TransformHandleId | null }
+    | { kind: "crop"; mode: CropDragMode; startDoc: { x: number; y: number }; startRect: Rect }
+    | { kind: "shape"; from: { x: number; y: number }; to: { x: number; y: number } } = {
     kind: "none",
   };
   /** Live gradient drag line (doc px) for a UI overlay, or null. */
@@ -165,6 +217,33 @@ export class EditorEngine {
   private spaceHeld = false;
   /** Live marquee preview rect in doc px (for overlay), or null. */
   private liveMarquee: { x0: number; y0: number; x1: number; y1: number } | null = null;
+
+  // ── free-transform session ──────────────────────────────
+  /**
+   * The live transform applied to ONE layer at render time (multiplied into its
+   * model matrix). `baseBounds` is the layer's doc-space footprint when the
+   * session began; the transform is expressed relative to that box's center.
+   * Null when no session is active.
+   */
+  private transformSession: {
+    layerId: LayerId;
+    base: TransformState;
+    /** Doc-space layer footprint at session start. */
+    baseBounds: Rect;
+  } | null = null;
+
+  // ── crop session ────────────────────────────────────────
+  /** Live crop rectangle (doc px) or null when no crop session is active. */
+  private cropSession: { rect: Rect } | null = null;
+
+  // ── text editing ────────────────────────────────────────
+  /** The text layer currently being edited via the UI overlay, or null. */
+  private textEditing: { layerId: LayerId } | null = null;
+  /** Re-rasterize cache: last version a text layer's bitmap was built for. */
+  private textRasterVersion = new Map<LayerId, number>();
+
+  /** Live shape drag (doc px) for the overlay preview, or null. */
+  private liveShape: { kind: ShapeKind; from: { x: number; y: number }; to: { x: number; y: number } } | null = null;
 
   constructor() {
     this.snapshotCache = this.doc.snapshot();
@@ -325,10 +404,13 @@ void main() { fragColor = texture(u_src, v_uv); }`,
   ): { x: number; y: number; width: number; height: number } | null {
     const l = this.doc.getLayer(id);
     if (!l) return null;
-    // Adjustment layers cover the whole document.
-    if (l.kind !== "raster") {
+    // Adjustment layers cover the whole document; pixel layers (raster + text)
+    // return their own footprint so the AI flow exports the right ROI. Text
+    // layers must be rasterized first so width/height are populated.
+    if (isAdjustmentLayer(l)) {
       return { x: 0, y: 0, width: this.doc.width, height: this.doc.height };
     }
+    if (l.kind === "text") this.ensureTextRasterized(l);
     return { x: l.x, y: l.y, width: l.width, height: l.height };
   }
 
@@ -619,16 +701,20 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     if (cached) return cached;
     const r = this.renderer;
     const layer = this.doc.getLayer(id);
-    if (!r || !layer || layer.kind !== "raster") return null; // adjustments have no pixels
+    if (!r || !layer || !isPixelLayer(layer)) return null; // adjustments have no pixels
+    // Text layers carry pixels only after rasterization.
+    if (layer.kind === "text") this.ensureTextRasterized(layer);
+    const src = layer.source;
+    if (!src) return null;
     let source: TexImageSource;
-    if (typeof ImageData !== "undefined" && layer.source instanceof ImageData) {
+    if (typeof ImageData !== "undefined" && src instanceof ImageData) {
       const cv = document.createElement("canvas");
-      cv.width = layer.source.width;
-      cv.height = layer.source.height;
-      cv.getContext("2d")!.putImageData(layer.source, 0, 0);
+      cv.width = src.width;
+      cv.height = src.height;
+      cv.getContext("2d")!.putImageData(src, 0, 0);
       source = cv;
     } else {
-      source = layer.source as ImageBitmap;
+      source = src as ImageBitmap;
     }
     const tex = r.createTextureFromSource(source, { srgb: true });
     this.textures.set(id, tex);
@@ -970,10 +1056,9 @@ void main() { fragColor = texture(u_src, v_uv); }`,
       const tex = this.resolveLayerCompositeTexture(id);
       if (!tex) continue;
 
-      const toDocPx = m3.multiply(
-        m3.translation(layer.x, layer.y),
-        m3.scaling(layer.width, layer.height),
-      );
+      // toDocPx maps the unit quad to the layer's doc-space footprint, with the
+      // live free-transform folded in for the layer under an active session.
+      const toDocPx = this.layerModelMatrix(layer);
       const transform = m3.multiply(pixToClip, m3.multiply(view, toDocPx));
 
       // The blend shader reads the backdrop and writes the FULL composited
@@ -1067,7 +1152,7 @@ void main() { fragColor = texture(u_src, v_uv); }`,
    * Paint = premultiplied source-over of the brush color; erase = reduce alpha.
    * This is a fast preview only; the authoritative pixels are produced on commit.
    */
-  private compositeBrushPreview(write: FramebufferHandle, layer: RasterLayer): void {
+  private compositeBrushPreview(write: FramebufferHandle, layer: PixelLayer): void {
     const r = this.renderer;
     const wet = this.brush?.wetBuffer;
     if (!r || !wet) return;
@@ -1234,9 +1319,72 @@ void main() {
     const doc = this.screenToDoc(local.x, local.y);
     const activeId = this.doc.getActiveLayerId();
 
+    // Double-click a text layer opens it for editing — the Photoshop affordance
+    // the type editor relies on. `e.detail >= 2` is the native dblclick count.
+    // Scoped to the Move/Type tools so it can't hijack a double-click that ends
+    // a lasso, finishes a marquee, or lands a brush dab. Skip when already
+    // editing this very layer.
+    if (e.detail >= 2 && (tool === "move" || tool === "text")) {
+      const hitText = this.hitTestTopTextLayer(doc.x, doc.y);
+      if (hitText && !(this.textEditing && this.textEditing.layerId === hitText)) {
+        this.beginEditText(hitText);
+        this.gesture = { kind: "none" };
+        return;
+      }
+    }
+
+    // Free-transform: route to the live session if one is active.
+    if (tool === "transform" && this.transformSession) {
+      const hit = this.hitTestTransform(local.x, local.y);
+      if (hit) {
+        this.gesture = {
+          kind: "transform",
+          mode: hit.mode,
+          handle: hit.handle,
+          startDoc: doc,
+          start: { ...this.transformSession.base },
+        };
+      } else {
+        // Click outside the box commits the transform (Photoshop behaviour).
+        this.commitTransform();
+        this.gesture = { kind: "none" };
+      }
+      return;
+    }
+
+    // Crop: route drags to the live crop rect.
+    if (tool === "crop") {
+      if (!this.cropSession) this.beginCrop();
+      const mode = this.hitTestCrop(local.x, local.y);
+      const startRect = mode === "new"
+        ? { x: doc.x, y: doc.y, width: 0, height: 0 }
+        : { ...this.cropSession!.rect };
+      if (mode === "new") this.cropSession!.rect = startRect;
+      this.gesture = { kind: "crop", mode, startDoc: doc, startRect };
+      this.markDirty();
+      return;
+    }
+
+    // Type tool: click creates a text layer (or opens an existing one if hit).
+    if (tool === "text") {
+      const hitText = this.hitTestTopTextLayer(doc.x, doc.y);
+      if (hitText) this.beginEditText(hitText);
+      else this.addTextLayer(doc.x, doc.y, "");
+      this.gesture = { kind: "none" };
+      return;
+    }
+
+    // Shape tool: drag to define the shape rect / line.
+    if (tool === "shape") {
+      this.gesture = { kind: "shape", from: { x: doc.x, y: doc.y }, to: { x: doc.x, y: doc.y } };
+      this.liveShape = { kind: toolStore.get().shape.kind, from: { x: doc.x, y: doc.y }, to: { x: doc.x, y: doc.y } };
+      this.markDirty();
+      return;
+    }
+
     if (tool === "move" && activeId) {
       const layer = this.doc.getLayer(activeId);
-      if (layer && layer.kind === "raster") {
+      if (layer && isPixelLayer(layer)) {
         this.gesture = {
           kind: "move",
           startX: doc.x,
@@ -1320,6 +1468,49 @@ void main() {
       return;
     }
 
+    if (g.kind === "transform" && this.transformSession) {
+      const doc = this.screenToDoc(local.x, local.y);
+      this.updateTransformDrag(g, doc, e.shiftKey);
+      this.markDirty();
+      this.emit();
+      return;
+    }
+
+    if (g.kind === "crop") {
+      const doc = this.screenToDoc(local.x, local.y);
+      this.updateCropDrag(g, doc);
+      this.markDirty();
+      this.emit();
+      return;
+    }
+
+    if (g.kind === "shape") {
+      const doc = this.screenToDoc(local.x, local.y);
+      let tx = doc.x;
+      let ty = doc.y;
+      const kind = this.liveShape?.kind ?? toolStore.get().shape.kind;
+      if (e.shiftKey) {
+        const dx = doc.x - g.from.x;
+        const dy = doc.y - g.from.y;
+        if (kind === "line") {
+          // 45° snaps.
+          const ang = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+          const len = Math.hypot(dx, dy);
+          tx = g.from.x + Math.cos(ang) * len;
+          ty = g.from.y + Math.sin(ang) * len;
+        } else {
+          // square / circle: equal extent, preserving drag direction.
+          const s = Math.max(Math.abs(dx), Math.abs(dy));
+          tx = g.from.x + Math.sign(dx || 1) * s;
+          ty = g.from.y + Math.sign(dy || 1) * s;
+        }
+      }
+      g.to = { x: tx, y: ty };
+      this.liveShape = { kind, from: g.from, to: g.to };
+      this.markDirty();
+      return;
+    }
+
     if (g.kind === "paint") {
       // Use coalesced events for smooth high-rate strokes.
       const events = e.getCoalescedEvents?.() ?? [e];
@@ -1328,9 +1519,9 @@ void main() {
         const doc = this.screenToDoc(cl.x, cl.y);
         const layer = this.doc.getLayer(g.layerId);
         if (!layer) break;
-        // Adjustment-mask painting is full-doc (origin 0,0); raster uses x/y.
-        const lx0 = layer.kind === "raster" ? layer.x : 0;
-        const ly0 = layer.kind === "raster" ? layer.y : 0;
+        // Adjustment-mask painting is full-doc (origin 0,0); pixel layers use x/y.
+        const lx0 = layer.kind === "adjustment" ? 0 : layer.x;
+        const ly0 = layer.kind === "adjustment" ? 0 : layer.y;
         const lx = doc.x - lx0;
         const ly = doc.y - ly0;
         this.brush?.stampTo(lx, ly, ce.pressure);
@@ -1384,7 +1575,7 @@ void main() {
 
     if (g.kind === "move") {
       const layer = this.doc.getLayer(g.layerId);
-      if (layer && layer.kind === "raster" && (layer.x !== g.origX || layer.y !== g.origY)) {
+      if (layer && isPixelLayer(layer) && (layer.x !== g.origX || layer.y !== g.origY)) {
         const id = g.layerId;
         const from = { x: g.origX, y: g.origY };
         const to = { x: layer.x, y: layer.y };
@@ -1440,10 +1631,45 @@ void main() {
       this.markDirty();
       return;
     }
+
+    // Transform / crop drags persist in their session (no commit on pointer-up;
+    // Enter commits, Esc cancels). Just settle the render.
+    if (g.kind === "transform" || g.kind === "crop") {
+      this.markDirty();
+      this.emit();
+      return;
+    }
+
+    if (g.kind === "shape") {
+      const live = this.liveShape;
+      this.liveShape = null;
+      if (live) this.commitShape(live.kind, live.from, live.to);
+      this.markDirty();
+      return;
+    }
   }
 
   private handleKeyDown(e: KeyboardEvent): void {
     const meta = e.metaKey || e.ctrlKey;
+
+    // Enter commits / Esc cancels an active transform or crop session. When a
+    // text editor overlay is focused, let the UI handle the keys (it'll call
+    // endEditText / commitTextLayer) — ignore here.
+    if (!this.textEditing && (this.transformSession || this.cropSession)) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (this.transformSession) this.commitTransform();
+        else if (this.cropSession) this.commitCrop();
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (this.transformSession) this.cancelTransform();
+        else if (this.cropSession) this.cancelCrop();
+        return;
+      }
+    }
+
     if (e.code === "Space") {
       this.spaceHeld = true;
       return;
@@ -1725,7 +1951,7 @@ void main() {
     for (const id of this.doc.orderBottomToTop()) {
       const layer = this.doc.getLayer(id);
       if (!layer || !layer.visible || layer.opacity <= 0) continue;
-      if (layer.kind !== "raster") continue; // adjustments don't add pixels here
+      if (!isPixelLayer(layer)) continue; // adjustments don't add pixels here
       const tex = this.resolveTexture(id);
       if (!tex) continue;
       const toDocPx = m3.multiply(
@@ -2406,6 +2632,982 @@ void main(){
     return out;
   }
 
+  // ════════════════════════════════════════════════════════
+  //  FREE TRANSFORM
+  // ════════════════════════════════════════════════════════
+  /**
+   * Doc-space model matrix mapping the unit quad to a pixel layer's footprint,
+   * folding in the live free-transform when this layer is under an active
+   * session. The transform is: translate (dx,dy), then rotate+scale about the
+   * base footprint's center.
+   */
+  private layerModelMatrix(layer: LayerNode): Float32Array {
+    const base = m3.multiply(
+      m3.translation((layer as PixelLayer).x, (layer as PixelLayer).y),
+      m3.scaling((layer as PixelLayer).width, (layer as PixelLayer).height),
+    );
+    const sess = this.transformSession;
+    if (!sess || sess.layerId !== layer.id) return base;
+    const t = sess.base;
+    const b = sess.baseBounds;
+    const cx = b.x + b.width / 2;
+    const cy = b.y + b.height / 2;
+    // M = T(dx,dy) * T(cx,cy) * R * S * T(-cx,-cy) * base
+    let m = m3.translation(t.dx, t.dy);
+    m = m3.multiply(m, m3.translation(cx, cy));
+    m = m3.multiply(m, m3.rotation((t.rotDeg * Math.PI) / 180));
+    m = m3.multiply(m, m3.scaling(t.scaleX, t.scaleY));
+    m = m3.multiply(m, m3.translation(-cx, -cy));
+    m = m3.multiply(m, base);
+    return m;
+  }
+
+  /**
+   * The four transformed corners of a layer's footprint in DOC space, applying
+   * the live transform if active. Order: NW, NE, SE, SW.
+   */
+  private transformedCornersDoc(
+    layer: PixelLayer,
+  ): { x: number; y: number }[] {
+    const sess = this.transformSession;
+    const corners = [
+      { x: 0, y: 0 },
+      { x: 1, y: 0 },
+      { x: 1, y: 1 },
+      { x: 0, y: 1 },
+    ];
+    if (sess && sess.layerId === layer.id) {
+      const t = sess.base;
+      const b = sess.baseBounds;
+      const cx = b.x + b.width / 2;
+      const cy = b.y + b.height / 2;
+      let m = m3.translation(t.dx, t.dy);
+      m = m3.multiply(m, m3.translation(cx, cy));
+      m = m3.multiply(m, m3.rotation((t.rotDeg * Math.PI) / 180));
+      m = m3.multiply(m, m3.scaling(t.scaleX, t.scaleY));
+      m = m3.multiply(m, m3.translation(-cx, -cy));
+      m = m3.multiply(m, m3.translation(layer.x, layer.y));
+      m = m3.multiply(m, m3.scaling(layer.width, layer.height));
+      return corners.map((c) => m3.transformPoint(m, c.x, c.y));
+    }
+    return corners.map((c) => ({
+      x: layer.x + c.x * layer.width,
+      y: layer.y + c.y * layer.height,
+    }));
+  }
+
+  /** Doc px -> screen (CSS px relative to canvas). Inverse of screenToDoc. */
+  private docToScreen(x: number, y: number): { x: number; y: number } {
+    return {
+      x: (x * this.view.scale + this.view.tx) / this.dpr,
+      y: (y * this.view.scale + this.view.ty) / this.dpr,
+    };
+  }
+
+  /** Top-most visible text layer whose footprint contains (docX,docY), or null. */
+  private hitTestTopTextLayer(docX: number, docY: number): LayerId | null {
+    const order = this.doc.orderBottomToTop();
+    for (let i = order.length - 1; i >= 0; i--) {
+      const l = this.doc.getLayer(order[i]!);
+      if (!l || l.kind !== "text" || !l.visible) continue;
+      this.ensureTextRasterized(l);
+      if (docX >= l.x && docX <= l.x + l.width && docY >= l.y && docY <= l.y + l.height) {
+        return l.id;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Begin a free-transform session on a layer (defaults to the active layer).
+   * Only pixel layers (raster/text) transform. No-op when one is already active
+   * on a different layer (commit/cancel first). Switches the active tool to
+   * 'transform' so pointer routing engages.
+   */
+  beginTransform(layerId?: LayerId): void {
+    const id = layerId ?? this.doc.getActiveLayerId();
+    if (!id) return;
+    const layer = this.doc.getLayer(id);
+    if (!layer || !isPixelLayer(layer)) return;
+    // Text layers must be rasterized so the footprint is known.
+    if (layer.kind === "text") this.ensureTextRasterized(layer);
+    this.transformSession = {
+      layerId: id,
+      base: { ...IDENTITY_TRANSFORM },
+      baseBounds: { x: layer.x, y: layer.y, width: layer.width, height: layer.height },
+    };
+    toolStore.setActive("transform");
+    this.markDirty();
+    this.emit();
+  }
+
+  /** Whether a free-transform session is active. */
+  isTransforming(): boolean {
+    return this.transformSession !== null;
+  }
+
+  /**
+   * Live transform state for a UI overlay. `bounds` is the screen-space AABB of
+   * the (possibly rotated) box; `handles` are the 8 box handles in screen px;
+   * `corners` are the 4 transformed corners in screen px (NW,NE,SE,SW) so the
+   * overlay can draw the rotated outline. Null when no session is active.
+   */
+  getTransformState(): {
+    layerId: LayerId;
+    bounds: { x: number; y: number; width: number; height: number };
+    corners: { x: number; y: number }[];
+    handles: { id: TransformHandleId; x: number; y: number }[];
+    rotationDeg: number;
+    /** Live transform scalars (so the option bar's W/H% fields stay accurate
+     *  during on-canvas handle drags instead of being write-only). */
+    scaleX: number;
+    scaleY: number;
+    dx: number;
+    dy: number;
+  } | null {
+    const sess = this.transformSession;
+    if (!sess) return null;
+    const layer = this.doc.getLayer(sess.layerId);
+    if (!layer || !isPixelLayer(layer)) return null;
+    const cDoc = this.transformedCornersDoc(layer);
+    const c = cDoc.map((p) => this.docToScreen(p.x, p.y));
+    const [nw, ne, se, sw] = c as [
+      { x: number; y: number },
+      { x: number; y: number },
+      { x: number; y: number },
+      { x: number; y: number },
+    ];
+    const mid = (a: { x: number; y: number }, b: { x: number; y: number }) => ({
+      x: (a.x + b.x) / 2,
+      y: (a.y + b.y) / 2,
+    });
+    const handles: { id: TransformHandleId; x: number; y: number }[] = [
+      { id: "nw", ...nw },
+      { id: "n", ...mid(nw, ne) },
+      { id: "ne", ...ne },
+      { id: "e", ...mid(ne, se) },
+      { id: "se", ...se },
+      { id: "s", ...mid(se, sw) },
+      { id: "sw", ...sw },
+      { id: "w", ...mid(sw, nw) },
+    ];
+    const minX = Math.min(nw.x, ne.x, se.x, sw.x);
+    const minY = Math.min(nw.y, ne.y, se.y, sw.y);
+    const maxX = Math.max(nw.x, ne.x, se.x, sw.x);
+    const maxY = Math.max(nw.y, ne.y, se.y, sw.y);
+    return {
+      layerId: sess.layerId,
+      bounds: { x: minX, y: minY, width: maxX - minX, height: maxY - minY },
+      corners: c,
+      handles,
+      rotationDeg: sess.base.rotDeg,
+      scaleX: sess.base.scaleX,
+      scaleY: sess.base.scaleY,
+      dx: sess.base.dx,
+      dy: sess.base.dy,
+    };
+  }
+
+  /**
+   * Hit-test a screen-space point against the transform box. Returns the drag
+   * mode + handle. Outside-but-near a corner = rotate; on a handle = scale;
+   * inside the box = move; far outside = null (no-op / commit-on-click handled
+   * by the pointer router).
+   */
+  private hitTestTransform(
+    sx: number,
+    sy: number,
+  ): { mode: TransformDragMode; handle: TransformHandleId | null } | null {
+    const st = this.getTransformState();
+    if (!st) return null;
+    const HANDLE = 9; // px hit radius for a handle
+    const ROTATE = 22; // px outside a corner that still grabs rotate
+    for (const h of st.handles) {
+      if (Math.abs(sx - h.x) <= HANDLE && Math.abs(sy - h.y) <= HANDLE) {
+        return { mode: "scale", handle: h.id };
+      }
+    }
+    // Rotate zone: just outside a corner.
+    const corners: TransformHandleId[] = ["nw", "ne", "se", "sw"];
+    for (const id of corners) {
+      const h = st.handles.find((x) => x.id === id)!;
+      const d = Math.hypot(sx - h.x, sy - h.y);
+      if (d > HANDLE && d <= HANDLE + ROTATE) return { mode: "rotate", handle: id };
+    }
+    // Inside the (rotated) quad → move. Point-in-polygon over the 4 corners.
+    if (pointInQuad(sx, sy, st.corners)) return { mode: "move", handle: null };
+    return null;
+  }
+
+  /**
+   * Apply an explicit transform delta (UI escape hatch — the pointer router uses
+   * the internal math, but the UI may call this for keyboard nudges etc.).
+   */
+  setTransform(patch: Partial<TransformState>): void {
+    const sess = this.transformSession;
+    if (!sess) return;
+    sess.base = { ...sess.base, ...patch };
+    this.markDirty();
+    this.emit();
+  }
+
+  /**
+   * Advance the live transform from a drag. `g.start` is the transform state at
+   * drag-start; `doc` is the current pointer in doc px. Move adds the doc delta;
+   * scale projects the pointer onto the box axes from the opposite handle as a
+   * fixed pivot; rotate uses the angle about the box center. Shift keeps aspect
+   * (scale) / 15° snaps (rotate).
+   */
+  private updateTransformDrag(
+    g: { mode: TransformDragMode; startDoc: { x: number; y: number }; start: TransformState; handle: TransformHandleId | null },
+    doc: { x: number; y: number },
+    shift: boolean,
+  ): void {
+    const sess = this.transformSession!;
+    const b = sess.baseBounds;
+    const dxDoc = doc.x - g.startDoc.x;
+    const dyDoc = doc.y - g.startDoc.y;
+
+    if (g.mode === "move") {
+      sess.base = { ...g.start, dx: g.start.dx + dxDoc, dy: g.start.dy + dyDoc };
+      return;
+    }
+
+    if (g.mode === "rotate") {
+      const cx = b.x + b.width / 2 + g.start.dx;
+      const cy = b.y + b.height / 2 + g.start.dy;
+      const a0 = Math.atan2(g.startDoc.y - cy, g.startDoc.x - cx);
+      const a1 = Math.atan2(doc.y - cy, doc.x - cx);
+      let deg = g.start.rotDeg + ((a1 - a0) * 180) / Math.PI;
+      if (shift) deg = Math.round(deg / 15) * 15;
+      sess.base = { ...g.start, rotDeg: deg };
+      return;
+    }
+
+    // scale: convert the doc-space drag delta into the box's UNROTATED local
+    // axes (so handles behave intuitively even when rotated), scaling about the
+    // box center. The delta along each axis grows/shrinks that dimension.
+    const rad = (g.start.rotDeg * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    // Rotate the doc delta into local (unrotated) space.
+    const localDx = dxDoc * cos + dyDoc * sin;
+    const localDy = -dxDoc * sin + dyDoc * cos;
+    const h = g.handle ?? "se";
+    const right = h.includes("e");
+    const left = h.includes("w");
+    const bottom = h.includes("s");
+    const top = h.includes("n");
+    // Scaling about the center: moving a handle by d changes the half-extent by
+    // d, i.e. the full extent by 2*d → scale factor delta = 2*d / extent.
+    let sx = g.start.scaleX;
+    let sy = g.start.scaleY;
+    const baseW = b.width || 1;
+    const baseH = b.height || 1;
+    if (right) sx = g.start.scaleX + (2 * localDx) / baseW;
+    else if (left) sx = g.start.scaleX - (2 * localDx) / baseW;
+    if (bottom) sy = g.start.scaleY + (2 * localDy) / baseH;
+    else if (top) sy = g.start.scaleY - (2 * localDy) / baseH;
+    if (shift) {
+      // Keep aspect: use the larger relative change for both axes.
+      const corner = (left || right) && (top || bottom);
+      if (corner) {
+        const f = Math.abs(sx / (g.start.scaleX || 1)) >= Math.abs(sy / (g.start.scaleY || 1))
+          ? sx / (g.start.scaleX || 1)
+          : sy / (g.start.scaleY || 1);
+        sx = g.start.scaleX * f;
+        sy = g.start.scaleY * f;
+      }
+    }
+    // Clamp to avoid collapse/flip jitter.
+    const MIN = 0.02;
+    if (Math.abs(sx) < MIN) sx = Math.sign(sx || 1) * MIN;
+    if (Math.abs(sy) < MIN) sy = Math.sign(sy || 1) * MIN;
+    sess.base = { ...g.start, scaleX: sx, scaleY: sy };
+  }
+
+  /**
+   * Commit the active transform: resample the layer's pixels through the live
+   * transform into a NEW source at the transformed bounds (GPU pass + RGBA8
+   * readback), replaceSource + reposition. ONE undo step. For text layers this
+   * also flattens them to raster pixels (the typographic params are replaced by
+   * baked pixels — a future nicety would keep them editable).
+   */
+  commitTransform(): void {
+    const sess = this.transformSession;
+    const r = this.renderer;
+    if (!sess || !r) {
+      this.transformSession = null;
+      this.markDirty();
+      this.emit();
+      return;
+    }
+    const layer = this.doc.getLayer(sess.layerId);
+    if (!layer || !isPixelLayer(layer)) {
+      this.transformSession = null;
+      this.markDirty();
+      this.emit();
+      return;
+    }
+    // Identity transform: nothing to bake.
+    const t = sess.base;
+    const identity =
+      t.dx === 0 && t.dy === 0 && t.scaleX === 1 && t.scaleY === 1 && t.rotDeg === 0;
+    if (identity) {
+      this.transformSession = null;
+      this.markDirty();
+      this.emit();
+      return;
+    }
+
+    if (layer.kind === "text") this.ensureTextRasterized(layer);
+    const tex = this.resolveTexture(layer.id);
+    if (!tex) {
+      this.transformSession = null;
+      this.markDirty();
+      this.emit();
+      return;
+    }
+
+    // New bounds = integer AABB of the transformed corners.
+    const cDoc = this.transformedCornersDoc(layer);
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of cDoc) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const nx = Math.floor(minX);
+    const ny = Math.floor(minY);
+    const nw = Math.max(1, Math.ceil(maxX) - nx);
+    const nh = Math.max(1, Math.ceil(maxY) - ny);
+
+    const gl = r.gl;
+    const target = r.createRGBA8Target(nw, nh);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+    gl.viewport(0, 0, nw, nh);
+    gl.disable(gl.BLEND);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    const prog = this.normalBlendProgram!;
+    gl.useProgram(prog);
+    // Map the transformed layer footprint (doc px) into the new target's clip,
+    // offsetting by the new origin so the AABB maps to [0,nw]x[0,nh].
+    const pixToClip = m3.pixelToClip(nw, nh);
+    const docModel = this.layerModelMatrix(layer); // unit quad -> doc px (with xform)
+    const offset = m3.translation(-nx, -ny);
+    const transform = m3.multiply(pixToClip, m3.multiply(offset, docModel));
+    gl.uniformMatrix3fv(gl.getUniformLocation(prog, "u_transform"), false, transform);
+    gl.uniform1f(gl.getUniformLocation(prog, "u_opacity"), 1);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_tex"), 0);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_srgbSource"), tex.srgb ? 0 : 1);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex.tex);
+    r.drawQuad();
+
+    const rawLinear = r.readPixels(target, 0, 0, nw, nh);
+    r.deleteFramebuffer(target);
+    // normalBlendProgram outputs premultiplied LINEAR into an RGBA8 target; the
+    // layer sources are straight sRGB. Un-premultiply + sRGB-encode to match.
+    const out = new Uint8ClampedArray(nw * nh * 4);
+    for (let y = 0; y < nh; y++) {
+      const srcRow = (nh - 1 - y) * nw * 4; // GL readback is bottom-up
+      const dstRow = y * nw * 4;
+      for (let x = 0; x < nw * 4; x += 4) {
+        const a = (rawLinear[srcRow + x + 3] ?? 0) / 255;
+        const inv = a > 1e-4 ? 1 / a : 0;
+        for (let ch = 0; ch < 3; ch++) {
+          const lin = ((rawLinear[srcRow + x + ch] ?? 0) / 255) * inv;
+          out[dstRow + x + ch] = Math.round(linearToSrgb(lin) * 255);
+        }
+        out[dstRow + x + 3] = rawLinear[srcRow + x + 3] ?? 0;
+      }
+    }
+    const newSource = new ImageData(out, nw, nh);
+
+    const id = layer.id;
+    const wasText = layer.kind === "text";
+    const prevTextParams = wasText ? this.doc.getTextLayerParams(id) : null;
+    const prevSource = (layer as PixelLayer).source;
+    const prevPos = { x: layer.x, y: layer.y };
+    const prevW = layer.width;
+    const prevH = layer.height;
+
+    const apply = () => {
+      if (wasText) this.convertTextToRaster(id, newSource, nx, ny);
+      else {
+        this.doc.replaceSource(id, newSource);
+        this.doc.setPosition(id, nx, ny);
+      }
+      this.textures.delete(id);
+    };
+    const revert = () => {
+      if (wasText && prevTextParams) {
+        // Re-create the text layer in place (revert raster→text).
+        this.restoreTextLayer(id, prevTextParams, prevSource, prevPos, prevW, prevH);
+      } else if (prevSource) {
+        this.doc.replaceSource(id, prevSource);
+        this.doc.setPosition(id, prevPos.x, prevPos.y);
+      }
+      this.textures.delete(id);
+    };
+
+    this.transformSession = null;
+    apply();
+    this.history.push({
+      label: "Free Transform",
+      bytes: nw * nh * 4,
+      undo: revert,
+      redo: apply,
+    });
+    this.markDirty();
+    this.emit();
+  }
+
+  /** Discard the active transform session (revert to the layer's original). */
+  cancelTransform(): void {
+    if (!this.transformSession) return;
+    this.transformSession = null;
+    this.markDirty();
+    this.emit();
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  CROP
+  // ════════════════════════════════════════════════════════
+  /**
+   * Begin a crop session. The initial rect defaults to the whole document; the
+   * user drags edges/corners (engine math) and the overlay draws the rect +
+   * rule-of-thirds. Switches the active tool to 'crop'.
+   */
+  beginCrop(): void {
+    this.cropSession = {
+      rect: { x: 0, y: 0, width: this.doc.width, height: this.doc.height },
+    };
+    toolStore.setActive("crop");
+    this.markDirty();
+    this.emit();
+  }
+
+  /** Whether a crop session is active. */
+  isCropping(): boolean {
+    return this.cropSession !== null;
+  }
+
+  /**
+   * Crop state for the UI overlay: the rect in SCREEN px (so the overlay can
+   * draw it + rule-of-thirds lines + the darkened outside region). Null when no
+   * session is active.
+   */
+  getCropState(): {
+    rect: { x: number; y: number; width: number; height: number };
+    docRect: Rect;
+  } | null {
+    const cs = this.cropSession;
+    if (!cs) return null;
+    const tl = this.docToScreen(cs.rect.x, cs.rect.y);
+    const br = this.docToScreen(cs.rect.x + cs.rect.width, cs.rect.y + cs.rect.height);
+    return {
+      rect: { x: tl.x, y: tl.y, width: br.x - tl.x, height: br.y - tl.y },
+      docRect: { ...cs.rect },
+    };
+  }
+
+  /** Hit-test a screen point against the crop rect; returns the drag mode. */
+  private hitTestCrop(sx: number, sy: number): CropDragMode {
+    const cs = this.cropSession;
+    if (!cs) return "new";
+    const tl = this.docToScreen(cs.rect.x, cs.rect.y);
+    const br = this.docToScreen(cs.rect.x + cs.rect.width, cs.rect.y + cs.rect.height);
+    const E = 8;
+    const nearL = Math.abs(sx - tl.x) <= E;
+    const nearR = Math.abs(sx - br.x) <= E;
+    const nearT = Math.abs(sy - tl.y) <= E;
+    const nearB = Math.abs(sy - br.y) <= E;
+    const insideX = sx >= tl.x - E && sx <= br.x + E;
+    const insideY = sy >= tl.y - E && sy <= br.y + E;
+    if (insideX && insideY) {
+      if (nearT && nearL) return "nw";
+      if (nearT && nearR) return "ne";
+      if (nearB && nearL) return "sw";
+      if (nearB && nearR) return "se";
+      if (nearT) return "n";
+      if (nearB) return "s";
+      if (nearL) return "w";
+      if (nearR) return "e";
+      if (sx > tl.x && sx < br.x && sy > tl.y && sy < br.y) return "move";
+    }
+    return "new";
+  }
+
+  /** Advance the live crop rect from a drag (doc px). */
+  private updateCropDrag(
+    g: { mode: CropDragMode; startDoc: { x: number; y: number }; startRect: Rect },
+    doc: { x: number; y: number },
+  ): void {
+    const cs = this.cropSession;
+    if (!cs) return;
+    const dx = doc.x - g.startDoc.x;
+    const dy = doc.y - g.startDoc.y;
+    const s = g.startRect;
+    let x0 = s.x;
+    let y0 = s.y;
+    let x1 = s.x + s.width;
+    let y1 = s.y + s.height;
+
+    if (g.mode === "new") {
+      x0 = Math.min(g.startDoc.x, doc.x);
+      y0 = Math.min(g.startDoc.y, doc.y);
+      x1 = Math.max(g.startDoc.x, doc.x);
+      y1 = Math.max(g.startDoc.y, doc.y);
+    } else if (g.mode === "move") {
+      x0 += dx; x1 += dx; y0 += dy; y1 += dy;
+    } else {
+      if (g.mode.includes("w")) x0 = s.x + dx;
+      if (g.mode.includes("e")) x1 = s.x + s.width + dx;
+      if (g.mode.includes("n")) y0 = s.y + dy;
+      if (g.mode.includes("s")) y1 = s.y + s.height + dy;
+    }
+    // Normalize (allow dragging an edge past the opposite one).
+    const nx0 = Math.min(x0, x1);
+    const ny0 = Math.min(y0, y1);
+    const nx1 = Math.max(x0, x1);
+    const ny1 = Math.max(y0, y1);
+    cs.rect = { x: nx0, y: ny0, width: Math.max(1, nx1 - nx0), height: Math.max(1, ny1 - ny0) };
+  }
+
+  /**
+   * Commit the crop: resize the document to the crop rect, offset ALL layers by
+   * (-rect.x, -rect.y), resize the selection buffer. ONE undo step (restores the
+   * doc size + every layer's position). Adjustment layers cover the doc so they
+   * need no offset.
+   */
+  commitCrop(): void {
+    const cs = this.cropSession;
+    if (!cs) return;
+    const rect = {
+      x: Math.round(cs.rect.x),
+      y: Math.round(cs.rect.y),
+      width: Math.max(1, Math.round(cs.rect.width)),
+      height: Math.max(1, Math.round(cs.rect.height)),
+    };
+    this.cropSession = null;
+
+    const prevW = this.doc.width;
+    const prevH = this.doc.height;
+    // Snapshot every pixel layer's position for undo.
+    const prevPositions: { id: LayerId; x: number; y: number }[] = [];
+    for (const id of this.doc.orderBottomToTop()) {
+      const l = this.doc.getLayer(id);
+      if (l && isPixelLayer(l)) prevPositions.push({ id, x: l.x, y: l.y });
+    }
+    // Adjustment-layer masks are full-document, so they must be cropped to the
+    // new doc bounds too (raster/text masks are layer-local and ride along with
+    // their layer's offset). Snapshot the old + new buffers for one undo step.
+    const adjMaskEdits: {
+      id: LayerId;
+      prev: { data: Uint8Array; w: number; h: number };
+      next: { data: Uint8Array; w: number; h: number };
+    }[] = [];
+    for (const id of this.doc.orderBottomToTop()) {
+      const l = this.doc.getLayer(id);
+      if (l && l.kind === "adjustment" && l.mask) {
+        const prev = { data: l.mask.data.slice(), w: l.mask.width, h: l.mask.height };
+        const next = {
+          data: cropMaskBuffer(prev.data, prev.w, prev.h, rect),
+          w: rect.width,
+          h: rect.height,
+        };
+        adjMaskEdits.push({ id, prev, next });
+      }
+    }
+    const setMask = (id: LayerId, m: { data: Uint8Array; w: number; h: number }) => {
+      const l = this.doc.getLayer(id);
+      if (l?.mask) {
+        l.mask.data = m.data.slice();
+        l.mask.width = m.w;
+        l.mask.height = m.h;
+        l.mask.version += 1;
+        this.maskTextures.delete(id);
+      }
+    };
+
+    const apply = () => {
+      this.doc.width = rect.width;
+      this.doc.height = rect.height;
+      for (const p of prevPositions) {
+        const l = this.doc.getLayer(p.id);
+        if (l && isPixelLayer(l)) this.doc.setPosition(p.id, p.x - rect.x, p.y - rect.y);
+      }
+      for (const e of adjMaskEdits) setMask(e.id, e.next);
+      this.selection?.resize(rect.width, rect.height);
+      this.snapshotCache = this.doc.snapshot();
+      this.markDirty();
+      this.emit();
+    };
+    const revert = () => {
+      this.doc.width = prevW;
+      this.doc.height = prevH;
+      for (const p of prevPositions) {
+        const l = this.doc.getLayer(p.id);
+        if (l && isPixelLayer(l)) this.doc.setPosition(p.id, p.x, p.y);
+      }
+      for (const e of adjMaskEdits) setMask(e.id, e.prev);
+      this.selection?.resize(prevW, prevH);
+      this.snapshotCache = this.doc.snapshot();
+      this.markDirty();
+      this.emit();
+    };
+
+    apply();
+    this.history.push({
+      label: "Crop",
+      bytes: 0,
+      undo: revert,
+      redo: apply,
+    });
+  }
+
+  /** Discard the active crop session. */
+  cancelCrop(): void {
+    if (!this.cropSession) return;
+    this.cropSession = null;
+    this.markDirty();
+    this.emit();
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  TEXT / TYPE LAYERS
+  // ════════════════════════════════════════════════════════
+  /**
+   * Create a text layer at a document point and select it for editing. Returns
+   * the new layer id. The UI watches getActiveTextEditing() to open an overlay
+   * <textarea>. One undo step (layer add).
+   */
+  addTextLayer(atDocX: number, atDocY: number, initialText = ""): LayerId {
+    const ts = toolStore.get().text;
+    const fg = toolStore.get().foreground;
+    const id = this.doc.addTextLayer(atDocX, atDocY, {
+      text: initialText,
+      fontFamily: ts.fontFamily,
+      fontSize: ts.fontSize,
+      color: ts.color ?? { ...fg },
+      align: ts.align,
+      bold: ts.bold,
+      italic: ts.italic,
+      lineHeight: ts.lineHeight,
+    });
+    this.history.push(
+      paramCommand(
+        "Add text layer",
+        () => {},
+        () => this.doc.remove(id),
+      ),
+    );
+    this.textEditing = { layerId: id };
+    this.markDirty();
+    this.emit();
+    return id;
+  }
+
+  /**
+   * Live-update a text layer's typographic params (re-rasterizes on next render
+   * via the version bump). No per-keystroke undo; the caller records one step on
+   * blur/commit via commitTextLayer.
+   */
+  updateTextLayer(id: LayerId, patch: TextLayerPatch): void {
+    this.doc.updateTextLayer(id, patch);
+    this.textures.delete(id); // drop stale GPU texture
+    this.markDirty();
+  }
+
+  /** Record a single undo step for a text edit (prev/next full param sets). */
+  commitTextLayer(id: LayerId, prev: TextLayerSnapshot, next: TextLayerSnapshot): void {
+    const before = { ...prev, color: { ...prev.color } };
+    const after = { ...next, color: { ...next.color } };
+    this.doc.setTextLayerParams(id, after);
+    this.textures.delete(id);
+    this.history.push(
+      paramCommand(
+        "Edit text",
+        () => {
+          this.doc.setTextLayerParams(id, { ...after, color: { ...after.color } });
+          this.textures.delete(id);
+        },
+        () => {
+          this.doc.setTextLayerParams(id, { ...before, color: { ...before.color } });
+          this.textures.delete(id);
+        },
+      ),
+    );
+    this.markDirty();
+    this.emit();
+  }
+
+  /**
+   * The text layer currently being edited (after creating/clicking with the type
+   * tool), with its screen-space placement so the UI can position an overlay
+   * <textarea>. Null when not editing.
+   */
+  getActiveTextEditing(): {
+    layerId: LayerId;
+    screenRect: { x: number; y: number; width: number; height: number };
+    text: string;
+    fontFamily: string;
+    fontSize: number;
+    color: RGBAColor;
+    align: "left" | "center" | "right";
+    bold: boolean;
+    italic: boolean;
+    lineHeight: number;
+  } | null {
+    const te = this.textEditing;
+    if (!te) return null;
+    const layer = this.doc.getLayer(te.layerId);
+    if (!layer || layer.kind !== "text") {
+      this.textEditing = null;
+      return null;
+    }
+    this.ensureTextRasterized(layer);
+    const tl = this.docToScreen(layer.x, layer.y);
+    const scale = this.view.scale / this.dpr;
+    return {
+      layerId: layer.id,
+      screenRect: {
+        x: tl.x,
+        y: tl.y,
+        width: Math.max(40, layer.width * scale),
+        height: Math.max(layer.fontSize * layer.lineHeight, layer.height) * scale,
+      },
+      text: layer.text,
+      fontFamily: layer.fontFamily,
+      fontSize: layer.fontSize,
+      color: { ...layer.color },
+      align: layer.align,
+      bold: layer.bold,
+      italic: layer.italic,
+      lineHeight: layer.lineHeight,
+    };
+  }
+
+  /** Open the type editor for an existing text layer (double-click flow). */
+  beginEditText(id: LayerId): void {
+    const layer = this.doc.getLayer(id);
+    if (!layer || layer.kind !== "text") return;
+    this.doc.setActive(id);
+    this.textEditing = { layerId: id };
+    toolStore.setActive("text");
+    this.markDirty();
+    this.emit();
+  }
+
+  /** Close the type editor (UI calls on blur / Esc / Enter-commit). */
+  endEditText(): void {
+    if (!this.textEditing) return;
+    this.textEditing = null;
+    this.markDirty();
+    this.emit();
+  }
+
+  /**
+   * Rasterize a text layer to an ImageData via an Offscreen/HTML 2D canvas when
+   * its version changed since the last raster. Measures the text, sizes the
+   * bitmap, draws each line with font/size/color/align/lineHeight, and stores it
+   * back on the layer (source + width/height; x stays anchored, but the bitmap
+   * may extend left for centered/right text — we keep x at the layer origin and
+   * draw within [0,width]).
+   */
+  private ensureTextRasterized(layer: TextLayer): void {
+    const last = this.textRasterVersion.get(layer.id);
+    if (last === layer.version && layer.source) return;
+
+    const fontStyle = `${layer.italic ? "italic " : ""}${layer.bold ? "700 " : "400 "}${layer.fontSize}px ${layer.fontFamily}`;
+    const lineH = Math.max(1, Math.round(layer.fontSize * layer.lineHeight));
+    const lines = (layer.text.length ? layer.text : " ").split("\n");
+
+    // Measure on a scratch context.
+    const measureCv = makeCanvas(8, 8);
+    const mctx = get2d(measureCv);
+    mctx.font = fontStyle;
+    let maxW = 1;
+    for (const ln of lines) {
+      const w = mctx.measureText(ln.length ? ln : " ").width;
+      if (w > maxW) maxW = w;
+    }
+    // Pad for descenders / italic overhang.
+    const padX = Math.ceil(layer.fontSize * 0.25);
+    const padY = Math.ceil(layer.fontSize * 0.3);
+    const W = Math.max(1, Math.ceil(maxW) + padX * 2);
+    const H = Math.max(1, lines.length * lineH + padY * 2);
+
+    const cv = makeCanvas(W, H);
+    const ctx = get2d(cv);
+    ctx.clearRect(0, 0, W, H);
+    ctx.font = fontStyle;
+    ctx.textBaseline = "alphabetic";
+    ctx.textAlign = layer.align;
+    const col = layer.color;
+    ctx.fillStyle = `rgba(${Math.round(col.r * 255)},${Math.round(col.g * 255)},${Math.round(col.b * 255)},${col.a})`;
+    let anchorX = padX;
+    if (layer.align === "center") anchorX = W / 2;
+    else if (layer.align === "right") anchorX = W - padX;
+    // Baseline of line i: padY + ascent + i*lineH. Approximate ascent ~0.8em.
+    const ascent = layer.fontSize * 0.8;
+    for (let i = 0; i < lines.length; i++) {
+      const baseY = padY + ascent + i * lineH;
+      ctx.fillText(lines[i] ?? "", anchorX, baseY);
+    }
+
+    const img = ctx.getImageData(0, 0, W, H);
+    const source = new ImageData(
+      new Uint8ClampedArray(img.data),
+      W,
+      H,
+    );
+    this.doc.setTextRaster(layer.id, source, layer.x, layer.y);
+    this.textRasterVersion.set(layer.id, layer.version);
+    this.textures.delete(layer.id);
+  }
+
+  /** Convert a text layer to a plain raster layer in place (transform-commit). */
+  private convertTextToRaster(
+    id: LayerId,
+    source: ImageData,
+    x: number,
+    y: number,
+  ): void {
+    // Remove the text layer, recreate a raster layer with the same id slot is
+    // not possible (ids are generated); instead we mutate via Document by
+    // replacing the node. Document has no "convert" op, so we remove + re-add
+    // would change id. To keep id stable + undo simple, store the baked source
+    // ON the text layer and flip a flag — but the model has no such flag.
+    // Simplest coherent approach: keep it a text layer but stamp the baked
+    // pixels as its source and clear the text so re-rasterize is a no-op.
+    // However that loses blendMode/opacity continuity. Instead: replace the
+    // node wholesale through a dedicated Document path.
+    this.doc.bakeTextToRaster(id, source, x, y);
+    this.textRasterVersion.delete(id);
+    this.textures.delete(id);
+  }
+
+  /** Restore a baked-raster layer back to a text layer (transform undo). */
+  private restoreTextLayer(
+    id: LayerId,
+    params: TextLayerSnapshot,
+    _prevSource: ImageBitmap | ImageData | undefined,
+    pos: { x: number; y: number },
+    _w: number,
+    _h: number,
+  ): void {
+    this.doc.unbakeTextFromRaster(id, params, pos.x, pos.y);
+    this.textRasterVersion.delete(id);
+    this.textures.delete(id);
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  SHAPE TOOL
+  // ════════════════════════════════════════════════════════
+  /** Live shape drag (doc px) for the overlay preview, or null. */
+  getLiveShape(): { kind: ShapeKind; from: { x: number; y: number }; to: { x: number; y: number } } | null {
+    return this.gesture.kind === "shape" ? this.liveShape : null;
+  }
+
+  /**
+   * Rasterize a shape (rect/ellipse/line) defined by two doc-space points into a
+   * NEW raster layer, filled with the shape fill (or foreground) + optional
+   * stroke. ONE undo step (the layer add). Returns the new layer id, or null for
+   * a degenerate drag.
+   */
+  commitShape(
+    kind: ShapeKind,
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+  ): LayerId | null {
+    const ts = toolStore.get();
+    const fill = ts.shape.fill ?? ts.foreground;
+    const stroke = ts.shape.stroke;
+    const strokeW = Math.max(0, stroke.width);
+
+    // Bitmap bounds = AABB of the drag, padded for the stroke. For a line the
+    // "fill" is the stroke (use a sensible default width when 0).
+    const lineW = kind === "line" ? Math.max(1, strokeW || Math.max(2, ts.brush.size * 0.1)) : strokeW;
+    const pad = Math.ceil((kind === "line" ? lineW : strokeW) / 2) + 1;
+    const minX = Math.min(from.x, to.x) - pad;
+    const minY = Math.min(from.y, to.y) - pad;
+    const maxX = Math.max(from.x, to.x) + pad;
+    const maxY = Math.max(from.y, to.y) + pad;
+    const ox = Math.floor(minX);
+    const oy = Math.floor(minY);
+    const W = Math.max(1, Math.ceil(maxX) - ox);
+    const H = Math.max(1, Math.ceil(maxY) - oy);
+    if (W < 1 || H < 1) return null;
+    if (kind !== "line" && (Math.abs(to.x - from.x) < 1 || Math.abs(to.y - from.y) < 1)) {
+      return null;
+    }
+    if (kind === "line" && Math.hypot(to.x - from.x, to.y - from.y) < 1) return null;
+
+    const cv = makeCanvas(W, H);
+    const ctx = get2d(cv);
+    ctx.clearRect(0, 0, W, H);
+    const css = (c: RGBAColor) =>
+      `rgba(${Math.round(c.r * 255)},${Math.round(c.g * 255)},${Math.round(c.b * 255)},${c.a})`;
+    // Local coords: doc - origin.
+    const lx = (x: number) => x - ox;
+    const ly = (y: number) => y - oy;
+
+    if (kind === "rect") {
+      const x0 = lx(Math.min(from.x, to.x));
+      const y0 = ly(Math.min(from.y, to.y));
+      const w = Math.abs(to.x - from.x);
+      const h = Math.abs(to.y - from.y);
+      ctx.fillStyle = css(fill);
+      ctx.fillRect(x0, y0, w, h);
+      if (strokeW > 0) {
+        ctx.lineWidth = strokeW;
+        ctx.strokeStyle = css(stroke.color);
+        ctx.strokeRect(x0, y0, w, h);
+      }
+    } else if (kind === "ellipse") {
+      const cx = lx((from.x + to.x) / 2);
+      const cy = ly((from.y + to.y) / 2);
+      const rx = Math.abs(to.x - from.x) / 2;
+      const ry = Math.abs(to.y - from.y) / 2;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, Math.max(0.5, rx), Math.max(0.5, ry), 0, 0, Math.PI * 2);
+      ctx.fillStyle = css(fill);
+      ctx.fill();
+      if (strokeW > 0) {
+        ctx.lineWidth = strokeW;
+        ctx.strokeStyle = css(stroke.color);
+        ctx.stroke();
+      }
+    } else {
+      // line: stroke from→to with the stroke color (fallback to fill color).
+      ctx.beginPath();
+      ctx.moveTo(lx(from.x), ly(from.y));
+      ctx.lineTo(lx(to.x), ly(to.y));
+      ctx.lineCap = "round";
+      ctx.lineWidth = lineW;
+      ctx.strokeStyle = css(strokeW > 0 ? stroke.color : fill);
+      ctx.stroke();
+    }
+
+    const img = ctx.getImageData(0, 0, W, H);
+    const source = new ImageData(new Uint8ClampedArray(img.data), W, H);
+    const id = this.doc.addRasterLayer(source, "Shape", { x: ox, y: oy });
+    this.history.push(
+      paramCommand(
+        "Add shape",
+        () => {},
+        () => this.doc.remove(id),
+      ),
+    );
+    this.markDirty();
+    this.emit();
+    return id;
+  }
+
   // ── export support (used by export.ts; unchanged surface) ──
   getRenderer(): WebGL2Renderer | null {
     return this.renderer;
@@ -2421,6 +3623,72 @@ void main(){
 }
 
 // ── module-level helpers ──────────────────────────────────
+/** Create a 2D drawing surface (OffscreenCanvas when available, else <canvas>). */
+function makeCanvas(w: number, h: number): OffscreenCanvas | HTMLCanvasElement {
+  if (typeof OffscreenCanvas !== "undefined") return new OffscreenCanvas(w, h);
+  const cv = document.createElement("canvas");
+  cv.width = w;
+  cv.height = h;
+  return cv;
+}
+
+/** Get a 2D context (sRGB) from a canvas built by makeCanvas. */
+function get2d(
+  cv: OffscreenCanvas | HTMLCanvasElement,
+): CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D {
+  const ctx = cv.getContext("2d", { colorSpace: "srgb" }) as
+    | CanvasRenderingContext2D
+    | OffscreenCanvasRenderingContext2D
+    | null;
+  if (!ctx) throw new Error("2D context unavailable");
+  return ctx;
+}
+
+/**
+ * Crop a full-document R8 mask buffer (row-major, top-down, row 0 = doc top) to
+ * a new rect. Pixels outside the old buffer default to 0 (hidden), matching the
+ * convention that an unspecified mask region is masked out.
+ */
+function cropMaskBuffer(
+  src: Uint8Array,
+  srcW: number,
+  srcH: number,
+  rect: { x: number; y: number; width: number; height: number },
+): Uint8Array {
+  const out = new Uint8Array(rect.width * rect.height); // default 0
+  for (let y = 0; y < rect.height; y++) {
+    const sy = rect.y + y;
+    if (sy < 0 || sy >= srcH) continue;
+    for (let x = 0; x < rect.width; x++) {
+      const sx = rect.x + x;
+      if (sx < 0 || sx >= srcW) continue;
+      out[y * rect.width + x] = src[sy * srcW + sx] ?? 0;
+    }
+  }
+  return out;
+}
+
+/** Point-in-(convex)-quad test for the 4 transform corners (NW,NE,SE,SW). */
+function pointInQuad(
+  px: number,
+  py: number,
+  pts: { x: number; y: number }[],
+): boolean {
+  if (pts.length < 4) return false;
+  let sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = pts[i]!;
+    const b = pts[(i + 1) % 4]!;
+    const cross = (b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x);
+    const s = cross > 0 ? 1 : cross < 0 ? -1 : 0;
+    if (s !== 0) {
+      if (sign === 0) sign = s;
+      else if (s !== sign) return false;
+    }
+  }
+  return true;
+}
+
 function linearToSrgb(c: number): number {
   if (c <= 0.0031308) return c * 12.92;
   return 1.055 * Math.pow(c, 1 / 2.4) - 0.055;

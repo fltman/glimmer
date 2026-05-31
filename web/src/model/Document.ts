@@ -79,7 +79,10 @@ export const BLEND_MODE_LABELS: { mode: BlendMode; label: string }[] = [
   { mode: "luminosity", label: "Luminosity" },
 ];
 
-export type LayerKind = "raster" | "adjustment";
+export type LayerKind = "raster" | "adjustment" | "text";
+
+/** Horizontal text alignment for a text layer. */
+export type TextAlign = "left" | "center" | "right";
 
 /** Re-exported from the adjustment registry (kept loose to avoid a cycle). */
 export type AdjustmentType =
@@ -155,7 +158,60 @@ export interface AdjustmentLayer {
   clipping?: boolean;
 }
 
-export type LayerNode = RasterLayer | AdjustmentLayer;
+/**
+ * A straight (non-premultiplied) sRGB color, components 0..1. Structurally
+ * identical to `RGBAColor` in state/tools.ts; redeclared here so the model layer
+ * does not depend on the state layer (keeps the dependency direction one-way).
+ */
+export interface TextColor {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}
+
+/**
+ * A type (text) layer. Its `text` + typographic params are authoritative; the
+ * engine rasterizes them to a CPU `source` bitmap (cached by `version`) and to a
+ * GPU texture for compositing. `width`/`height`/`source` mirror RasterLayer so
+ * the compositor treats a text layer exactly like a positioned raster quad once
+ * rasterized. `x`/`y` are the top-left of the rasterized bitmap in doc space.
+ */
+export interface TextLayer {
+  id: LayerId;
+  kind: "text";
+  name: string;
+  visible: boolean;
+  opacity: number; // 0..1
+  blendMode: BlendMode;
+  mask?: LayerMask;
+  /** Top-left of the rasterized text bitmap in document space. */
+  x: number;
+  y: number;
+  /** Rasterized bitmap dimensions (filled in on first rasterize). */
+  width: number;
+  height: number;
+  /** Rasterized pixels — set by the engine; undefined until first rasterize. */
+  source?: ImageBitmap | ImageData;
+  /** Bumped whenever any typographic param changes (engine re-rasterizes). */
+  version: number;
+
+  // ── typographic params ──
+  text: string;
+  fontFamily: string;
+  fontSize: number; // px in document space
+  color: TextColor; // straight sRGB 0..1
+  align: TextAlign;
+  bold: boolean;
+  italic: boolean;
+  /** Multiplier on fontSize for line spacing (e.g. 1.2). */
+  lineHeight: number;
+}
+
+export type LayerNode = RasterLayer | AdjustmentLayer | TextLayer;
+
+/** Layers that carry positioned pixels in the compositor (raster + text). */
+export type PixelLayer = RasterLayer | TextLayer;
 
 /** Narrowing helpers. */
 export function isRasterLayer(n: LayerNode): n is RasterLayer {
@@ -163,6 +219,13 @@ export function isRasterLayer(n: LayerNode): n is RasterLayer {
 }
 export function isAdjustmentLayer(n: LayerNode): n is AdjustmentLayer {
   return n.kind === "adjustment";
+}
+export function isTextLayer(n: LayerNode): n is TextLayer {
+  return n.kind === "text";
+}
+/** True for layers with a positioned bitmap source (raster OR text). */
+export function isPixelLayer(n: LayerNode): n is PixelLayer {
+  return n.kind === "raster" || n.kind === "text";
 }
 
 /** Lightweight snapshot for React (no pixel sources, no GL). */
@@ -182,6 +245,20 @@ export interface LayerSnapshot {
   adjustmentType?: AdjustmentType;
   params?: AdjustmentParams;
   clipping?: boolean;
+  /** Text layers only: the live typographic params (so panels can edit them). */
+  text?: TextLayerSnapshot;
+}
+
+/** Serializable copy of a text layer's typographic params (for React). */
+export interface TextLayerSnapshot {
+  text: string;
+  fontFamily: string;
+  fontSize: number;
+  color: TextColor;
+  align: TextAlign;
+  bold: boolean;
+  italic: boolean;
+  lineHeight: number;
 }
 
 export interface DocumentSnapshot {
@@ -218,6 +295,39 @@ const ADJUSTMENT_NAMES: Record<AdjustmentType, string> = {
 };
 function defaultAdjustmentName(type: AdjustmentType): string {
   return ADJUSTMENT_NAMES[type] ?? "Adjustment";
+}
+
+/** A layer name derived from a text layer's content (first line, trimmed). */
+function deriveTextName(text: string): string {
+  const firstLine = (text.split("\n")[0] ?? "").trim();
+  if (!firstLine) return "Text";
+  return firstLine.length > 28 ? firstLine.slice(0, 28) + "…" : firstLine;
+}
+
+/** Serializable copy of a text layer's typographic params. */
+function textSnapshot(n: TextLayer): TextLayerSnapshot {
+  return {
+    text: n.text,
+    fontFamily: n.fontFamily,
+    fontSize: n.fontSize,
+    color: { ...n.color },
+    align: n.align,
+    bold: n.bold,
+    italic: n.italic,
+    lineHeight: n.lineHeight,
+  };
+}
+
+/** Patch shape accepted when updating a text layer's typographic params. */
+export interface TextLayerPatch {
+  text?: string;
+  fontFamily?: string;
+  fontSize?: number;
+  color?: TextColor;
+  align?: TextAlign;
+  bold?: boolean;
+  italic?: boolean;
+  lineHeight?: number;
 }
 
 export class Document {
@@ -264,6 +374,7 @@ export class Document {
       const n = this.nodes.get(this.order[i]!);
       if (!n) continue;
       const isAdj = n.kind === "adjustment";
+      const isText = n.kind === "text";
       layers.push({
         id: n.id,
         kind: n.kind,
@@ -271,14 +382,15 @@ export class Document {
         visible: n.visible,
         opacity: n.opacity,
         blendMode: n.blendMode,
-        width: isAdj ? this.width : (n as RasterLayer).width,
-        height: isAdj ? this.height : (n as RasterLayer).height,
+        width: isAdj ? this.width : (n as PixelLayer).width,
+        height: isAdj ? this.height : (n as PixelLayer).height,
         hasMask: !!n.mask,
         maskEnabled: n.mask?.enabled ?? false,
         adjustmentType: isAdj ? (n as AdjustmentLayer).adjustmentType : undefined,
         // Clone params so React sees a fresh object each snapshot (live updates).
         params: isAdj ? structuredClone((n as AdjustmentLayer).params) : undefined,
         clipping: isAdj ? !!(n as AdjustmentLayer).clipping : undefined,
+        text: isText ? textSnapshot(n as TextLayer) : undefined,
       });
     }
     return {
@@ -435,10 +547,189 @@ export class Document {
   /** Set a layer's top-left position (move tool). No-op for adjustments. */
   setPosition(id: LayerId, x: number, y: number): void {
     const n = this.nodes.get(id);
-    if (!n || n.kind !== "raster") return;
+    if (!n || n.kind === "adjustment") return;
     n.x = x;
     n.y = y;
     this.emit();
+  }
+
+  // ── text layers ─────────────────────────────────────────
+  /**
+   * Create a text layer at document position (x,y). The engine rasterizes it and
+   * fills in width/height/source via `setTextRaster`. Returns the new layer id.
+   */
+  addTextLayer(
+    x: number,
+    y: number,
+    init: Partial<TextLayerPatch> = {},
+  ): LayerId {
+    const id = nextId();
+    const text = init.text ?? "";
+    const layer: TextLayer = {
+      id,
+      kind: "text",
+      name: deriveTextName(text),
+      visible: true,
+      opacity: 1,
+      blendMode: "normal",
+      x,
+      y,
+      width: 1,
+      height: 1,
+      version: 1,
+      text,
+      fontFamily: init.fontFamily ?? "Inter, system-ui, sans-serif",
+      fontSize: init.fontSize ?? 64,
+      color: init.color ? { ...init.color } : { r: 0, g: 0, b: 0, a: 1 },
+      align: init.align ?? "left",
+      bold: init.bold ?? false,
+      italic: init.italic ?? false,
+      lineHeight: init.lineHeight ?? 1.2,
+    };
+    this.nodes.set(id, layer);
+    this.order.push(id); // new layer on top
+    this.activeLayerId = id;
+    this.emit();
+    return id;
+  }
+
+  /**
+   * Merge a typographic patch into a text layer. Bumps `version` so the engine
+   * re-rasterizes, and re-derives the layer name when the text changed. The
+   * caller is responsible for recording undo (see EditorEngine.commitTextLayer).
+   */
+  updateTextLayer(id: LayerId, patch: TextLayerPatch): void {
+    const n = this.nodes.get(id);
+    if (!n || n.kind !== "text") return;
+    if (patch.text !== undefined) {
+      n.text = patch.text;
+      n.name = deriveTextName(patch.text);
+    }
+    if (patch.fontFamily !== undefined) n.fontFamily = patch.fontFamily;
+    if (patch.fontSize !== undefined) n.fontSize = patch.fontSize;
+    if (patch.color !== undefined) n.color = { ...patch.color };
+    if (patch.align !== undefined) n.align = patch.align;
+    if (patch.bold !== undefined) n.bold = patch.bold;
+    if (patch.italic !== undefined) n.italic = patch.italic;
+    if (patch.lineHeight !== undefined) n.lineHeight = patch.lineHeight;
+    n.version += 1;
+    this.emit();
+  }
+
+  /**
+   * Replace ALL typographic params of a text layer wholesale (used by undo). The
+   * snapshot omits geometry; the engine re-rasterizes from these params.
+   */
+  setTextLayerParams(id: LayerId, params: TextLayerSnapshot): void {
+    const n = this.nodes.get(id);
+    if (!n || n.kind !== "text") return;
+    n.text = params.text;
+    n.name = deriveTextName(params.text);
+    n.fontFamily = params.fontFamily;
+    n.fontSize = params.fontSize;
+    n.color = { ...params.color };
+    n.align = params.align;
+    n.bold = params.bold;
+    n.italic = params.italic;
+    n.lineHeight = params.lineHeight;
+    n.version += 1;
+    this.emit();
+  }
+
+  /** Snapshot of a text layer's current typographic params (for undo). */
+  getTextLayerParams(id: LayerId): TextLayerSnapshot | null {
+    const n = this.nodes.get(id);
+    if (!n || n.kind !== "text") return null;
+    return textSnapshot(n);
+  }
+
+  /**
+   * Convert a text layer into a plain raster layer IN PLACE (same id, order,
+   * opacity, blendMode, mask preserved). Used when a transform is committed on a
+   * text layer — its pixels are baked and it stops being editable text.
+   */
+  bakeTextToRaster(
+    id: LayerId,
+    source: ImageBitmap | ImageData,
+    x: number,
+    y: number,
+  ): void {
+    const n = this.nodes.get(id);
+    if (!n || n.kind !== "text") return;
+    const raster: RasterLayer = {
+      id,
+      kind: "raster",
+      name: n.name,
+      visible: n.visible,
+      opacity: n.opacity,
+      blendMode: n.blendMode,
+      source,
+      width: source.width,
+      height: source.height,
+      x,
+      y,
+      mask: n.mask,
+    };
+    this.nodes.set(id, raster);
+    this.emit();
+  }
+
+  /**
+   * Restore a baked raster layer back to an editable text layer (transform undo
+   * on a text layer). Re-rasterized lazily by the engine from `params`.
+   */
+  unbakeTextFromRaster(
+    id: LayerId,
+    params: TextLayerSnapshot,
+    x: number,
+    y: number,
+  ): void {
+    const n = this.nodes.get(id);
+    if (!n) return;
+    const text: TextLayer = {
+      id,
+      kind: "text",
+      name: deriveTextName(params.text),
+      visible: n.visible,
+      opacity: n.opacity,
+      blendMode: n.blendMode,
+      mask: n.mask,
+      x,
+      y,
+      width: 1,
+      height: 1,
+      version: 1,
+      text: params.text,
+      fontFamily: params.fontFamily,
+      fontSize: params.fontSize,
+      color: { ...params.color },
+      align: params.align,
+      bold: params.bold,
+      italic: params.italic,
+      lineHeight: params.lineHeight,
+    };
+    this.nodes.set(id, text);
+    this.emit();
+  }
+
+  /**
+   * Store the engine-rasterized bitmap + its placement for a text layer. The
+   * bitmap's top-left in doc space is (x,y). Does NOT emit (called inside the
+   * render path); the engine markDirty()s itself.
+   */
+  setTextRaster(
+    id: LayerId,
+    source: ImageBitmap | ImageData,
+    x: number,
+    y: number,
+  ): void {
+    const n = this.nodes.get(id);
+    if (!n || n.kind !== "text") return;
+    n.source = source;
+    n.width = source.width;
+    n.height = source.height;
+    n.x = x;
+    n.y = y;
   }
 
   // ── layer masks ─────────────────────────────────────────
@@ -449,9 +740,9 @@ export class Document {
   addMask(id: LayerId, data?: Uint8Array): boolean {
     const n = this.nodes.get(id);
     if (!n || n.mask) return false;
-    // Raster masks are layer-local; adjustment masks are full-document.
-    const mw = n.kind === "adjustment" ? this.width : (n as RasterLayer).width;
-    const mh = n.kind === "adjustment" ? this.height : (n as RasterLayer).height;
+    // Raster/text masks are layer-local; adjustment masks are full-document.
+    const mw = n.kind === "adjustment" ? this.width : (n as PixelLayer).width;
+    const mh = n.kind === "adjustment" ? this.height : (n as PixelLayer).height;
     const buf = data ?? new Uint8Array(mw * mh).fill(255);
     n.mask = {
       data: buf,

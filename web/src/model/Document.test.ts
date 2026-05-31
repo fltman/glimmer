@@ -4,6 +4,8 @@ import {
   BLEND_MODE_INDEX,
   BLEND_MODE_LABELS,
   isRasterLayer,
+  isTextLayer,
+  isPixelLayer,
   type BlendMode,
 } from "./Document";
 
@@ -60,5 +62,58 @@ describe("Document layer masks", () => {
     const snap = doc.snapshot();
     expect(snap.layers[0]!.hasMask).toBe(true);
     expect(snap.layers[0]!.maskEnabled).toBe(true);
+  });
+});
+
+describe("Document text layers", () => {
+  it("adds a text layer, snapshots its params, and derives its name", () => {
+    const doc = new Document(64, 64);
+    const id = doc.addTextLayer(10, 12, { text: "Hello\nWorld", fontSize: 32 });
+    const layer = doc.getLayer(id)!;
+    expect(isTextLayer(layer)).toBe(true);
+    expect(isPixelLayer(layer)).toBe(true);
+    expect(layer.name).toBe("Hello"); // first line
+    const snap = doc.snapshot();
+    expect(snap.layers[0]!.kind).toBe("text");
+    expect(snap.layers[0]!.text?.text).toBe("Hello\nWorld");
+    expect(snap.layers[0]!.text?.fontSize).toBe(32);
+  });
+
+  it("updateTextLayer bumps version and re-derives the name", () => {
+    const doc = new Document(64, 64);
+    const id = doc.addTextLayer(0, 0, { text: "a" });
+    const v0 = doc.getTextLayerParams(id);
+    doc.updateTextLayer(id, { text: "Renamed line" });
+    const layer = doc.getLayer(id)!;
+    expect(layer.name).toBe("Renamed line");
+    expect(isTextLayer(layer) && layer.version).toBeGreaterThan(1);
+    expect(v0!.text).toBe("a");
+  });
+
+  it("bakes a text layer to raster (same id) and unbakes back", () => {
+    const doc = new Document(64, 64);
+    const id = doc.addTextLayer(5, 5, { text: "T" });
+    const params = doc.getTextLayerParams(id)!;
+    const baked = { width: 20, height: 10, data: new Uint8ClampedArray(20 * 10 * 4) } as ImageData;
+    doc.bakeTextToRaster(id, baked, 3, 4);
+    const r = doc.getLayer(id)!;
+    expect(isRasterLayer(r)).toBe(true);
+    expect(isRasterLayer(r) && r.width).toBe(20);
+    expect(isRasterLayer(r) && r.x).toBe(3);
+    // Unbake restores an editable text layer with the same id + params.
+    doc.unbakeTextFromRaster(id, params, 5, 5);
+    const t = doc.getLayer(id)!;
+    expect(isTextLayer(t)).toBe(true);
+    expect(isTextLayer(t) && t.text).toBe("T");
+    expect(isTextLayer(t) && t.x).toBe(5);
+  });
+
+  it("setPosition moves text layers (not just raster)", () => {
+    const doc = new Document(64, 64);
+    const id = doc.addTextLayer(0, 0, { text: "x" });
+    doc.setPosition(id, 11, 22);
+    const t = doc.getLayer(id)!;
+    expect(isPixelLayer(t) && t.x).toBe(11);
+    expect(isPixelLayer(t) && t.y).toBe(22);
   });
 });

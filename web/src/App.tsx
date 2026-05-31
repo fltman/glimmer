@@ -9,10 +9,11 @@ import { Toolbar } from "./ui/Toolbar";
 import { ToolRail } from "./ui/ToolRail";
 import { ToolOptions } from "./ui/ToolOptions";
 import { CanvasHost } from "./ui/CanvasHost";
+import { TextEditOverlay } from "./ui/text/TextEditOverlay";
 import { LayersPanel } from "./ui/LayersPanel";
 import { AIPanel } from "./ai/AIPanel";
 import { AdjustmentsPanel } from "./ui/adjustments/AdjustmentsPanel";
-import { useEngineSnapshot } from "./state/useEngine";
+import { engine, useEngineSnapshot } from "./state/useEngine";
 import { toolStore, type ToolId } from "./state/tools";
 
 /** Single-key tool shortcuts (ignored while typing in inputs). */
@@ -36,6 +37,9 @@ function useToolShortcuts() {
       if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) {
         return;
       }
+      // Suppress single-key tool shortcuts while a text layer is being edited,
+      // even if focus briefly drifts off the editor's textarea.
+      if (engine.getActiveTextEditing()) return;
       const key = e.key.toLowerCase();
       // Tapping M toggles between the two marquee shapes.
       if (key === "m") {
@@ -73,8 +77,12 @@ export default function App() {
       <ToolOptions />
       <div className="flex min-h-0 flex-1">
         <ToolRail />
-        <main className="min-w-0 flex-1">
+        {/* Relative wrapper so the type-tool <textarea> overlay (positioned in
+            CSS px from the engine's view transform) aligns with the canvas,
+            which fills this element edge-to-edge. */}
+        <main className="relative min-w-0 flex-1">
           <CanvasHost />
+          <TextEditOverlay />
         </main>
         <aside className="flex w-80 flex-col border-l border-edge bg-panel">
           {/* Tabbed top section: AI tools / Adjustments. */}

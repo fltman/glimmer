@@ -18,7 +18,14 @@ export type ToolId =
   | "hand"
   | "eyedropper"
   | "bucket"
-  | "gradient";
+  | "gradient"
+  | "transform"
+  | "crop"
+  | "text"
+  | "shape";
+
+/** Shape primitive drawn by the shape tool. */
+export type ShapeKind = "rect" | "ellipse" | "line";
 
 /** Boolean op applied when a new selection is committed (driven by modifiers). */
 export type SelectionOp = "replace" | "add" | "subtract" | "intersect";
@@ -46,6 +53,35 @@ export interface BrushParams {
   flow: number;
 }
 
+/**
+ * Type-tool params. `color` is optional: when null the engine uses the current
+ * foreground color, so the swatch and the type tool stay in sync by default; a
+ * non-null value pins an explicit per-tool color.
+ */
+export interface TextParams {
+  fontFamily: string;
+  /** Font size in document px. */
+  fontSize: number;
+  /** Explicit color, or null to follow the foreground swatch. */
+  color: RGBAColor | null;
+  align: "left" | "center" | "right";
+  bold: boolean;
+  italic: boolean;
+  /** Line spacing as a multiple of fontSize. */
+  lineHeight: number;
+}
+
+/**
+ * Shape-tool params. `fill` is optional: null means "use foreground". `stroke`
+ * width <= 0 means no stroke.
+ */
+export interface ShapeParams {
+  kind: ShapeKind;
+  /** Fill color, or null to follow the foreground swatch. */
+  fill: RGBAColor | null;
+  stroke: { color: RGBAColor; width: number };
+}
+
 export interface ToolState {
   active: ToolId;
   brush: BrushParams;
@@ -55,6 +91,10 @@ export interface ToolState {
   foreground: RGBAColor;
   /** Background color (gradient "to" / canvas fills). sRGB straight, 0..1. */
   background: RGBAColor;
+  /** Type-tool defaults for new text layers. */
+  text: TextParams;
+  /** Shape-tool params (incl. active shapeKind). */
+  shape: ShapeParams;
 }
 
 const DEFAULT: ToolState = {
@@ -63,6 +103,20 @@ const DEFAULT: ToolState = {
   feather: 0,
   foreground: { r: 0, g: 0, b: 0, a: 1 },
   background: { r: 1, g: 1, b: 1, a: 1 },
+  text: {
+    fontFamily: "Inter, system-ui, sans-serif",
+    fontSize: 64,
+    color: null, // follow foreground
+    align: "left",
+    bold: false,
+    italic: false,
+    lineHeight: 1.2,
+  },
+  shape: {
+    kind: "rect",
+    fill: null, // follow foreground
+    stroke: { color: { r: 0, g: 0, b: 0, a: 1 }, width: 0 },
+  },
 };
 
 type Listener = () => void;
@@ -96,6 +150,21 @@ class ToolStore {
 
   setFeather(feather: number): void {
     this.set({ ...this.state, feather: Math.max(0, feather) });
+  }
+
+  // ── type tool ──────────────────────────────────────────
+  setText(patch: Partial<TextParams>): void {
+    this.set({ ...this.state, text: { ...this.state.text, ...patch } });
+  }
+
+  // ── shape tool ─────────────────────────────────────────
+  setShape(patch: Partial<ShapeParams>): void {
+    this.set({ ...this.state, shape: { ...this.state.shape, ...patch } });
+  }
+  /** Set the active shape primitive (rect/ellipse/line). */
+  setShapeKind(kind: ShapeKind): void {
+    if (this.state.shape.kind === kind) return;
+    this.set({ ...this.state, shape: { ...this.state.shape, kind } });
   }
 
   // ── color ──────────────────────────────────────────────

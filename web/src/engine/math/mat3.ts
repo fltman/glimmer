@@ -38,6 +38,22 @@ export function scaling(sx: number, sy: number): Mat3 {
   return new Float32Array([sx, 0, 0, 0, sy, 0, 0, 0, 1]);
 }
 
+/**
+ * Rotation by `rad` radians about the origin. With pixelToClip's +y-down
+ * convention a positive angle rotates clockwise on screen. Column-major:
+ * [ c, s, 0,  -s, c, 0,  0, 0, 1 ].
+ */
+export function rotation(rad: number): Mat3 {
+  const c = Math.cos(rad);
+  const s = Math.sin(rad);
+  return new Float32Array([c, s, 0, -s, c, 0, 0, 0, 1]);
+}
+
+/** Post-multiply m by a rotation (rotate in m's local space). */
+export function rotate(m: Mat3, rad: number): Mat3 {
+  return multiply(m, rotation(rad));
+}
+
 /** Post-multiply m by a translation (translate in m's local space). */
 export function translate(m: Mat3, tx: number, ty: number): Mat3 {
   return multiply(m, translation(tx, ty));

@@ -13,10 +13,19 @@ import type {
   BlendMode,
   AdjustmentType,
   AdjustmentParams,
+  TextLayerSnapshot,
+  TextLayerPatch,
 } from "../model/Document";
-import { toolStore, type RGBAColor } from "./tools";
+import {
+  toolStore,
+  type RGBAColor,
+  type TextParams,
+  type ShapeParams,
+  type ShapeKind,
+} from "./tools";
 import type { GradientStop } from "../engine/adjustments";
 import type { FilterType, FilterParams } from "../engine/filters";
+import type { TransformState } from "../engine/EditorEngine";
 
 export const engine = new EditorEngine();
 
@@ -213,5 +222,73 @@ export const actions = {
   },
   cancelFilter() {
     engine.cancelFilter();
+  },
+
+  // ── tool selection ──
+  setActiveTool(tool: import("./tools").ToolId) {
+    toolStore.setActive(tool);
+  },
+
+  // ── free transform ──
+  /** Start a free-transform session on the active (or given) pixel layer. */
+  beginTransform(layerId?: string) {
+    engine.beginTransform(layerId);
+  },
+  /** Apply an explicit transform delta (UI escape hatch; pointer math is internal). */
+  setTransform(patch: Partial<TransformState>) {
+    engine.setTransform(patch);
+  },
+  /** Bake the live transform into the layer (one undo step). */
+  commitTransform() {
+    engine.commitTransform();
+  },
+  /** Discard the live transform. */
+  cancelTransform() {
+    engine.cancelTransform();
+  },
+
+  // ── crop ──
+  beginCrop() {
+    engine.beginCrop();
+  },
+  commitCrop() {
+    engine.commitCrop();
+  },
+  cancelCrop() {
+    engine.cancelCrop();
+  },
+
+  // ── text / type layers ──
+  /** Create a text layer at a doc point and open it for editing. */
+  addTextLayer(atDocX: number, atDocY: number, initialText = "") {
+    return engine.addTextLayer(atDocX, atDocY, initialText);
+  },
+  /** Live-update a text layer's typographic params (re-rasterizes). */
+  updateTextLayer(id: string, patch: TextLayerPatch) {
+    engine.updateTextLayer(id, patch);
+  },
+  /** Record one undo step for a text edit (prev/next full param sets). */
+  commitTextLayer(id: string, prev: TextLayerSnapshot, next: TextLayerSnapshot) {
+    engine.commitTextLayer(id, prev, next);
+  },
+  /** Open the type editor for an existing text layer (double-click). */
+  beginEditText(id: string) {
+    engine.beginEditText(id);
+  },
+  /** Close the type editor overlay. */
+  endEditText() {
+    engine.endEditText();
+  },
+  /** Type-tool defaults for new text layers. */
+  setTextParams(patch: Partial<TextParams>) {
+    toolStore.setText(patch);
+  },
+
+  // ── shapes ──
+  setShapeKind(kind: ShapeKind) {
+    toolStore.setShapeKind(kind);
+  },
+  setShapeParams(patch: Partial<ShapeParams>) {
+    toolStore.setShape(patch);
   },
 };

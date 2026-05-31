@@ -37,4 +37,28 @@ describe("mat3", () => {
     const p = m3.transformPoint(m, 1, 1);
     expect(p).toEqual({ x: 12, y: 2 });
   });
+
+  it("rotation by 90° maps (1,0)->(0,1) under +y-down convention", () => {
+    const m = m3.rotation(Math.PI / 2);
+    const p = m3.transformPoint(m, 1, 0);
+    expect(p.x).toBeCloseTo(0, 6);
+    expect(p.y).toBeCloseTo(1, 6);
+  });
+
+  it("rotate about center then back is identity-ish", () => {
+    const cx = 5;
+    const cy = 7;
+    // Rotate a point about (cx,cy) by 45°, then by -45°.
+    const fwd = m3.multiply(
+      m3.translation(cx, cy),
+      m3.multiply(m3.rotation(Math.PI / 4), m3.translation(-cx, -cy)),
+    );
+    const back = m3.multiply(
+      m3.translation(cx, cy),
+      m3.multiply(m3.rotation(-Math.PI / 4), m3.translation(-cx, -cy)),
+    );
+    const round = m3.transformPoint(m3.multiply(back, fwd), 9, 2);
+    expect(round.x).toBeCloseTo(9, 6);
+    expect(round.y).toBeCloseTo(2, 6);
+  });
 });
