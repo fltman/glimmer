@@ -79,7 +79,25 @@ export const BLEND_MODE_LABELS: { mode: BlendMode; label: string }[] = [
   { mode: "luminosity", label: "Luminosity" },
 ];
 
-export type LayerKind = "raster";
+export type LayerKind = "raster" | "adjustment";
+
+/** Re-exported from the adjustment registry (kept loose to avoid a cycle). */
+export type AdjustmentType =
+  | "brightness_contrast"
+  | "levels"
+  | "curves"
+  | "exposure"
+  | "hue_saturation"
+  | "vibrance"
+  | "color_balance"
+  | "black_white"
+  | "photo_filter"
+  | "channel_mixer"
+  | "invert"
+  | "posterize"
+  | "threshold"
+  | "gradient_map";
+export type AdjustmentParams = Record<string, unknown>;
 
 /**
  * A per-layer single-channel mask (value 0..1, white = visible). CPU-
@@ -117,7 +135,35 @@ export interface RasterLayer {
   mask?: LayerMask;
 }
 
-export type LayerNode = RasterLayer;
+/**
+ * A non-destructive adjustment layer. It carries no pixels of its own; the
+ * engine renders it as a fullscreen pass that modifies everything composited
+ * BELOW it. `params` is the adjustment-specific bag (see adjustments.ts).
+ */
+export interface AdjustmentLayer {
+  id: LayerId;
+  kind: "adjustment";
+  name: string;
+  visible: boolean;
+  opacity: number; // 0..1 (effect strength)
+  blendMode: BlendMode;
+  adjustmentType: AdjustmentType;
+  params: AdjustmentParams;
+  /** Optional layer mask scoping where the effect applies. */
+  mask?: LayerMask;
+  /** When true, the effect is clipped to the single layer directly below. */
+  clipping?: boolean;
+}
+
+export type LayerNode = RasterLayer | AdjustmentLayer;
+
+/** Narrowing helpers. */
+export function isRasterLayer(n: LayerNode): n is RasterLayer {
+  return n.kind === "raster";
+}
+export function isAdjustmentLayer(n: LayerNode): n is AdjustmentLayer {
+  return n.kind === "adjustment";
+}
 
 /** Lightweight snapshot for React (no pixel sources, no GL). */
 export interface LayerSnapshot {
@@ -132,6 +178,10 @@ export interface LayerSnapshot {
   /** Whether the layer carries a mask, and if it's enabled. */
   hasMask: boolean;
   maskEnabled: boolean;
+  /** Adjustment layers only: the adjustment type + live params + clipping. */
+  adjustmentType?: AdjustmentType;
+  params?: AdjustmentParams;
+  clipping?: boolean;
 }
 
 export interface DocumentSnapshot {
@@ -148,6 +198,26 @@ let idCounter = 0;
 function nextId(): LayerId {
   idCounter += 1;
   return `layer_${idCounter}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+const ADJUSTMENT_NAMES: Record<AdjustmentType, string> = {
+  brightness_contrast: "Brightness/Contrast",
+  levels: "Levels",
+  curves: "Curves",
+  exposure: "Exposure",
+  hue_saturation: "Hue/Saturation",
+  vibrance: "Vibrance",
+  color_balance: "Color Balance",
+  black_white: "Black & White",
+  photo_filter: "Photo Filter",
+  channel_mixer: "Channel Mixer",
+  invert: "Invert",
+  posterize: "Posterize",
+  threshold: "Threshold",
+  gradient_map: "Gradient Map",
+};
+function defaultAdjustmentName(type: AdjustmentType): string {
+  return ADJUSTMENT_NAMES[type] ?? "Adjustment";
 }
 
 export class Document {
@@ -193,6 +263,7 @@ export class Document {
     for (let i = this.order.length - 1; i >= 0; i--) {
       const n = this.nodes.get(this.order[i]!);
       if (!n) continue;
+      const isAdj = n.kind === "adjustment";
       layers.push({
         id: n.id,
         kind: n.kind,
@@ -200,10 +271,14 @@ export class Document {
         visible: n.visible,
         opacity: n.opacity,
         blendMode: n.blendMode,
-        width: n.width,
-        height: n.height,
+        width: isAdj ? this.width : (n as RasterLayer).width,
+        height: isAdj ? this.height : (n as RasterLayer).height,
         hasMask: !!n.mask,
         maskEnabled: n.mask?.enabled ?? false,
+        adjustmentType: isAdj ? (n as AdjustmentLayer).adjustmentType : undefined,
+        // Clone params so React sees a fresh object each snapshot (live updates).
+        params: isAdj ? structuredClone((n as AdjustmentLayer).params) : undefined,
+        clipping: isAdj ? !!(n as AdjustmentLayer).clipping : undefined,
       });
     }
     return {
@@ -242,6 +317,62 @@ export class Document {
     this.height = Math.max(this.height, layer.y + layer.height);
     this.emit();
     return id;
+  }
+
+  /**
+   * Insert a non-destructive adjustment layer directly ABOVE the active layer
+   * (or on top when there is no active layer). Returns the new layer id.
+   */
+  addAdjustmentLayer(
+    adjustmentType: AdjustmentType,
+    params: AdjustmentParams,
+    name?: string,
+  ): LayerId {
+    const id = nextId();
+    const layer: AdjustmentLayer = {
+      id,
+      kind: "adjustment",
+      name: name ?? defaultAdjustmentName(adjustmentType),
+      visible: true,
+      opacity: 1,
+      blendMode: "normal",
+      adjustmentType,
+      params,
+      clipping: false,
+    };
+    this.nodes.set(id, layer);
+    // Insert just above the active layer; default to top.
+    const activeIdx =
+      this.activeLayerId !== null ? this.order.indexOf(this.activeLayerId) : -1;
+    if (activeIdx >= 0) this.order.splice(activeIdx + 1, 0, id);
+    else this.order.push(id);
+    this.activeLayerId = id;
+    this.emit();
+    return id;
+  }
+
+  /** Merge a patch into an adjustment layer's params (live tweak). */
+  updateAdjustmentParams(id: LayerId, patch: AdjustmentParams): void {
+    const n = this.nodes.get(id);
+    if (!n || n.kind !== "adjustment") return;
+    n.params = { ...n.params, ...patch };
+    this.emit();
+  }
+
+  /** Replace an adjustment layer's params object wholesale (used by undo). */
+  setAdjustmentParams(id: LayerId, params: AdjustmentParams): void {
+    const n = this.nodes.get(id);
+    if (!n || n.kind !== "adjustment") return;
+    n.params = params;
+    this.emit();
+  }
+
+  /** Toggle clipping the adjustment to the single layer directly below. */
+  setClipping(id: LayerId, clipping: boolean): void {
+    const n = this.nodes.get(id);
+    if (!n || n.kind !== "adjustment") return;
+    n.clipping = clipping;
+    this.emit();
   }
 
   setActive(id: LayerId | null): void {
@@ -301,10 +432,10 @@ export class Document {
     this.emit();
   }
 
-  /** Set a layer's top-left position (move tool). */
+  /** Set a layer's top-left position (move tool). No-op for adjustments. */
   setPosition(id: LayerId, x: number, y: number): void {
     const n = this.nodes.get(id);
-    if (!n) return;
+    if (!n || n.kind !== "raster") return;
     n.x = x;
     n.y = y;
     this.emit();
@@ -318,11 +449,14 @@ export class Document {
   addMask(id: LayerId, data?: Uint8Array): boolean {
     const n = this.nodes.get(id);
     if (!n || n.mask) return false;
-    const buf = data ?? new Uint8Array(n.width * n.height).fill(255);
+    // Raster masks are layer-local; adjustment masks are full-document.
+    const mw = n.kind === "adjustment" ? this.width : (n as RasterLayer).width;
+    const mh = n.kind === "adjustment" ? this.height : (n as RasterLayer).height;
+    const buf = data ?? new Uint8Array(mw * mh).fill(255);
     n.mask = {
       data: buf,
-      width: n.width,
-      height: n.height,
+      width: mw,
+      height: mh,
       version: 1,
       enabled: true,
     };
@@ -356,7 +490,7 @@ export class Document {
   /** Replace a layer's raster source (e.g. after a flattened brush stroke). */
   replaceSource(id: LayerId, source: ImageBitmap | ImageData): void {
     const n = this.nodes.get(id);
-    if (!n) return;
+    if (!n || n.kind !== "raster") return;
     n.source = source;
     n.width = source.width;
     n.height = source.height;

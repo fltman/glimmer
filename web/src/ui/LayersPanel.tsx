@@ -6,6 +6,17 @@
 import { useRef } from "react";
 import { useEngineSnapshot, actions } from "../state/useEngine";
 import { BLEND_MODE_LABELS, type BlendMode } from "../model/Document";
+import { ADJUSTMENTS } from "../engine/adjustments";
+
+/** Small half-filled circle marking a non-destructive adjustment layer. */
+function AdjustmentIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden>
+      <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="2" />
+      <path d="M12 3a9 9 0 0 0 0 18Z" fill="currentColor" />
+    </svg>
+  );
+}
 
 function EyeIcon({ open }: { open: boolean }) {
   return (
@@ -42,6 +53,11 @@ export function LayersPanel() {
         )}
         {snap.layers.map((l) => {
           const selected = l.id === snap.activeLayerId;
+          const isAdjustment = l.kind === "adjustment";
+          const typeLabel =
+            isAdjustment && l.adjustmentType
+              ? ADJUSTMENTS[l.adjustmentType].label
+              : null;
           return (
             <div
               key={l.id}
@@ -61,7 +77,23 @@ export function LayersPanel() {
                 >
                   <EyeIcon open={l.visible} />
                 </button>
+                {isAdjustment && (
+                  <span
+                    className="shrink-0 text-accent"
+                    title="Adjustment layer"
+                  >
+                    <AdjustmentIcon />
+                  </span>
+                )}
                 <span className="flex-1 truncate text-sm">{l.name}</span>
+                {isAdjustment && l.clipping && (
+                  <span
+                    className="shrink-0 text-muted"
+                    title="Clipped to the layer below"
+                  >
+                    ↳
+                  </span>
+                )}
                 {l.hasMask && (
                   <button
                     onClick={(e) => {
@@ -79,7 +111,7 @@ export function LayersPanel() {
                   </button>
                 )}
                 <span className="text-[10px] uppercase tracking-wide text-muted">
-                  {l.width}×{l.height}
+                  {isAdjustment ? typeLabel : `${l.width}×${l.height}`}
                 </span>
               </div>
 

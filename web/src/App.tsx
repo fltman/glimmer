@@ -4,13 +4,15 @@
  *   left tool rail  |  center canvas  |  right panels
  * The canvas host is mounted once and lives between the rails and the panels.
  */
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Toolbar } from "./ui/Toolbar";
 import { ToolRail } from "./ui/ToolRail";
 import { ToolOptions } from "./ui/ToolOptions";
 import { CanvasHost } from "./ui/CanvasHost";
 import { LayersPanel } from "./ui/LayersPanel";
 import { AIPanel } from "./ai/AIPanel";
+import { AdjustmentsPanel } from "./ui/adjustments/AdjustmentsPanel";
+import { useEngineSnapshot } from "./state/useEngine";
 import { toolStore, type ToolId } from "./state/tools";
 
 /** Single-key tool shortcuts (ignored while typing in inputs). */
@@ -20,6 +22,9 @@ const KEY_TO_TOOL: Record<string, ToolId> = {
   l: "lasso",
   b: "brush",
   e: "eraser",
+  g: "gradient",
+  i: "eyedropper",
+  k: "bucket",
   h: "hand",
 };
 
@@ -46,8 +51,22 @@ function useToolShortcuts() {
   }, []);
 }
 
+type SidebarTab = "ai" | "adjust";
+
 export default function App() {
   useToolShortcuts();
+  const [tab, setTab] = useState<SidebarTab>("ai");
+  const snap = useEngineSnapshot();
+
+  // Reveal the Adjust tab whenever an adjustment layer becomes active (e.g.
+  // after Image ▸ Adjustments inserts one, or selecting it in the Layers
+  // panel) so its properties / Curves / Levels editors are immediately visible.
+  const active = snap.layers.find((l) => l.id === snap.activeLayerId) ?? null;
+  const activeAdjId = active?.kind === "adjustment" ? active.id : null;
+  useEffect(() => {
+    if (activeAdjId) setTab("adjust");
+  }, [activeAdjId]);
+
   return (
     <div className="flex h-full flex-col">
       <Toolbar />
@@ -58,8 +77,17 @@ export default function App() {
           <CanvasHost />
         </main>
         <aside className="flex w-80 flex-col border-l border-edge bg-panel">
+          {/* Tabbed top section: AI tools / Adjustments. */}
+          <div className="flex shrink-0 border-b border-edge">
+            <TabButton active={tab === "ai"} onClick={() => setTab("ai")}>
+              AI
+            </TabButton>
+            <TabButton active={tab === "adjust"} onClick={() => setTab("adjust")}>
+              Adjust
+            </TabButton>
+          </div>
           <div className="min-h-0 flex-[3] overflow-hidden">
-            <AIPanel />
+            {tab === "ai" ? <AIPanel /> : <AdjustmentsPanel />}
           </div>
           <div className="min-h-0 flex-[2] overflow-hidden border-t border-edge">
             <LayersPanel />
@@ -67,5 +95,28 @@ export default function App() {
         </aside>
       </div>
     </div>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex-1 px-3 py-2 text-xs font-semibold uppercase tracking-wider transition-colors ${
+        active
+          ? "border-b-2 border-accent text-ink"
+          : "border-b-2 border-transparent text-muted hover:text-ink"
+      }`}
+    >
+      {children}
+    </button>
   );
 }

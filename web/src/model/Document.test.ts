@@ -3,6 +3,7 @@ import {
   Document,
   BLEND_MODE_INDEX,
   BLEND_MODE_LABELS,
+  isRasterLayer,
   type BlendMode,
 } from "./Document";
 
@@ -52,8 +53,9 @@ describe("Document layer masks", () => {
     const doc = new Document(8, 8);
     const id = doc.addRasterLayer(src(4, 4));
     doc.setPosition(id, 3, 5);
-    expect(doc.getLayer(id)!.x).toBe(3);
-    expect(doc.getLayer(id)!.y).toBe(5);
+    const moved = doc.getLayer(id)!;
+    expect(isRasterLayer(moved) && moved.x).toBe(3);
+    expect(isRasterLayer(moved) && moved.y).toBe(5);
     doc.addMask(id);
     const snap = doc.snapshot();
     expect(snap.layers[0]!.hasMask).toBe(true);

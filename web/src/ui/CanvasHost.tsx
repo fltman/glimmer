@@ -20,6 +20,9 @@ const CURSORS: Record<ToolId, string> = {
   "marquee-ellipse": "crosshair",
   lasso: "crosshair",
   hand: "grab",
+  eyedropper: "crosshair",
+  bucket: "crosshair",
+  gradient: "crosshair",
 };
 
 /** Live selection-in-progress outline, in CSS px relative to the canvas. */

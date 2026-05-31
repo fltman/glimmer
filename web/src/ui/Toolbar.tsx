@@ -10,6 +10,83 @@ import {
   useHistoryState,
 } from "../state/useEngine";
 import { exportPng } from "../engine/export";
+import { ADJUSTMENTS, ADJUSTMENT_ORDER } from "../engine/adjustments";
+import { FiltersMenu } from "./filters";
+
+/**
+ * Image ▸ Adjustments dropdown — Photoshop's `Image > Adjustments` menu.
+ * Data-driven from the adjustment registry; picking an entry inserts a
+ * non-destructive adjustment layer (one undo step) whose properties then open
+ * in the right-side Adjustments panel.
+ */
+function ImageMenu({ disabled }: { disabled: boolean }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDown(e: MouseEvent) {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="relative" ref={rootRef}>
+      <button
+        className="btn"
+        disabled={disabled}
+        title={disabled ? "Open an image first" : "Image ▸ Adjustments"}
+        onClick={() => setOpen((o) => !o)}
+      >
+        Image
+        <svg
+          width="9"
+          height="9"
+          viewBox="0 0 12 12"
+          className="opacity-70"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+        >
+          <path d="M2.5 4.5 6 8l3.5-3.5" />
+        </svg>
+      </button>
+
+      {open && !disabled && (
+        <div className="absolute left-0 top-full z-40 mt-1 w-56 overflow-hidden rounded-md border border-edge bg-panelraised py-1 shadow-2xl">
+          <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-muted">
+            Adjustments
+          </div>
+          <div className="max-h-80 overflow-y-auto">
+            {ADJUSTMENT_ORDER.map((type) => (
+              <button
+                key={type}
+                className="block w-full px-3 py-1.5 text-left text-xs text-ink transition-colors hover:bg-accent/20"
+                onClick={() => {
+                  actions.addAdjustmentLayer(type);
+                  setOpen(false);
+                }}
+              >
+                {ADJUSTMENTS[type].label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function Toolbar() {
   const snap = useEngineSnapshot();
@@ -66,6 +143,12 @@ export function Toolbar() {
       <button className="btn" onClick={() => actions.fit()} disabled={!hasLayers}>
         Fit
       </button>
+
+      <div className="mx-1 h-5 w-px bg-edge" />
+
+      {/* Photoshop-style menus */}
+      <ImageMenu disabled={!hasLayers} />
+      <FiltersMenu />
 
       <div className="mx-1 h-5 w-px bg-edge" />
 

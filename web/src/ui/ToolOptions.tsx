@@ -4,8 +4,39 @@
  * "Deselect" action. Reads/writes only the tool store and the selection
  * actions; never touches pixels.
  */
-import { toolStore, useToolState, isPaintTool, isSelectionTool } from "../state/tools";
+import {
+  toolStore,
+  useToolState,
+  isPaintTool,
+  isSelectionTool,
+  type RGBAColor,
+} from "../state/tools";
 import { actions } from "../state/useEngine";
+
+/** A tiny checkerboard-backed color chip (so alpha reads correctly). */
+function ColorChip({ color, title }: { color: RGBAColor; title: string }) {
+  const css = `rgba(${Math.round(color.r * 255)}, ${Math.round(
+    color.g * 255,
+  )}, ${Math.round(color.b * 255)}, ${color.a})`;
+  return (
+    <span
+      title={title}
+      className="inline-block h-4 w-4 rounded border border-edge"
+      style={{
+        backgroundColor: css,
+        backgroundImage:
+          "linear-gradient(45deg, #555 25%, transparent 25%, transparent 75%, #555 75%), linear-gradient(45deg, #555 25%, transparent 25%, transparent 75%, #555 75%)",
+        backgroundSize: "6px 6px",
+        backgroundPosition: "0 0, 3px 3px",
+      }}
+    >
+      <span
+        className="block h-full w-full rounded"
+        style={{ backgroundColor: css }}
+      />
+    </span>
+  );
+}
 
 function Slider({
   label,
@@ -44,7 +75,7 @@ function Slider({
 }
 
 export function ToolOptions() {
-  const { active, brush, feather } = useToolState();
+  const { active, brush, feather, foreground, background } = useToolState();
   const paint = isPaintTool(active);
   const sel = isSelectionTool(active);
 
@@ -114,6 +145,34 @@ export function ToolOptions() {
             Deselect
           </button>
         </div>
+      )}
+
+      {active === "bucket" && (
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-muted">Fill with</span>
+          <ColorChip color={foreground} title="Foreground color" />
+          <span className="text-[11px] text-muted">
+            Fills the selection, or the whole layer when nothing is selected
+          </span>
+        </div>
+      )}
+
+      {active === "gradient" && (
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-muted">Linear</span>
+          <ColorChip color={foreground} title="Foreground (start)" />
+          <span className="text-[11px] text-muted">→</span>
+          <ColorChip color={background} title="Background (end)" />
+          <span className="text-[11px] text-muted">
+            Drag to draw · Shift constrains the angle to 45°
+          </span>
+        </div>
+      )}
+
+      {active === "eyedropper" && (
+        <span className="text-[11px] text-muted">
+          Click the canvas to sample a color into the foreground
+        </span>
       )}
 
       {active === "move" && (

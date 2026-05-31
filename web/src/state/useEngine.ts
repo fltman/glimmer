@@ -8,7 +8,15 @@
  */
 import { useSyncExternalStore } from "react";
 import { EditorEngine } from "../engine/EditorEngine";
-import type { DocumentSnapshot, BlendMode } from "../model/Document";
+import type {
+  DocumentSnapshot,
+  BlendMode,
+  AdjustmentType,
+  AdjustmentParams,
+} from "../model/Document";
+import { toolStore, type RGBAColor } from "./tools";
+import type { GradientStop } from "../engine/adjustments";
+import type { FilterType, FilterParams } from "../engine/filters";
 
 export const engine = new EditorEngine();
 
@@ -50,6 +58,31 @@ export function useHasSelection(): boolean {
     () => engine.hasSelection(),
     () => engine.hasSelection(),
   );
+}
+
+/** Reactive foreground/background color swatches (drives the color picker UI). */
+export function useColors(): { foreground: RGBAColor; background: RGBAColor } {
+  return useSyncExternalStore(
+    (cb) => toolStore.subscribe(cb),
+    () => {
+      const ts = toolStore.get();
+      return colorsCacheFor(ts.foreground, ts.background);
+    },
+    () => {
+      const ts = toolStore.get();
+      return colorsCacheFor(ts.foreground, ts.background);
+    },
+  );
+}
+let _colorsCache: { foreground: RGBAColor; background: RGBAColor } = {
+  foreground: { r: 0, g: 0, b: 0, a: 1 },
+  background: { r: 1, g: 1, b: 1, a: 1 },
+};
+function colorsCacheFor(fg: RGBAColor, bg: RGBAColor) {
+  if (_colorsCache.foreground !== fg || _colorsCache.background !== bg) {
+    _colorsCache = { foreground: fg, background: bg };
+  }
+  return _colorsCache;
 }
 
 // Thin action helpers so components don't reach into the engine directly.
@@ -106,5 +139,79 @@ export const actions = {
   },
   redo() {
     engine.redo();
+  },
+
+  // ── color (foreground/background) ──
+  setForeground(c: RGBAColor) {
+    toolStore.setForeground(c);
+  },
+  setBackground(c: RGBAColor) {
+    toolStore.setBackground(c);
+  },
+  swapColors() {
+    toolStore.swapColors();
+  },
+  resetColors() {
+    toolStore.resetColors();
+  },
+  /** Sample the composited color at a document pixel (eyedropper). */
+  sampleColorAt(docX: number, docY: number): RGBAColor {
+    return engine.sampleColorAt(docX, docY);
+  },
+
+  // ── fill + gradient ──
+  /** Fill the active layer's selection (or whole layer) with a color. */
+  fillSelection(c: RGBAColor, layerId?: string) {
+    engine.fillSelection(c, layerId);
+  },
+  applyGradientFill(
+    layerId: string,
+    opts: {
+      type: "linear" | "radial";
+      from: { x: number; y: number };
+      to: { x: number; y: number };
+      stops?: GradientStop[];
+    },
+  ) {
+    engine.applyGradientFill(layerId, opts);
+  },
+
+  // ── adjustment layers ──
+  addAdjustmentLayer(type: AdjustmentType, params?: AdjustmentParams) {
+    return engine.addAdjustmentLayer(type, params);
+  },
+  /** Live param drag — no per-tick undo. */
+  updateAdjustmentParams(id: string, patch: AdjustmentParams) {
+    engine.updateAdjustmentParams(id, patch);
+  },
+  /** Commit a param edit as one undo step (on dialog OK / slider release). */
+  commitAdjustmentParams(
+    id: string,
+    prev: AdjustmentParams,
+    next: AdjustmentParams,
+  ) {
+    engine.commitAdjustmentParams(id, prev, next);
+  },
+  setAdjustmentClipping(id: string, clipping: boolean) {
+    engine.setAdjustmentClipping(id, clipping);
+  },
+
+  // ── histogram ──
+  getLayerHistogram(id: string) {
+    return engine.getLayerHistogram(id);
+  },
+
+  // ── destructive filters ──
+  applyFilter(layerId: string, type: FilterType, params?: FilterParams) {
+    engine.applyFilter(layerId, type, params);
+  },
+  previewFilter(layerId: string, type: FilterType, params?: FilterParams) {
+    engine.previewFilter(layerId, type, params);
+  },
+  commitFilter() {
+    engine.commitFilter();
+  },
+  cancelFilter() {
+    engine.cancelFilter();
   },
 };
