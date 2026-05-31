@@ -53,6 +53,24 @@ import type { PathDescription, FillRule } from "../engine/Paths";
 
 export const engine = new EditorEngine();
 
+// ──────────────────────────────────────────────────────────────
+// Agent-batch flag
+// ──────────────────────────────────────────────────────────────
+// True while the Assistant / a Preset is executing a multi-step plan. The app
+// shell uses it to suppress the "reveal the Adjust tab when an adjustment layer
+// becomes active" behaviour during a batch — otherwise each add_adjustment step
+// in a plan would yank the user off the Assistant/Presets tab (and its live
+// progress checklist) onto the Adjust tab. The flag is module-level (not engine
+// state) because it's purely a UI concern; it's read once when the adjust-reveal
+// effect fires, so it doesn't need to be reactive.
+let _agentBatching = false;
+export function setAgentBatching(active: boolean): void {
+  _agentBatching = active;
+}
+export function isAgentBatching(): boolean {
+  return _agentBatching;
+}
+
 // Re-export the smart-object + text path/warp types the UI panels need, so they
 // can `import type { TextWarp, ... } from "../state/useEngine"` alongside actions.
 export type { TextWarp, TextWarpStyle, SmartTransform };

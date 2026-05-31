@@ -17,7 +17,7 @@
  * `bg-accent` progress bar, `text-muted`/`text-ink` type, `panelraised` cards.
  */
 import { useMemo, useState } from "react";
-import { useEngineSnapshot } from "../../state/useEngine";
+import { useEngineSnapshot, setAgentBatching } from "../../state/useEngine";
 import {
   executePlan,
   buildExecutorHelpers,
@@ -85,6 +85,7 @@ export function PresetsSection() {
       }
     };
 
+    setAgentBatching(true);
     try {
       const result = await executePlan(plan, helpers, onProgress);
       setRun((prev) =>
@@ -100,6 +101,7 @@ export function PresetsSection() {
           : prev,
       );
     } finally {
+      setAgentBatching(false);
       setBusy(false);
     }
   }

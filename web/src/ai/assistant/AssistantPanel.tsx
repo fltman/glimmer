@@ -28,7 +28,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentContext, AgentStep } from "@aips/shared-types";
-import { useEngineSnapshot, useHasSelection } from "../../state/useEngine";
+import { useEngineSnapshot, useHasSelection, setAgentBatching } from "../../state/useEngine";
 import {
   requestPlan,
   AgentRequestError,
@@ -83,6 +83,23 @@ function classifyIntent(text: string): "generate" | "edit" {
 function looksLikePlannerVerb(text: string): boolean {
   return /^\s*(make it|auto[- ]?edit|plan|fix|enhance|improve|clean up|retouch)\b/i.test(
     text,
+  );
+}
+
+/**
+ * Disambiguate additive requests: "add a vignette" / "add some film grain" read
+ * like prompt-to-layer ("add …"), but the user wants a photographic EFFECT
+ * applied — not a generated PICTURE of one. When an additive verb is followed by
+ * a known adjustment/filter/effect term, route to the planner instead (it maps
+ * to apply_filter / add_adjustment / add_layer_effect). "Add a red bird" has no
+ * effect term, so it still goes to text-to-image.
+ */
+function looksLikeEditEffect(text: string): boolean {
+  return (
+    /^\s*(add|apply|put|give it|throw in|slap on)\b/i.test(text) &&
+    /\b(vignett\w*|grain|noise|blur|gaussian|sharpen|clarity|contrast|brightness|saturat\w*|vibrance|exposure|levels|curves|hue|sepia|black[- ]and[- ]white|b&w|gr[ae]yscale|drop[- ]?shadow|inner[- ]?shadow|outer[- ]?glow|glow|color[- ]?balance|colou?r[- ]?grade|grad(?:e|ing)|chromatic[- ]?aberration|halftone|emboss|posteriz\w*|threshold|gradient[- ]?map|oil[- ]?paint|pixelat\w*|photo[- ]?filter|tint|fade|matte|film[- ]?look)\b/i.test(
+      text,
+    )
   );
 }
 
@@ -252,6 +269,7 @@ export function AssistantPanel() {
       }
     };
 
+    setAgentBatching(true);
     try {
       const result = await executePlan(plan, helpers, onProgress);
       const failedSteps = result.results.filter((r: StepResult) => !r.ok);
@@ -272,6 +290,7 @@ export function AssistantPanel() {
       }
       // (When succeeded === 0 the per-step error bubbles above already explain.)
     } finally {
+      setAgentBatching(false);
       setJob({ active: false, progress: 0, stage: "" });
     }
   }
@@ -351,7 +370,7 @@ export function AssistantPanel() {
     setBusy(true);
     setJob({ active: false, progress: 0, stage: "" });
     try {
-      if (autoEdit || looksLikePlannerVerb(text)) {
+      if (autoEdit || looksLikePlannerVerb(text) || looksLikeEditEffect(text)) {
         await runAutoEdit(text);
       } else if (classifyIntent(text) === "generate") {
         await runGenerateLayer(text);

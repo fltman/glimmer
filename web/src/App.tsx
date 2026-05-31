@@ -19,7 +19,7 @@ import { HistoryPanel } from "./ui/history/HistoryPanel";
 import { PathsPanel } from "./ui/paths/PathsPanel";
 import { SwatchesPanel } from "./ui/swatches/SwatchesPanel";
 import { ChannelsPanel } from "./ui/channels/ChannelsPanel";
-import { engine, useEngineSnapshot, actions } from "./state/useEngine";
+import { engine, useEngineSnapshot, actions, isAgentBatching } from "./state/useEngine";
 import { toolStore, type ToolId, type ShapeKind } from "./state/tools";
 
 /**
@@ -190,10 +190,13 @@ export default function App() {
   // Reveal the Adjust tab whenever an adjustment layer becomes active (e.g.
   // after Image ▸ Adjustments inserts one, or selecting it in the Layers
   // panel) so its properties / Curves / Levels editors are immediately visible.
+  // EXCEPT during an agent batch (the Assistant/Presets running a multi-step
+  // plan): each add_adjustment step would otherwise yank the user off the AI
+  // tab and its live progress checklist. We keep them where they are.
   const active = snap.layers.find((l) => l.id === snap.activeLayerId) ?? null;
   const activeAdjId = active?.kind === "adjustment" ? active.id : null;
   useEffect(() => {
-    if (activeAdjId) setTab("adjust");
+    if (activeAdjId && !isAgentBatching()) setTab("adjust");
   }, [activeAdjId]);
 
   return (
