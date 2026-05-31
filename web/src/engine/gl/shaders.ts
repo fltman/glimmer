@@ -453,6 +453,73 @@ void main() {
 `;
 
 /**
+ * Brush dab with shape DYNAMICS: an elliptical (roundness) + rotated (angle)
+ * soft tip, with an optional procedural-noise texture (chalk). Identical to
+ * DAB_FRAG when roundness=1, angle=0, textured=false. Coverage is MAX-blended
+ * into the wet buffer by the BrushEngine, so per-dab flow + falloff shape it.
+ *
+ * The dab quad is diameter×diameter; v_uv (0..1) -> local d (-1..1). We rotate d
+ * by -angle into tip space, then squash the minor axis by 1/roundness so the
+ * radial falloff becomes an ellipse oriented at `angle`.
+ */
+export const BRUSH_DAB_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform float u_hardness;
+uniform float u_flow;
+uniform float u_roundness;   // 0..1 (1 = circle)
+uniform float u_angle;       // radians (tip rotation)
+uniform bool u_textured;     // chalk-style noise-modulated alpha
+uniform vec2 u_dabSeed;      // per-dab seed so texture varies between dabs
+uniform sampler2D u_selection;
+uniform bool u_useSelection;
+uniform mat3 u_uvToSel;
+
+// Cheap value noise (hash-based), enough for a chalky grain.
+float hash(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+float valueNoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  float a = hash(i);
+  float b = hash(i + vec2(1.0, 0.0));
+  float c = hash(i + vec2(0.0, 1.0));
+  float d = hash(i + vec2(1.0, 1.0));
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+void main() {
+  vec2 d = v_uv * 2.0 - 1.0;       // -1..1 in the quad
+  // Rotate into tip space (rotate by -angle), then squash the minor axis.
+  float ca = cos(-u_angle), sa = sin(-u_angle);
+  vec2 rot = vec2(ca * d.x - sa * d.y, sa * d.x + ca * d.y);
+  float round = clamp(u_roundness, 0.05, 1.0);
+  rot.y /= round;                  // larger radius along the minor axis = ellipse
+  float r = length(rot);
+  if (r > 1.0) discard;
+  float inner = clamp(u_hardness, 0.0, 0.98);
+  float cov = 1.0 - smoothstep(inner, 1.0, r);
+  cov *= u_flow;
+  if (u_textured) {
+    // Modulate by a couple of noise octaves so coverage breaks up like chalk.
+    vec2 np = v_uv * 9.0 + u_dabSeed;
+    float n = valueNoise(np) * 0.6 + valueNoise(np * 2.3) * 0.4;
+    cov *= mix(0.35, 1.0, n);
+  }
+  if (u_useSelection) {
+    vec3 sUv = u_uvToSel * vec3(v_uv, 1.0);
+    cov *= texture(u_selection, sUv.xy).r;
+  }
+  fragColor = vec4(cov, 0.0, 0.0, 1.0);
+}
+`;
+
+/**
  * Composite the wet stroke buffer (single-channel coverage) onto a target,
  * either as a colored paint stroke (brush) or as an alpha erase. Used to flatten
  * the stroke into the active layer on pointer-up and to show a live preview.
@@ -983,5 +1050,143 @@ uniform vec2 u_offset;       // uv offset (so the inner shadow casts from a dire
 void main() {
   float a = texture(u_src, clamp(v_uv - u_offset, vec2(0.0), vec2(1.0))).r;
   fragColor = vec4(1.0 - a, 0.0, 0.0, 1.0);
+}
+`;
+
+// ════════════════════════════════════════════════════════════
+//  LIQUIFY (displacement-map warp on the active raster layer)
+// ════════════════════════════════════════════════════════════
+/**
+ * The displacement map stores, per layer pixel, the offset (in LAYER PIXELS)
+ * applied when sampling the layer: a fragment at layer uv `p` displays the layer
+ * pixel at `p + disp(p)`. Identity = zero displacement. The RG channels hold the
+ * x/y offset; B/A are unused (kept 0/1). It lives in an RGBA16F color target.
+ *
+ * Each Liquify dab is a read-modify-write of the whole map (blend DISABLED,
+ * in-shader ping-pong — hardware float blend is silently dropped on Chrome/ANGLE
+ * macOS). The shader reads the prior displacement, computes a brush-weighted
+ * delta for the active mode, and writes the combined result. Brush falloff is a
+ * smooth radial weight scaled by pressure.
+ *
+ *   mode 0 forward_warp : translate the displacement under the brush by -motion
+ *                         (so the source the warped pixel samples follows the
+ *                         pointer — pixels appear pushed in the drag direction).
+ *   mode 1 bloat        : push displacement OUTWARD from the brush center (pixels
+ *                         appear to expand) -> sample from inside => disp toward center.
+ *   mode 2 pucker       : pull displacement INWARD (pixels contract).
+ *   mode 3 twirl_left   : rotate displacement CCW around the center.
+ *   mode 4 twirl_right  : rotate displacement CW around the center.
+ *   mode 5 reconstruct  : relax the displacement back toward identity (zero).
+ */
+export const LIQUIFY_DAB_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;                 // 0..1 over the displacement map (== layer uv)
+out vec4 fragColor;
+
+uniform sampler2D u_disp;     // prior displacement (RG = offset in layer px)
+uniform vec2 u_size;          // layer/map size in px
+uniform vec2 u_center;        // brush center in layer px
+uniform float u_radius;       // brush radius in layer px
+uniform vec2 u_motion;        // pointer motion vector (layer px) since last dab
+uniform float u_strength;     // 0..1 effect strength (pressure * mode gain)
+uniform int u_mode;           // see header
+uniform sampler2D u_selection;
+uniform bool u_useSelection;
+uniform mat3 u_uvToSel;       // map uv -> selection uv
+
+void main() {
+  vec2 prior = texture(u_disp, v_uv).rg;
+  vec2 px = v_uv * u_size;            // this fragment in layer px
+  vec2 toC = px - u_center;           // vector from brush center to fragment
+  float dist = length(toC);
+  float r = max(u_radius, 1.0);
+  // Smooth radial falloff (1 at center -> 0 at the rim).
+  float w = 1.0 - smoothstep(0.0, r, dist);
+  w *= u_strength;
+
+  // Selection constrains where Liquify may act (mirrors the brush dab path).
+  if (u_useSelection) {
+    vec3 sUv = u_uvToSel * vec3(v_uv, 1.0);
+    w *= texture(u_selection, clamp(sUv.xy, vec2(0.0), vec2(1.0))).r;
+  }
+
+  vec2 delta = vec2(0.0);
+  if (u_mode == 0) {
+    // forward warp (push): the displayed pixel should come from where the brush
+    // just was, so add -motion weighted by falloff.
+    delta = -u_motion * w;
+  } else if (u_mode == 1) {
+    // bloat: pixels expand outward => sample from nearer the center => disp
+    // points toward the center.
+    vec2 dir = dist > 1e-3 ? toC / dist : vec2(0.0);
+    delta = -dir * (r * 0.5) * w;
+  } else if (u_mode == 2) {
+    // pucker: pixels contract => sample from farther out => disp points outward.
+    vec2 dir = dist > 1e-3 ? toC / dist : vec2(0.0);
+    delta = dir * (r * 0.5) * w;
+  } else if (u_mode == 3 || u_mode == 4) {
+    // twirl: rotate the SAMPLE coordinate around the center. A rotated sample
+    // point s = center + R(theta)*toC; the displacement delta is (s - px).
+    float sign = (u_mode == 3) ? 1.0 : -1.0; // left = CCW
+    float theta = sign * w * 1.2;            // up to ~1.2 rad at full weight
+    float ct = cos(theta), st = sin(theta);
+    vec2 rotated = vec2(ct * toC.x - st * toC.y, st * toC.x + ct * toC.y);
+    delta = rotated - toC;
+  } else {
+    // reconstruct: relax toward identity (pull the displacement toward 0).
+    fragColor = vec4(mix(prior, vec2(0.0), clamp(w, 0.0, 1.0)), 0.0, 1.0);
+    return;
+  }
+
+  fragColor = vec4(prior + delta, 0.0, 1.0);
+}
+`;
+
+/**
+ * Sample the layer THROUGH the displacement map for the live warped preview /
+ * the final bake. `u_disp` holds per-pixel offsets in layer px; the displayed
+ * layer uv is `v_uv + disp(v_uv) / size`. The layer texture is sRGB-decoding
+ * (u_srgbLayer true) or RGBA8 verbatim. Output is premultiplied linear so it can
+ * be composited OVER the backdrop like the brush preview (when u_premul) — for
+ * the bake we instead re-encode straight sRGB (u_premul false).
+ */
+export const LIQUIFY_PREVIEW_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_layer;
+uniform sampler2D u_disp;
+uniform vec2 u_size;
+uniform bool u_srgbLayer;     // TRUE when the layer is an SRGB8_ALPHA8 sampler
+                              // (texture() already returns LINEAR rgb).
+uniform bool u_premul;        // true: premultiplied linear out; false: straight sRGB out
+
+vec3 srgbToLinear(vec3 c) {
+  return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+}
+vec3 linearToSrgb(vec3 c) {
+  return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+}
+
+void main() {
+  vec2 disp = texture(u_disp, v_uv).rg;
+  vec2 srcUv = v_uv + disp / u_size;
+  // Outside the layer reads as transparent (so warps that pull from off-canvas
+  // don't smear the edge texel across the gap).
+  if (srcUv.x < 0.0 || srcUv.x > 1.0 || srcUv.y < 0.0 || srcUv.y > 1.0) {
+    fragColor = vec4(0.0);
+    return;
+  }
+  vec4 c = texture(u_layer, srcUv);
+  // Resolve the sampled rgb to LINEAR: an SRGB8 sampler already decoded; an
+  // RGBA8 sampler returned display-sRGB bytes that we decode here.
+  vec3 lin = u_srgbLayer ? c.rgb : srgbToLinear(c.rgb);
+  if (u_premul) {
+    // Live preview: premultiplied LINEAR so it composites over the backdrop.
+    fragColor = vec4(lin * c.a, c.a);
+  } else {
+    // Bake: straight-alpha DISPLAY-sRGB for the RGBA8 layer store.
+    fragColor = vec4(linearToSrgb(lin), c.a);
+  }
 }
 `;

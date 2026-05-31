@@ -10,6 +10,7 @@ import { ToolRail } from "./ui/ToolRail";
 import { ToolOptions } from "./ui/ToolOptions";
 import { CanvasHost } from "./ui/CanvasHost";
 import { TextEditOverlay } from "./ui/text/TextEditOverlay";
+import { LiquifyPanel } from "./ui/liquify";
 import { LayersPanel } from "./ui/LayersPanel";
 import { AIPanel } from "./ai/AIPanel";
 import { AdjustmentsPanel } from "./ui/adjustments/AdjustmentsPanel";
@@ -87,6 +88,9 @@ export default function App() {
         <main className="relative min-w-0 flex-1">
           <CanvasHost />
           <TextEditOverlay />
+          {/* Floating Liquify controls; render only while a warp session is
+              active (the panel itself returns null otherwise). */}
+          <LiquifyPanel />
         </main>
         <aside className="flex w-80 flex-col border-l border-edge bg-panel">
           {/* Tabbed top section: AI / Adjust / History / Paths / Swatches. */}

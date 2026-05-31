@@ -28,6 +28,7 @@ import {
 } from "../state/useEngine";
 import { ColorPicker } from "./color/ColorPicker";
 import { rgbaCss } from "./color/colorMath";
+import { BrushDynamicsButton, BrushPresetsButton } from "./brush";
 
 /** A tiny checkerboard-backed color chip (so alpha reads correctly). */
 function ColorChip({ color, title }: { color: RGBAColor; title: string }) {
@@ -1194,6 +1195,9 @@ export function ToolOptions() {
             fmt={(v) => `${Math.round(v * 100)}%`}
             onChange={(v) => toolStore.setBrush({ flow: v })}
           />
+          {/* Advanced shape dynamics + saved presets (self-mounted popovers). */}
+          <BrushDynamicsButton />
+          <BrushPresetsButton />
         </div>
       )}
 

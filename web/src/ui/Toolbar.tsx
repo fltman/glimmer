@@ -14,6 +14,7 @@ import { ADJUSTMENTS, ADJUSTMENT_ORDER } from "../engine/adjustments";
 import { FiltersMenu } from "./filters";
 import { SelectMenu } from "./select";
 import { FileMenu } from "./file";
+import { LiquifyMenu } from "./liquify";
 
 /**
  * Image ▸ Adjustments dropdown — Photoshop's `Image > Adjustments` menu.
@@ -152,6 +153,7 @@ export function Toolbar() {
       <FileMenu />
       <ImageMenu disabled={!hasLayers} />
       <FiltersMenu />
+      <LiquifyMenu />
       <SelectMenu />
 
       <div className="mx-1 h-5 w-px bg-edge" />

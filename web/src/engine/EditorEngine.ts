@@ -73,6 +73,7 @@ import {
 import { Selection } from "./Selection";
 import { BrushEngine } from "./paint/BrushEngine";
 import { RetouchEngine, type RetouchMode, type RetouchParams } from "./paint/RetouchEngine";
+import { LiquifyEngine, type LiquifyMode, type LiquifyBrush } from "./LiquifyEngine";
 import { History, paramCommand } from "./history/History";
 import {
   toolStore,
@@ -213,6 +214,26 @@ export class EditorEngine {
   private selection: Selection | null = null;
   private brush: BrushEngine | null = null;
   private retouch: RetouchEngine | null = null;
+  private liquify: LiquifyEngine | null = null;
+
+  // ── liquify session ─────────────────────────────────────
+  /**
+   * Active Liquify session, or null. While set, the active raster layer is
+   * composited THROUGH the displacement map (the warped preview is rendered into
+   * `liquifyPreviewFb` each frame and substituted for the layer). `prevSource`
+   * is captured for the single undo step the bake produces. `mode`/`brush` are
+   * the live tool params the UI modal drives.
+   */
+  private liquifySession: {
+    layerId: LayerId;
+    prevSource: ImageBitmap | ImageData;
+    mode: LiquifyMode;
+    brush: LiquifyBrush;
+  } | null = null;
+  /** Layer-sized RGBA8 warped-preview buffer (rebuilt per frame while liquifying). */
+  private liquifyPreviewFb: FramebufferHandle | null = null;
+  /** Last pointer position (layer px) during a liquify drag, for the motion vector. */
+  private liquifyLast: { x: number; y: number } | null = null;
 
   /** Vector-path store (pen tool). CPU-only geometry; never touches GL. */
   readonly paths = new PathStore();
@@ -276,6 +297,7 @@ export class EditorEngine {
     | { kind: "move"; startX: number; startY: number; origX: number; origY: number; layerId: LayerId }
     | { kind: "paint"; layerId: LayerId; onMask: boolean }
     | { kind: "retouch"; layerId: LayerId; mode: RetouchMode }
+    | { kind: "liquify"; layerId: LayerId }
     | { kind: "marquee"; shape: "rect" | "ellipse"; startDoc: { x: number; y: number }; op: ReturnType<typeof selectionOpFromEvent> }
     | { kind: "lasso"; pts: number[]; op: ReturnType<typeof selectionOpFromEvent> }
     | { kind: "gradient"; layerId: LayerId; from: { x: number; y: number }; to: { x: number; y: number } }
@@ -417,6 +439,7 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     this.selection.resize(this.doc.width, this.doc.height);
     this.brush = new BrushEngine(this.renderer);
     this.retouch = new RetouchEngine(this.renderer);
+    this.liquify = new LiquifyEngine(this.renderer);
     this.markDirty();
   }
 
@@ -785,6 +808,13 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     this.brush = null;
     this.retouch?.dispose();
     this.retouch = null;
+    this.liquify?.dispose();
+    this.liquify = null;
+    // A live liquify session can't survive context loss (its float maps are
+    // gone); drop it so the UI modal closes cleanly on restore.
+    this.liquifySession = null;
+    this.liquifyPreviewFb = null;
+    this.liquifyLast = null;
   }
   private handleContextRestored(): void {
     this.initGL();
@@ -837,6 +867,11 @@ void main() { fragColor = texture(u_src, v_uv); }`,
   private resolveLayerCompositeTexture(id: LayerId): TextureHandle | null {
     const base = this.resolveTexture(id);
     if (!base) return null;
+    // Live Liquify session: composite the layer THROUGH the displacement map.
+    if (this.liquify && this.liquifySession && this.liquifySession.layerId === id) {
+      const warped = this.renderLiquifyPreview(id);
+      if (warped) return warped;
+    }
     // Live retouch stroke: show the in-progress working copy for this layer.
     if (
       this.retouch &&
@@ -2199,6 +2234,17 @@ void main() {
       return;
     }
 
+    // A live Liquify session owns the canvas (modal): any non-pan press is a
+    // warp drag on the session layer. Apply the first dab immediately.
+    if (this.liquifySession) {
+      const docL = this.screenToDoc(local.x, local.y);
+      this.gesture = { kind: "liquify", layerId: this.liquifySession.layerId };
+      this.liquifyLast = { x: docL.x, y: docL.y };
+      this.liquifyDab(docL.x, docL.y, 0, 0);
+      this.markDirty();
+      return;
+    }
+
     const doc = this.screenToDoc(local.x, local.y);
     const activeId = this.doc.getActiveLayerId();
 
@@ -2488,6 +2534,21 @@ void main() {
       return;
     }
 
+    if (g.kind === "liquify") {
+      // Walk coalesced samples so the motion vector (for forward warp) stays
+      // accurate at high pointer rates; each step feeds the per-segment delta.
+      const events = e.getCoalescedEvents?.() ?? [e];
+      for (const ce of events) {
+        const cl = this.localPoint(ce);
+        const doc = this.screenToDoc(cl.x, cl.y);
+        const prev = this.liquifyLast ?? doc;
+        this.liquifyDab(doc.x, doc.y, doc.x - prev.x, doc.y - prev.y, undefined, undefined, ce.pressure);
+        this.liquifyLast = { x: doc.x, y: doc.y };
+      }
+      this.markDirty();
+      return;
+    }
+
     if (g.kind === "gradient") {
       const doc = this.screenToDoc(local.x, local.y);
       // Shift constrains to 45° increments (classic gradient behaviour).
@@ -2560,6 +2621,14 @@ void main() {
       return;
     }
 
+    if (g.kind === "liquify") {
+      // The warp persists in the session (Enter bakes it via commitLiquify, Esc
+      // discards via cancelLiquify). Just end the current drag's motion run.
+      this.liquifyLast = null;
+      this.markDirty();
+      return;
+    }
+
     if (g.kind === "gradient") {
       this.liveGradient = null;
       const grad = toolStore.get().gradient;
@@ -2624,6 +2693,20 @@ void main() {
 
   private handleKeyDown(e: KeyboardEvent): void {
     const meta = e.metaKey || e.ctrlKey;
+
+    // Enter bakes / Esc cancels an active Liquify session.
+    if (!this.textEditing && this.liquifySession) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        this.commitLiquify();
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        this.cancelLiquify();
+        return;
+      }
+    }
 
     // Enter commits / Esc cancels an active transform or crop session. When a
     // text editor overlay is focused, let the UI handle the keys (it'll call
@@ -2891,6 +2974,208 @@ void main() {
     const layer = this.doc.getLayer(id);
     if (!layer || layer.kind !== "raster") return null;
     return { x: src.x + layer.x, y: src.y + layer.y };
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  LIQUIFY (modal displacement-warp session)
+  // ════════════════════════════════════════════════════════
+  /**
+   * Begin a Liquify session on the active (or given) RASTER layer. Snapshots the
+   * layer's pixels for undo, seeds an identity displacement map sized to the
+   * layer, and enters the session. The UI opens a modal while one is active and
+   * routes pointer drags through liquifyDab (or the engine's own pointer
+   * handling, gated on the 'liquify' session). Returns the layer id, or null.
+   */
+  beginLiquify(layerId?: string): LayerId | null {
+    const id = layerId ?? this.doc.getActiveLayerId();
+    const liquify = this.liquify;
+    const sel = this.selection;
+    if (!id || !liquify) return null;
+    const layer = this.doc.getLayer(id);
+    if (!layer || layer.kind !== "raster") return null;
+    const tex = this.resolveTexture(id);
+    if (!tex) return null;
+    // Any open filter preview / transform / crop would fight the warp preview.
+    this.cancelFilter();
+
+    const selTex = sel && !sel.isEmpty() ? sel.texture : null;
+    const docSize = sel ? sel.size : { width: this.doc.width, height: this.doc.height };
+    liquify.begin(
+      { width: layer.width, height: layer.height, x: layer.x, y: layer.y },
+      selTex,
+      docSize,
+    );
+    liquify.seed(tex);
+    this.liquifySession = {
+      layerId: id,
+      prevSource: layer.source,
+      mode: this.liquifySession?.mode ?? "forward_warp",
+      brush: this.liquifySession?.brush ?? { size: 96, pressure: 1 },
+    };
+    this.liquifyLast = null;
+    this.markDirty();
+    this.emit();
+    return id;
+  }
+
+  isLiquifying(): boolean {
+    return !!this.liquifySession;
+  }
+  getLiquifyMode(): LiquifyMode {
+    return this.liquifySession?.mode ?? "forward_warp";
+  }
+  setLiquifyMode(mode: LiquifyMode): void {
+    if (!this.liquifySession) return;
+    this.liquifySession.mode = mode;
+    this.liquifyLast = null; // restart the motion accumulation for the new tool
+    this.emit();
+  }
+  /** Current liquify brush params (copied), or a default when no session. */
+  getLiquifyBrush(): LiquifyBrush {
+    return this.liquifySession ? { ...this.liquifySession.brush } : { size: 96, pressure: 1 };
+  }
+  setLiquifyBrush(patch: Partial<LiquifyBrush>): void {
+    if (!this.liquifySession) return;
+    this.liquifySession.brush = { ...this.liquifySession.brush, ...patch };
+    this.emit();
+  }
+
+  /**
+   * Apply one Liquify dab at document point (docX,docY) with motion (dx,dy) in
+   * DOC px. Used by the engine's internal pointer routing and exposed for the UI.
+   * No-op outside an active session.
+   */
+  liquifyDab(
+    docX: number,
+    docY: number,
+    dx: number,
+    dy: number,
+    mode?: LiquifyMode,
+    size?: number,
+    pressure?: number,
+  ): void {
+    const sess = this.liquifySession;
+    const liquify = this.liquify;
+    if (!sess || !liquify) return;
+    const layer = this.doc.getLayer(sess.layerId);
+    if (!layer || layer.kind !== "raster") return;
+    const m = mode ?? sess.mode;
+    const brush: LiquifyBrush = {
+      size: size ?? sess.brush.size,
+      pressure: pressure ?? sess.brush.pressure ?? 1,
+    };
+    // Doc px and layer px are 1:1 in scale (only translated by the origin), so
+    // the motion vector carries through unchanged.
+    liquify.apply(docX - layer.x, docY - layer.y, dx, dy, m, brush);
+    this.markDirty();
+  }
+
+  /** Relax the whole displacement map back toward identity (modal "Restore All"). */
+  liquifyReconstructAll(amount = 1): void {
+    this.liquify?.reconstructAll(amount);
+    this.markDirty();
+  }
+
+  /**
+   * Bake the warped layer into a new RGBA8 source (sampling through the final
+   * displacement), readback + replaceSource as ONE undo step, end the session.
+   * No-op (just closes) when nothing was warped.
+   */
+  commitLiquify(): void {
+    const r = this.renderer;
+    const liquify = this.liquify;
+    const sess = this.liquifySession;
+    if (!r || !liquify || !sess) {
+      this.endLiquifySession();
+      return;
+    }
+    const layer = this.doc.getLayer(sess.layerId);
+    if (!layer || layer.kind !== "raster" || !liquify.hasEdited()) {
+      this.endLiquifySession();
+      this.markDirty();
+      return;
+    }
+    const target = r.createRGBA8Target(layer.width, layer.height);
+    const ok = liquify.renderWarp(target, /*premul*/ false);
+    if (!ok) {
+      r.deleteFramebuffer(target);
+      this.endLiquifySession();
+      this.markDirty();
+      return;
+    }
+    const rawPx = r.readPixels(target, 0, 0, layer.width, layer.height);
+    r.deleteFramebuffer(target);
+
+    const newSource = rawToImageData(rawPx, layer.width, layer.height);
+    const prevSource = sess.prevSource;
+    const id = layer.id;
+    const apply = () => {
+      this.doc.replaceSource(id, newSource);
+      this.textures.delete(id);
+    };
+    const revert = () => {
+      this.doc.replaceSource(id, prevSource);
+      this.textures.delete(id);
+    };
+    apply();
+    this.history.push({
+      label: "Liquify",
+      bytes: layer.width * layer.height * 4,
+      undo: revert,
+      redo: apply,
+    });
+    this.endLiquifySession();
+    this.markDirty();
+    this.emit();
+  }
+
+  /** Discard the Liquify session without baking (the layer is unchanged). */
+  cancelLiquify(): void {
+    this.endLiquifySession();
+    this.markDirty();
+    this.emit();
+  }
+
+  private endLiquifySession(): void {
+    this.liquify?.end();
+    this.liquifySession = null;
+    this.liquifyLast = null;
+    if (this.liquifyPreviewFb) {
+      this.renderer?.deleteFramebuffer(this.liquifyPreviewFb);
+      this.liquifyPreviewFb = null;
+    }
+  }
+
+  /**
+   * Render the active-session layer warped through the displacement into a
+   * layer-sized RGBA8 buffer (straight-alpha display-sRGB, srgb:false — decoded
+   * in-shader downstream exactly like the retouch working copy). Rebuilt each
+   * frame; returns the buffer's color texture, or null when not ready.
+   */
+  private renderLiquifyPreview(id: LayerId): TextureHandle | null {
+    const r = this.renderer;
+    const liquify = this.liquify;
+    if (!r || !liquify) return null;
+    const layer = this.doc.getLayer(id);
+    if (!layer || layer.kind !== "raster") return null;
+    const fb = this.ensureLiquifyPreviewFb(layer.width, layer.height);
+    if (!fb) return null;
+    return liquify.renderWarp(fb, /*premul*/ false) ? fb.color : null;
+  }
+
+  private ensureLiquifyPreviewFb(w: number, h: number): FramebufferHandle | null {
+    const r = this.renderer;
+    if (!r) return null;
+    if (
+      this.liquifyPreviewFb &&
+      this.liquifyPreviewFb.width === w &&
+      this.liquifyPreviewFb.height === h
+    ) {
+      return this.liquifyPreviewFb;
+    }
+    if (this.liquifyPreviewFb) r.deleteFramebuffer(this.liquifyPreviewFb);
+    this.liquifyPreviewFb = r.createRGBA8Target(Math.max(1, w), Math.max(1, h));
+    return this.liquifyPreviewFb;
   }
 
   // ════════════════════════════════════════════════════════

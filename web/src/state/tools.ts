@@ -64,6 +64,23 @@ export interface BrushParams {
   hardness: number;
   /** Per-dab build-up 0..1. */
   flow: number;
+  // ── shape dynamics (all optional; omitting keeps the soft-round default) ──
+  /** Tip roundness 0..1 (1 = circular; lower squashes the minor axis -> ellipse). */
+  roundness?: number;
+  /** Tip rotation in degrees (orients the elliptical/textured tip). */
+  angle?: number;
+  /** Dab spacing as a percent of the diameter (default 10). */
+  spacing?: number;
+  /** Random per-dab position jitter 0..1 (fraction of the radius). */
+  scatter?: number;
+  /** Random per-dab size jitter 0..1 (fraction of the diameter). */
+  sizeJitter?: number;
+  /** Map pen pressure to dab size when true. */
+  pressureSize?: boolean;
+  /** Map pen pressure to dab opacity/flow when true. */
+  pressureOpacity?: boolean;
+  /** Procedural noise-modulated tip alpha (chalk/textured) when true. */
+  textured?: boolean;
 }
 
 /**
@@ -192,7 +209,20 @@ export interface ToolState {
 
 const DEFAULT: ToolState = {
   active: "brush",
-  brush: { size: 48, opacity: 1, hardness: 0.8, flow: 1 },
+  brush: {
+    size: 48,
+    opacity: 1,
+    hardness: 0.8,
+    flow: 1,
+    roundness: 1,
+    angle: 0,
+    spacing: 10,
+    scatter: 0,
+    sizeJitter: 0,
+    pressureSize: false,
+    pressureOpacity: false,
+    textured: false,
+  },
   feather: 0,
   foreground: { r: 0, g: 0, b: 0, a: 1 },
   background: { r: 1, g: 1, b: 1, a: 1 },
@@ -473,5 +503,177 @@ export function useSwatches(): readonly RGBAColor[] {
     (cb) => swatchStore.subscribe(cb),
     () => swatchStore.get(),
     () => swatchStore.get(),
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+//  BRUSH PRESETS
+// ════════════════════════════════════════════════════════════
+/**
+ * A saved brush configuration. `params` is the brush-param subset applied to
+ * toolStore.brush by applyPreset. Built-ins can't be removed; user presets are
+ * captured from the live brush via addPreset.
+ */
+export interface BrushPreset {
+  id: string;
+  name: string;
+  params: BrushParams;
+  builtin?: boolean;
+}
+
+/** Fill in every BrushParams field so a preset fully defines the brush. */
+function fullBrushParams(p: Partial<BrushParams>): BrushParams {
+  return {
+    size: p.size ?? 48,
+    opacity: p.opacity ?? 1,
+    hardness: p.hardness ?? 0.8,
+    flow: p.flow ?? 1,
+    roundness: p.roundness ?? 1,
+    angle: p.angle ?? 0,
+    spacing: p.spacing ?? 10,
+    scatter: p.scatter ?? 0,
+    sizeJitter: p.sizeJitter ?? 0,
+    pressureSize: p.pressureSize ?? false,
+    pressureOpacity: p.pressureOpacity ?? false,
+    textured: p.textured ?? false,
+  };
+}
+
+/** The built-in preset set (cloned on read so callers can't mutate them). */
+const BUILTIN_BRUSH_PRESETS: BrushPreset[] = [
+  {
+    id: "soft-round",
+    name: "Soft Round",
+    builtin: true,
+    params: fullBrushParams({ size: 48, hardness: 0.5, flow: 1, opacity: 1 }),
+  },
+  {
+    id: "hard-round",
+    name: "Hard Round",
+    builtin: true,
+    params: fullBrushParams({ size: 24, hardness: 0.95, flow: 1, opacity: 1 }),
+  },
+  {
+    id: "chalk",
+    name: "Chalk / Textured",
+    builtin: true,
+    params: fullBrushParams({
+      size: 64,
+      hardness: 0.7,
+      flow: 0.85,
+      opacity: 1,
+      spacing: 8,
+      scatter: 0.12,
+      sizeJitter: 0.2,
+      textured: true,
+    }),
+  },
+  {
+    id: "calligraphic",
+    name: "Calligraphic",
+    builtin: true,
+    params: fullBrushParams({
+      size: 40,
+      hardness: 0.9,
+      flow: 1,
+      opacity: 1,
+      roundness: 0.2,
+      angle: 45,
+      spacing: 6,
+    }),
+  },
+  {
+    id: "airbrush",
+    name: "Airbrush",
+    builtin: true,
+    params: fullBrushParams({
+      size: 80,
+      hardness: 0.2,
+      flow: 0.1,
+      opacity: 1,
+      spacing: 5,
+      pressureOpacity: true,
+    }),
+  },
+  {
+    id: "pencil",
+    name: "Pencil",
+    builtin: true,
+    params: fullBrushParams({
+      size: 6,
+      hardness: 1,
+      flow: 1,
+      opacity: 1,
+      spacing: 5,
+    }),
+  },
+];
+
+class BrushPresetStore {
+  private presets: BrushPreset[] = BUILTIN_BRUSH_PRESETS.map(clonePreset);
+  private seq = 0;
+  private listeners = new Set<Listener>();
+
+  get(): readonly BrushPreset[] {
+    return this.presets;
+  }
+  subscribe(cb: Listener): () => void {
+    this.listeners.add(cb);
+    return () => this.listeners.delete(cb);
+  }
+  private set(next: BrushPreset[]): void {
+    this.presets = next;
+    for (const cb of this.listeners) cb();
+  }
+
+  /** Apply a preset's params to the live brush (no-op if the id is unknown). */
+  apply(id: string): void {
+    const p = this.presets.find((x) => x.id === id);
+    if (!p) return;
+    toolStore.setBrush({ ...p.params });
+  }
+
+  /** Save the current live brush params as a new user preset. Returns its id. */
+  add(name: string): string {
+    this.seq += 1;
+    const id = `brush_${this.seq}`;
+    const preset: BrushPreset = {
+      id,
+      name: name.trim() || `Brush ${this.seq}`,
+      params: fullBrushParams(toolStore.get().brush),
+    };
+    this.set([...this.presets, preset]);
+    return id;
+  }
+
+  /** Remove a user preset (built-ins are protected). */
+  remove(id: string): void {
+    const p = this.presets.find((x) => x.id === id);
+    if (!p || p.builtin) return;
+    this.set(this.presets.filter((x) => x.id !== id));
+  }
+}
+
+function clonePreset(p: BrushPreset): BrushPreset {
+  return { ...p, params: { ...p.params } };
+}
+
+export const brushPresetStore = new BrushPresetStore();
+
+/** Reactive brush-preset list (for a presets panel / dropdown). */
+export function useBrushPresets(): readonly BrushPreset[] {
+  return useSyncExternalStore(
+    (cb) => brushPresetStore.subscribe(cb),
+    () => brushPresetStore.get(),
+    () => brushPresetStore.get(),
+  );
+}
+
+/** Reactive live brush params (for the brush options bar / dynamics panel). */
+export function useBrushParams(): BrushParams {
+  return useSyncExternalStore(
+    (cb) => toolStore.subscribe(cb),
+    () => toolStore.get().brush,
+    () => toolStore.get().brush,
   );
 }

@@ -22,6 +22,7 @@ import { exportImage, type ExportOptions } from "../engine/export";
 import {
   toolStore,
   swatchStore,
+  brushPresetStore,
   type RGBAColor,
   type TextParams,
   type ShapeParams,
@@ -29,7 +30,9 @@ import {
   type GradientParams,
   type GradientStopUI,
   type SelectionOp,
+  type BrushParams,
 } from "./tools";
+import type { LiquifyMode, LiquifyBrush } from "../engine/LiquifyEngine";
 import type { GradientStop } from "../engine/adjustments";
 import type { FilterType, FilterParams } from "../engine/filters";
 import type {
@@ -187,6 +190,40 @@ function viewExtrasCache() {
     prev.snapEnabled === next.snapEnabled;
   if (!same) _viewExtrasCache = next;
   return _viewExtrasCache;
+}
+
+/**
+ * Reactive Liquify session state for the modal: whether a session is active, the
+ * current warp mode, and the brush params. The engine emits on every change.
+ */
+export function useLiquifyState(): {
+  active: boolean;
+  mode: LiquifyMode;
+  brush: LiquifyBrush;
+} {
+  return useSyncExternalStore(
+    (cb) => engine.subscribe(cb),
+    () => liquifyStateCache(),
+    () => liquifyStateCache(),
+  );
+}
+let _liquifyCache: { active: boolean; mode: LiquifyMode; brush: LiquifyBrush } = {
+  active: false,
+  mode: "forward_warp",
+  brush: { size: 96, pressure: 1 },
+};
+function liquifyStateCache() {
+  const active = engine.isLiquifying();
+  const mode = engine.getLiquifyMode();
+  const brush = engine.getLiquifyBrush();
+  const prev = _liquifyCache;
+  const same =
+    prev.active === active &&
+    prev.mode === mode &&
+    prev.brush.size === brush.size &&
+    prev.brush.pressure === brush.pressure;
+  if (!same) _liquifyCache = { active, mode, brush };
+  return _liquifyCache;
 }
 
 // Thin action helpers so components don't reach into the engine directly.
@@ -532,6 +569,72 @@ export const actions = {
   },
   resetSwatches() {
     swatchStore.reset();
+  },
+
+  // ── brush params + dynamics + presets ──
+  /** Patch the live brush params (size/opacity/hardness/flow + dynamics). */
+  setBrushParams(patch: Partial<BrushParams>) {
+    toolStore.setBrush(patch);
+  },
+  /** Apply a brush preset's params to the live brush. */
+  applyBrushPreset(id: string) {
+    brushPresetStore.apply(id);
+  },
+  /** Save the current brush params as a new user preset. Returns its id. */
+  addBrushPreset(name: string) {
+    return brushPresetStore.add(name);
+  },
+  /** Remove a user brush preset (built-ins are protected). */
+  removeBrushPreset(id: string) {
+    brushPresetStore.remove(id);
+  },
+
+  // ── liquify (modal warp session) ──
+  /** Begin a Liquify session on the active (or given) raster layer. */
+  beginLiquify(layerId?: string) {
+    return engine.beginLiquify(layerId);
+  },
+  /** Whether a Liquify session is currently active (drives the modal). */
+  isLiquifying() {
+    return engine.isLiquifying();
+  },
+  /** The active Liquify warp mode. */
+  getLiquifyMode() {
+    return engine.getLiquifyMode();
+  },
+  setLiquifyMode(mode: LiquifyMode) {
+    engine.setLiquifyMode(mode);
+  },
+  /** The active Liquify brush params (size/pressure). */
+  getLiquifyBrush() {
+    return engine.getLiquifyBrush();
+  },
+  setLiquifyBrush(patch: Partial<LiquifyBrush>) {
+    engine.setLiquifyBrush(patch);
+  },
+  /** Apply one Liquify dab at a doc point with a doc-px motion vector. */
+  liquifyDab(
+    docX: number,
+    docY: number,
+    dx: number,
+    dy: number,
+    mode?: LiquifyMode,
+    size?: number,
+    pressure?: number,
+  ) {
+    engine.liquifyDab(docX, docY, dx, dy, mode, size, pressure);
+  },
+  /** Relax the whole displacement map toward identity (modal "Restore All"). */
+  liquifyReconstructAll(amount?: number) {
+    engine.liquifyReconstructAll(amount);
+  },
+  /** Bake the warp into the layer as one undo step and end the session. */
+  commitLiquify() {
+    engine.commitLiquify();
+  },
+  /** Discard the Liquify session (the layer is unchanged). */
+  cancelLiquify() {
+    engine.cancelLiquify();
   },
 
   // ── pen tool / vector paths ──

@@ -13,7 +13,7 @@
  * shader.
  */
 import type { WebGL2Renderer, FramebufferHandle } from "../gl/Renderer";
-import { QUAD_VERT, DAB_FRAG } from "../gl/shaders";
+import { QUAD_VERT, BRUSH_DAB_FRAG } from "../gl/shaders";
 import * as m3 from "../math/mat3";
 import type { BrushParams } from "../../state/tools";
 
@@ -43,7 +43,7 @@ export class BrushEngine {
 
   constructor(renderer: WebGL2Renderer) {
     this.r = renderer;
-    this.dabProg = renderer.compileProgram(QUAD_VERT, DAB_FRAG);
+    this.dabProg = renderer.compileProgram(QUAD_VERT, BRUSH_DAB_FRAG);
   }
 
   get isActive(): boolean {
@@ -76,6 +76,12 @@ export class BrushEngine {
     this.carry = 0;
   }
 
+  /** Dab spacing interval in layer px (percent of diameter, min 1px). */
+  private spacingPx(): number {
+    const pct = this.params.spacing ?? 10;
+    return Math.max(1, (this.params.size * pct) / 100);
+  }
+
   /** Stamp dabs from the previous sample to (x,y) in layer-local px. */
   stampTo(x: number, y: number, pressure: number): void {
     if (!this.active || !this.wet) return;
@@ -90,7 +96,7 @@ export class BrushEngine {
     const dx = x - ax;
     const dy = y - ay;
     const dist = Math.hypot(dx, dy);
-    const spacing = Math.max(1, this.params.size * 0.1);
+    const spacing = this.spacingPx();
     let traveled = this.carry;
     const startPressure = this.last.pressure;
     while (traveled + spacing <= dist) {
@@ -141,10 +147,36 @@ export class BrushEngine {
     const target = this.target;
     if (!wet || !target) return;
     const gl = this.r.gl;
-    const diameter = this.params.size * pressure;
+    const prm = this.params;
+
+    // Pressure -> size (when enabled): scale the diameter by pressure, keeping a
+    // small floor so the dab never vanishes.
+    let diameter = prm.size;
+    if (prm.pressureSize) diameter *= 0.15 + 0.85 * pressure;
+    // Size jitter: randomly shrink the dab by up to sizeJitter of the diameter.
+    const sj = prm.sizeJitter ?? 0;
+    if (sj > 0) diameter *= 1 - Math.random() * sj;
+    diameter = Math.max(1, diameter);
     const radius = diameter / 2;
-    const x0 = cx - radius;
-    const y0 = cy - radius;
+
+    // Scatter: randomly offset the dab center within scatter*radius of the path.
+    let px = cx;
+    let py = cy;
+    const sc = prm.scatter ?? 0;
+    if (sc > 0) {
+      const ang = Math.random() * Math.PI * 2;
+      const rad = Math.random() * sc * radius;
+      px += Math.cos(ang) * rad;
+      py += Math.sin(ang) * rad;
+    }
+    const x0 = px - radius;
+    const y0 = py - radius;
+
+    // Pressure -> opacity (when enabled): fold pressure into the per-dab flow so
+    // lighter pressure lays down less coverage (master opacity is applied at
+    // flatten time and is left untouched).
+    let flow = prm.flow;
+    if (prm.pressureOpacity) flow *= 0.1 + 0.9 * pressure;
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, wet.fbo);
     gl.viewport(0, 0, wet.width, wet.height);
@@ -170,8 +202,19 @@ export class BrushEngine {
       false,
       transform,
     );
-    gl.uniform1f(gl.getUniformLocation(this.dabProg, "u_hardness"), this.params.hardness);
-    gl.uniform1f(gl.getUniformLocation(this.dabProg, "u_flow"), this.params.flow);
+    gl.uniform1f(gl.getUniformLocation(this.dabProg, "u_hardness"), prm.hardness);
+    gl.uniform1f(gl.getUniformLocation(this.dabProg, "u_flow"), flow);
+    gl.uniform1f(gl.getUniformLocation(this.dabProg, "u_roundness"), prm.roundness ?? 1);
+    gl.uniform1f(
+      gl.getUniformLocation(this.dabProg, "u_angle"),
+      ((prm.angle ?? 0) * Math.PI) / 180,
+    );
+    gl.uniform1i(gl.getUniformLocation(this.dabProg, "u_textured"), prm.textured ? 1 : 0);
+    gl.uniform2f(
+      gl.getUniformLocation(this.dabProg, "u_dabSeed"),
+      Math.random() * 100,
+      Math.random() * 100,
+    );
 
     const useSel = !!this.selTex;
     gl.uniform1i(gl.getUniformLocation(this.dabProg, "u_useSelection"), useSel ? 1 : 0);
