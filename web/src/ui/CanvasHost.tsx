@@ -23,6 +23,7 @@ const CURSORS: Record<ToolId, string> = {
   "marquee-rect": "crosshair",
   "marquee-ellipse": "crosshair",
   lasso: "crosshair",
+  "magic-wand": "crosshair",
   hand: "grab",
   eyedropper: "crosshair",
   bucket: "crosshair",
@@ -31,6 +32,13 @@ const CURSORS: Record<ToolId, string> = {
   crop: "crosshair",
   text: "text",
   shape: "crosshair",
+  clone: "crosshair",
+  heal: "crosshair",
+  dodge: "crosshair",
+  burn: "crosshair",
+  smudge: "crosshair",
+  "blur-brush": "crosshair",
+  "sharpen-brush": "crosshair",
 };
 
 /** Accent blue used across the chrome (matches the Tailwind `accent` token). */

@@ -142,6 +142,44 @@ export const actions = {
   clearSelection() {
     engine.clearSelection();
   },
+  /** Magic wand / select-by-color from a document seed point. */
+  magicWandSelect(
+    docX: number,
+    docY: number,
+    opts: {
+      tolerance: number;
+      contiguous: boolean;
+      sampleAllLayers: boolean;
+      op?: import("./tools").SelectionOp;
+    },
+  ) {
+    engine.magicWandSelect(docX, docY, opts);
+  },
+  // ── selection refinement (Select menu) ──
+  invertSelection() {
+    engine.invertSelection();
+  },
+  expandSelection(px: number) {
+    engine.expandSelection(px);
+  },
+  contractSelection(px: number) {
+    engine.contractSelection(px);
+  },
+  featherSelection(px: number) {
+    engine.featherSelection(px);
+  },
+  /** Turn a matte/alpha (e.g. RMBG cutout) into the selection (Select Subject). */
+  setSelectionFromMask(source: ImageData | Uint8Array, feather?: number) {
+    engine.setSelectionFromMask(source, feather);
+  },
+
+  // ── clone source (clone/heal cursor hint) ──
+  setCloneSource(docX: number, docY: number) {
+    engine.setCloneSource(docX, docY);
+  },
+  getCloneSource() {
+    return engine.getCloneSource();
+  },
   // ── history ──
   undo() {
     engine.undo();
@@ -290,5 +328,22 @@ export const actions = {
   },
   setShapeParams(patch: Partial<ShapeParams>) {
     toolStore.setShape(patch);
+  },
+
+  // ── magic wand + retouch tool params ──
+  setMagicWandParams(patch: Partial<import("./tools").MagicWandParams>) {
+    toolStore.setMagicWand(patch);
+  },
+  setCloneParams(patch: Partial<import("./tools").CloneParams>) {
+    toolStore.setClone(patch);
+  },
+  setDodgeBurnParams(patch: Partial<import("./tools").DodgeBurnParams>) {
+    toolStore.setDodgeBurn(patch);
+  },
+  setSmudgeParams(patch: Partial<import("./tools").SmudgeParams>) {
+    toolStore.setSmudge(patch);
+  },
+  setFocusParams(patch: Partial<import("./tools").FocusParams>) {
+    toolStore.setFocus(patch);
   },
 };

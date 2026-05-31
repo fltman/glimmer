@@ -22,6 +22,8 @@ import {
   SEL_COMBINE_FRAG,
   BLUR_FRAG,
   R_COPY_FRAG,
+  MORPH_FRAG,
+  R_INVERT_FRAG,
 } from "./gl/shaders";
 import type { SelectionOp } from "../state/tools";
 
@@ -53,6 +55,8 @@ export class Selection {
   private combineProg: WebGLProgram;
   private blurProg: WebGLProgram;
   private copyProg: WebGLProgram;
+  private morphProg: WebGLProgram;
+  private invertProg: WebGLProgram;
 
   private empty = true;
   /** Cached CPU bounds in doc px (null when empty / unknown). */
@@ -64,6 +68,8 @@ export class Selection {
     this.combineProg = renderer.compileProgram(QUAD_VERT, SEL_COMBINE_FRAG);
     this.blurProg = renderer.compileProgram(QUAD_VERT, BLUR_FRAG);
     this.copyProg = renderer.compileProgram(QUAD_VERT, R_COPY_FRAG);
+    this.morphProg = renderer.compileProgram(QUAD_VERT, MORPH_FRAG);
+    this.invertProg = renderer.compileProgram(QUAD_VERT, R_INVERT_FRAG);
   }
 
   // ── lifecycle ───────────────────────────────────────────
@@ -240,7 +246,110 @@ export class Selection {
     this.afterEdit();
   }
 
+  /**
+   * Combine a doc-sized R8 coverage buffer (e.g. a magic-wand flood result) into
+   * the live selection via a boolean op, with optional feather. The buffer is
+   * row-major, top-down (row 0 = doc top), matching the selection's storage.
+   */
+  combineFromBuffer(buf: Uint8Array, op: SelectionOp, feather = 0): void {
+    if (!this.front || !this.scratch || buf.length < this.docW * this.docH) return;
+    const tex = this.r.createR8Texture(buf, this.docW, this.docH);
+    const gl = this.r.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.scratch.fbo);
+    gl.viewport(0, 0, this.docW, this.docH);
+    gl.disable(gl.BLEND);
+    gl.useProgram(this.copyProg);
+    this.setFullscreen(this.copyProg);
+    gl.uniform1i(gl.getUniformLocation(this.copyProg, "u_src"), 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex.tex);
+    this.r.drawQuad();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.r.deleteTexture(tex);
+    this.combineFromScratch(op);
+    if (feather > 0) this.applyFeather(feather);
+    this.afterEdit();
+  }
+
+  // ── refinement ──────────────────────────────────────────
+  /** Invert the selection (selected <-> unselected). */
+  invert(): void {
+    if (!this.front || !this.back) return;
+    const gl = this.r.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.back.fbo);
+    gl.viewport(0, 0, this.docW, this.docH);
+    gl.disable(gl.BLEND);
+    gl.useProgram(this.invertProg);
+    this.setFullscreen(this.invertProg);
+    gl.uniform1i(gl.getUniformLocation(this.invertProg, "u_src"), 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.front.color.tex);
+    this.r.drawQuad();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.swapFrontBack();
+    this.afterEdit();
+  }
+
+  /** Grow the selection by `px` (morphological dilate, circular kernel). */
+  expand(px: number): void {
+    this.morph(px, 0);
+  }
+  /** Shrink the selection by `px` (morphological erode, circular kernel). */
+  contract(px: number): void {
+    this.morph(px, 1);
+  }
+
+  /** Public feather (separable Gaussian) so the UI can soften an edge. */
+  feather(px: number): void {
+    if (px <= 0 || this.empty) return;
+    this.applyFeather(px);
+    this.afterEdit();
+  }
+
+  /**
+   * Replace the entire selection from an alpha source (a matte). Accepts either
+   * an ImageData (alpha channel used; must be doc-sized) or a doc-sized R8/alpha
+   * Uint8Array. Used by "Select Subject" to turn an RMBG cutout's alpha into a
+   * selection. Out-of-size inputs are ignored.
+   */
+  setFromAlpha(source: ImageData | Uint8Array): void {
+    if (!this.front) return;
+    let buf: Uint8Array;
+    if (source instanceof Uint8Array) {
+      if (source.length < this.docW * this.docH) return;
+      buf = source;
+    } else {
+      if (source.width !== this.docW || source.height !== this.docH) return;
+      buf = new Uint8Array(this.docW * this.docH);
+      const d = source.data;
+      for (let i = 0; i < buf.length; i++) buf[i] = d[i * 4 + 3]!;
+    }
+    this.setFromBuffer(buf);
+  }
+
   // ── internals ───────────────────────────────────────────
+  /** One-shot morphological op on the front buffer. mode 0 = dilate, 1 = erode. */
+  private morph(px: number, mode: number): void {
+    if (!this.front || !this.back || this.empty) return;
+    const radius = Math.min(32, Math.max(1, Math.round(px)));
+    const gl = this.r.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.back.fbo);
+    gl.viewport(0, 0, this.docW, this.docH);
+    gl.disable(gl.BLEND);
+    gl.useProgram(this.morphProg);
+    this.setFullscreen(this.morphProg);
+    gl.uniform1i(gl.getUniformLocation(this.morphProg, "u_src"), 0);
+    gl.uniform2f(gl.getUniformLocation(this.morphProg, "u_texel"), 1 / this.docW, 1 / this.docH);
+    gl.uniform1i(gl.getUniformLocation(this.morphProg, "u_radius"), radius);
+    gl.uniform1i(gl.getUniformLocation(this.morphProg, "u_mode"), mode);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.front.color.tex);
+    this.r.drawQuad();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.swapFrontBack();
+    this.afterEdit();
+  }
+
   /** Fullscreen quad transform (quad [0,1] -> clip), no Y flip. */
   private setFullscreen(prog: WebGLProgram): void {
     const gl = this.r.gl;

@@ -15,6 +15,7 @@ export type ToolId =
   | "marquee-rect"
   | "marquee-ellipse"
   | "lasso"
+  | "magic-wand"
   | "hand"
   | "eyedropper"
   | "bucket"
@@ -22,7 +23,18 @@ export type ToolId =
   | "transform"
   | "crop"
   | "text"
-  | "shape";
+  | "shape"
+  // ── retouch brushes (stroke-based, read the layer pixels) ──
+  | "clone"
+  | "heal"
+  | "dodge"
+  | "burn"
+  | "smudge"
+  | "blur-brush"
+  | "sharpen-brush";
+
+/** Tonal range a dodge/burn stroke targets. */
+export type DodgeBurnRange = "shadows" | "midtones" | "highlights";
 
 /** Shape primitive drawn by the shape tool. */
 export type ShapeKind = "rect" | "ellipse" | "line";
@@ -51,6 +63,55 @@ export interface BrushParams {
   hardness: number;
   /** Per-dab build-up 0..1. */
   flow: number;
+}
+
+/**
+ * Magic-wand / select-by-color params.
+ *   tolerance: 0..255 color distance from the seed considered "in".
+ *   contiguous: flood-fill from the seed (true) vs global color match (false).
+ *   sampleAllLayers: sample the flattened composite (true) vs the active layer.
+ */
+export interface MagicWandParams {
+  tolerance: number;
+  contiguous: boolean;
+  sampleAllLayers: boolean;
+}
+
+/**
+ * Clone-stamp / healing-brush params. Size/hardness/opacity mirror the brush;
+ * `aligned` keeps the source offset fixed relative to the first stroke point
+ * (true) vs re-anchoring to the original source on each new stroke (false).
+ */
+export interface CloneParams {
+  size: number;
+  hardness: number;
+  opacity: number;
+  aligned: boolean;
+}
+
+/** Dodge / burn params (lighten or darken weighted by tonal range). */
+export interface DodgeBurnParams {
+  size: number;
+  hardness: number;
+  /** Per-dab strength 0..1. */
+  exposure: number;
+  range: DodgeBurnRange;
+}
+
+/** Smudge params: drag-smear pickup strength. */
+export interface SmudgeParams {
+  size: number;
+  hardness: number;
+  /** How much color carries along the path 0..1. */
+  strength: number;
+}
+
+/** Blur / sharpen brush params. */
+export interface FocusParams {
+  size: number;
+  hardness: number;
+  /** Effect amount 0..1. */
+  strength: number;
 }
 
 /**
@@ -95,6 +156,16 @@ export interface ToolState {
   text: TextParams;
   /** Shape-tool params (incl. active shapeKind). */
   shape: ShapeParams;
+  /** Magic-wand / select-by-color params. */
+  magicWand: MagicWandParams;
+  /** Clone-stamp + healing-brush params (shared). */
+  clone: CloneParams;
+  /** Dodge/burn params (shared; `range` distinguishes intent). */
+  dodgeBurn: DodgeBurnParams;
+  /** Smudge params. */
+  smudge: SmudgeParams;
+  /** Blur/sharpen brush params (shared). */
+  focus: FocusParams;
 }
 
 const DEFAULT: ToolState = {
@@ -117,6 +188,11 @@ const DEFAULT: ToolState = {
     fill: null, // follow foreground
     stroke: { color: { r: 0, g: 0, b: 0, a: 1 }, width: 0 },
   },
+  magicWand: { tolerance: 32, contiguous: true, sampleAllLayers: false },
+  clone: { size: 48, hardness: 0.6, opacity: 1, aligned: true },
+  dodgeBurn: { size: 64, hardness: 0.4, exposure: 0.25, range: "midtones" },
+  smudge: { size: 48, hardness: 0.5, strength: 0.5 },
+  focus: { size: 48, hardness: 0.5, strength: 0.5 },
 };
 
 type Listener = () => void;
@@ -167,6 +243,23 @@ class ToolStore {
     this.set({ ...this.state, shape: { ...this.state.shape, kind } });
   }
 
+  // ── magic wand + retouch tools ─────────────────────────
+  setMagicWand(patch: Partial<MagicWandParams>): void {
+    this.set({ ...this.state, magicWand: { ...this.state.magicWand, ...patch } });
+  }
+  setClone(patch: Partial<CloneParams>): void {
+    this.set({ ...this.state, clone: { ...this.state.clone, ...patch } });
+  }
+  setDodgeBurn(patch: Partial<DodgeBurnParams>): void {
+    this.set({ ...this.state, dodgeBurn: { ...this.state.dodgeBurn, ...patch } });
+  }
+  setSmudge(patch: Partial<SmudgeParams>): void {
+    this.set({ ...this.state, smudge: { ...this.state.smudge, ...patch } });
+  }
+  setFocus(patch: Partial<FocusParams>): void {
+    this.set({ ...this.state, focus: { ...this.state.focus, ...patch } });
+  }
+
   // ── color ──────────────────────────────────────────────
   setForeground(color: RGBAColor): void {
     this.set({ ...this.state, foreground: clampColor(color) });
@@ -212,9 +305,29 @@ export function useToolState(): ToolState {
   );
 }
 
-/** True for tools that paint into a layer / mask (brush family). */
+/**
+ * Retouch brushes operate stroke-by-stroke on the active layer's existing
+ * pixels (clone/heal/dodge/burn/smudge/blur/sharpen). They route through the
+ * same paint gesture as brush/eraser but use a per-mode stroke-apply pass.
+ */
+export function isRetouchTool(t: ToolId): boolean {
+  return (
+    t === "clone" ||
+    t === "heal" ||
+    t === "dodge" ||
+    t === "burn" ||
+    t === "smudge" ||
+    t === "blur-brush" ||
+    t === "sharpen-brush"
+  );
+}
+
+/**
+ * True for tools that paint into a layer / mask (brush family). Includes the
+ * retouch brushes so pointerdown routes them through the paint gesture.
+ */
 export function isPaintTool(t: ToolId): boolean {
-  return t === "brush" || t === "eraser";
+  return t === "brush" || t === "eraser" || isRetouchTool(t);
 }
 
 /** True for the marquee/lasso selection tools. */

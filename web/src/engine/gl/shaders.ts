@@ -522,3 +522,279 @@ void main() {
   fragColor = vec4(texture(u_src, v_uv).r, 0.0, 0.0, 1.0);
 }
 `;
+
+/**
+ * Morphological dilate / erode of a single-channel (R8) mask. For each texel we
+ * take the max (dilate / grow) or min (erode / shrink) over a square kernel of
+ * radius `u_radius` texels. Used by Selection.expand()/contract() — run once per
+ * call (radius up to 32). Edge-out-of-bounds samples clamp (CLAMP_TO_EDGE), so
+ * erode near a border shrinks correctly and dilate spreads to the border.
+ *   u_mode: 0 = dilate (max), 1 = erode (min).
+ */
+export const MORPH_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_src;
+uniform vec2 u_texel;   // 1/size
+uniform int  u_radius;  // kernel radius in texels (<= 32)
+uniform int  u_mode;    // 0 dilate (max), 1 erode (min)
+void main() {
+  float acc = u_mode == 1 ? 1.0 : 0.0;
+  for (int dy = -32; dy <= 32; dy++) {
+    if (dy < -u_radius || dy > u_radius) continue;
+    for (int dx = -32; dx <= 32; dx++) {
+      if (dx < -u_radius || dx > u_radius) continue;
+      // Circular kernel for rounder grow/shrink.
+      if (dx * dx + dy * dy > u_radius * u_radius) continue;
+      float s = texture(u_src, v_uv + u_texel * vec2(float(dx), float(dy))).r;
+      acc = u_mode == 1 ? min(acc, s) : max(acc, s);
+    }
+  }
+  fragColor = vec4(acc, 0.0, 0.0, 1.0);
+}
+`;
+
+/** Invert a single-channel (R8) mask: out = 1 - in. */
+export const R_INVERT_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_src;
+void main() {
+  fragColor = vec4(1.0 - texture(u_src, v_uv).r, 0.0, 0.0, 1.0);
+}
+`;
+
+// ──────────────────────────────────────────────────────────────
+// Retouch-brush stroke-apply shaders
+//
+// These all read the EXISTING layer pixels (straight-alpha, sRGB-decoding or
+// RGBA8) plus a single-channel wet coverage buffer, and write a new straight
+// sRGB RGBA8 layer pixel. The retouch brushes apply DAB-by-DAB into a working
+// copy of the layer (ping-pong) so neighbouring samples (clone source, smudge
+// pickup, blur/sharpen) see the in-progress result, then the engine reads the
+// working copy back on pointer-up as one undo step. Coverage * opacity (or
+// strength/exposure) controls how strongly each dab modifies the destination.
+// ──────────────────────────────────────────────────────────────
+
+const RETOUCH_COLOR_FNS = /* glsl */ `
+vec3 srgbToLinear(vec3 c) {
+  return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+}
+vec3 linearToSrgb(vec3 c) {
+  return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+}
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+`;
+
+/**
+ * CLONE STAMP apply pass. Copies pixels from a source offset (u_srcOffset, in
+ * destination-uv units) over the destination, modulated by wet coverage. Source
+ * and destination are the SAME working texture (aligned cloning samples the
+ * already-painted result). Operates in straight sRGB display space (verbatim
+ * RGBA8 store), so no linear round-trip is needed for a pure copy.
+ *   u_decodeSrc: 1 when the bound layer texture is sRGB-decoding (pass 0).
+ */
+export const RETOUCH_CLONE_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_layer;   // working layer copy (dst == src texture)
+uniform sampler2D u_wet;     // wet coverage (R)
+uniform vec2 u_srcOffset;    // dst uv -> src uv delta (sampleUv = v_uv + offset)
+uniform float u_opacity;     // master stroke opacity
+uniform bool u_decodeSrc;    // layer texture decodes sRGB on sample
+${RETOUCH_COLOR_FNS}
+void main() {
+  vec4 dst = texture(u_layer, v_uv);
+  if (u_decodeSrc) dst.rgb = linearToSrgb(dst.rgb); // back to display sRGB bytes
+  vec2 sUv = v_uv + u_srcOffset;
+  vec4 src;
+  if (sUv.x < 0.0 || sUv.x > 1.0 || sUv.y < 0.0 || sUv.y > 1.0) {
+    src = dst; // source outside the layer: leave destination unchanged
+  } else {
+    src = texture(u_layer, sUv);
+    if (u_decodeSrc) src.rgb = linearToSrgb(src.rgb);
+  }
+  float cov = clamp(texture(u_wet, v_uv).r * u_opacity, 0.0, 1.0);
+  // Source-over the source pixel onto the destination (premultiply-correct mix
+  // in straight space): blend both color and alpha by coverage.
+  float oa = mix(dst.a, src.a, cov);
+  vec3 oc = mix(dst.rgb * dst.a, src.rgb * src.a, cov);
+  oc = oa > 1e-5 ? oc / oa : vec3(0.0);
+  fragColor = vec4(oc, oa);
+}
+`;
+
+/**
+ * HEALING BRUSH apply pass. Like clone, but transfers the source's HIGH-FREQUENCY
+ * detail while keeping the destination's LOW-FREQUENCY color (a pragmatic
+ * Poisson-lite): healed = dstLow + (src - srcLow). Low-frequency = a small box
+ * blur sampled around each point. Result blends in linear light, modulated by
+ * coverage. srcLow/dstLow are estimated with a fixed 9-tap blur at u_blurStep.
+ */
+export const RETOUCH_HEAL_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_layer;
+uniform sampler2D u_wet;
+uniform vec2 u_srcOffset;
+uniform vec2 u_blurStep;     // texel step for the low-freq estimate
+uniform float u_opacity;
+uniform bool u_decodeSrc;
+${RETOUCH_COLOR_FNS}
+vec3 sampleLin(vec2 uv) {
+  vec3 c = texture(u_layer, clamp(uv, vec2(0.0), vec2(1.0))).rgb;
+  return u_decodeSrc ? c : srgbToLinear(c);
+}
+vec3 lowFreq(vec2 uv) {
+  vec3 s = vec3(0.0);
+  for (int dy = -2; dy <= 2; dy++) {
+    for (int dx = -2; dx <= 2; dx++) {
+      s += sampleLin(uv + u_blurStep * vec2(float(dx), float(dy)));
+    }
+  }
+  return s / 25.0;
+}
+void main() {
+  vec4 dstRaw = texture(u_layer, v_uv);
+  vec3 dstLin = u_decodeSrc ? dstRaw.rgb : srgbToLinear(dstRaw.rgb);
+  vec2 sUv = v_uv + u_srcOffset;
+  float cov = clamp(texture(u_wet, v_uv).r * u_opacity, 0.0, 1.0);
+  if (sUv.x < 0.0 || sUv.x > 1.0 || sUv.y < 0.0 || sUv.y > 1.0 || cov <= 0.0) {
+    // No usable source — pass the destination through (display sRGB store).
+    vec3 disp = u_decodeSrc ? linearToSrgb(dstLin) : dstRaw.rgb;
+    fragColor = vec4(disp, dstRaw.a);
+    return;
+  }
+  vec3 srcLin = sampleLin(sUv);
+  vec3 srcLow = lowFreq(sUv);
+  vec3 dstLow = lowFreq(v_uv);
+  // High-freq from source + low-freq color of destination.
+  vec3 healedLin = clamp(dstLow + (srcLin - srcLow), 0.0, 1.0);
+  vec3 outLin = mix(dstLin, healedLin, cov);
+  float oa = max(dstRaw.a, cov);   // fill transparent dest gradually
+  fragColor = vec4(linearToSrgb(outLin), oa);
+}
+`;
+
+/**
+ * DODGE / BURN apply pass. Lightens (dodge) or darkens (burn) the existing
+ * pixels under the brush, weighted by a tonal-range mask (shadows/mids/
+ * highlights) computed from destination luma. Works in linear light.
+ *   u_mode: 0 dodge (lighten), 1 burn (darken).
+ *   u_range: 0 shadows, 1 midtones, 2 highlights.
+ *   exposure (u_exposure) scales the per-fragment effect by coverage.
+ */
+export const RETOUCH_DODGEBURN_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_layer;
+uniform sampler2D u_wet;
+uniform float u_exposure;    // 0..1 strength
+uniform int u_mode;          // 0 dodge, 1 burn
+uniform int u_range;         // 0 shadows, 1 mids, 2 highlights
+uniform bool u_decodeSrc;
+${RETOUCH_COLOR_FNS}
+void main() {
+  vec4 base = texture(u_layer, v_uv);
+  vec3 lin = u_decodeSrc ? base.rgb : srgbToLinear(base.rgb);
+  float cov = texture(u_wet, v_uv).r;
+  float l = luma(lin);
+  // Tonal-range weight (Gaussian-ish bumps over the luma axis).
+  float w;
+  if (u_range == 0)      w = 1.0 - smoothstep(0.0, 0.5, l);          // shadows
+  else if (u_range == 2) w = smoothstep(0.5, 1.0, l);                // highlights
+  else                   w = 1.0 - abs(l - 0.5) * 2.0;               // midtones
+  w = clamp(w, 0.0, 1.0);
+  float amt = cov * u_exposure * w;
+  vec3 outLin;
+  if (u_mode == 1) {
+    // Burn: scale toward black (Photoshop-like multiplicative darken).
+    outLin = lin * (1.0 - amt * 0.9);
+  } else {
+    // Dodge: screen toward white.
+    outLin = 1.0 - (1.0 - lin) * (1.0 - amt * 0.9);
+  }
+  outLin = clamp(outLin, 0.0, 1.0);
+  fragColor = vec4(linearToSrgb(outLin), base.a);
+}
+`;
+
+/**
+ * SMUDGE apply pass. Drags color along the stroke: each dab pulls the previous
+ * sample point's color toward the current position. We approximate the classic
+ * "pick up + smear" by blending the destination with a sample taken a small step
+ * BACK along the stroke direction (u_smearOffset, dst-uv units), modulated by
+ * coverage * strength. Linear-light blend.
+ */
+export const RETOUCH_SMUDGE_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_layer;
+uniform sampler2D u_wet;
+uniform vec2 u_smearOffset;  // dst uv -> pickup uv delta (sample behind motion)
+uniform float u_strength;    // 0..1 carry amount
+uniform bool u_decodeSrc;
+${RETOUCH_COLOR_FNS}
+void main() {
+  vec4 base = texture(u_layer, v_uv);
+  vec3 dstLin = u_decodeSrc ? base.rgb : srgbToLinear(base.rgb);
+  vec2 pUv = clamp(v_uv + u_smearOffset, vec2(0.0), vec2(1.0));
+  vec4 pick = texture(u_layer, pUv);
+  vec3 pickLin = u_decodeSrc ? pick.rgb : srgbToLinear(pick.rgb);
+  float cov = texture(u_wet, v_uv).r;
+  float amt = clamp(cov * u_strength, 0.0, 1.0);
+  vec3 outLin = mix(dstLin, pickLin, amt);
+  float oa = mix(base.a, pick.a, amt);
+  fragColor = vec4(linearToSrgb(outLin), oa);
+}
+`;
+
+/**
+ * BLUR / SHARPEN apply pass. Computes a 3x3 box blur of the destination; blur
+ * mode mixes toward it, sharpen mode mixes away from it (unsharp mask). The mix
+ * amount = coverage * strength. Linear-light.
+ *   u_mode: 0 blur, 1 sharpen.
+ */
+export const RETOUCH_FOCUS_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_layer;
+uniform sampler2D u_wet;
+uniform vec2 u_texel;        // 1/size
+uniform float u_strength;    // 0..1
+uniform int u_mode;          // 0 blur, 1 sharpen
+uniform bool u_decodeSrc;
+${RETOUCH_COLOR_FNS}
+vec3 sampLin(vec2 uv) {
+  vec3 c = texture(u_layer, clamp(uv, vec2(0.0), vec2(1.0))).rgb;
+  return u_decodeSrc ? c : srgbToLinear(c);
+}
+void main() {
+  vec4 base = texture(u_layer, v_uv);
+  vec3 center = u_decodeSrc ? base.rgb : srgbToLinear(base.rgb);
+  vec3 blur = vec3(0.0);
+  for (int dy = -1; dy <= 1; dy++) {
+    for (int dx = -1; dx <= 1; dx++) {
+      blur += sampLin(v_uv + u_texel * vec2(float(dx), float(dy)));
+    }
+  }
+  blur /= 9.0;
+  float amt = clamp(texture(u_wet, v_uv).r * u_strength, 0.0, 1.0);
+  vec3 outLin;
+  if (u_mode == 1) {
+    // Sharpen (unsharp): push away from the blurred neighbourhood.
+    outLin = center + (center - blur) * amt * 1.5;
+  } else {
+    outLin = mix(center, blur, amt);
+  }
+  outLin = clamp(outLin, 0.0, 1.0);
+  fragColor = vec4(linearToSrgb(outLin), base.a);
+}
+`;

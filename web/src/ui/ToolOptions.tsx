@@ -13,8 +13,10 @@ import {
   useToolState,
   isPaintTool,
   isSelectionTool,
+  isRetouchTool,
   type RGBAColor,
   type ShapeKind,
+  type DodgeBurnRange,
 } from "../state/tools";
 import { actions, engine, useEngineSnapshot } from "../state/useEngine";
 import { ColorPicker } from "./color/ColorPicker";
@@ -237,6 +239,34 @@ function Segmented<T extends string>({
         </button>
       ))}
     </div>
+  );
+}
+
+/** Compact labelled checkbox matching the dark option-bar style. */
+function Checkbox({
+  label,
+  checked,
+  title,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  title?: string;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <label
+      title={title}
+      className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted"
+    >
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="h-3 w-3 accent-accent"
+      />
+      <span>{label}</span>
+    </label>
   );
 }
 
@@ -520,9 +550,253 @@ function ShapeBar() {
   );
 }
 
+/**
+ * Magic-wand option bar: tolerance + contiguous/all-layers toggles, plus quick
+ * selection actions. Clicking the canvas with the wand active auto-triggers the
+ * engine's magicWandSelect with these params (Shift add · Alt subtract).
+ */
+function MagicWandBar() {
+  const { magicWand, feather } = useToolState();
+  return (
+    <div className="flex items-center gap-4">
+      <Slider
+        label="Tolerance"
+        value={magicWand.tolerance}
+        min={0}
+        max={255}
+        step={1}
+        fmt={(v) => `${Math.round(v)}`}
+        onChange={(v) => actions.setMagicWandParams({ tolerance: Math.round(v) })}
+      />
+      <Checkbox
+        label="Contiguous"
+        checked={magicWand.contiguous}
+        title="Flood-fill from the clicked pixel (off = match the color everywhere)"
+        onChange={(contiguous) => actions.setMagicWandParams({ contiguous })}
+      />
+      <Checkbox
+        label="Sample all layers"
+        checked={magicWand.sampleAllLayers}
+        title="Sample the flattened composite instead of just the active layer"
+        onChange={(sampleAllLayers) =>
+          actions.setMagicWandParams({ sampleAllLayers })
+        }
+      />
+      <Slider
+        label="Feather"
+        value={feather}
+        min={0}
+        max={32}
+        step={1}
+        fmt={(v) => `${Math.round(v)}px`}
+        onChange={(v) => toolStore.setFeather(v)}
+      />
+      <span className="text-[11px] text-muted">Click to select · Shift add · Alt subtract</span>
+      <div className="ml-auto flex items-center gap-2">
+        <button className="btn" onClick={() => actions.selectAll()}>
+          Select all
+        </button>
+        <button className="btn" onClick={() => actions.invertSelection()}>
+          Inverse
+        </button>
+        <button className="btn" onClick={() => actions.clearSelection()}>
+          Deselect
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Clone-stamp / healing-brush option bar (shared `clone` params). Shows the live
+ * clone source set via Alt-click (the engine emits a snapshot when it changes,
+ * so this readout stays fresh).
+ */
+function CloneBar({ heal }: { heal: boolean }) {
+  const { clone } = useToolState();
+  // Subscribe to the engine snapshot so the source readout updates on Alt-click.
+  useEngineSnapshot();
+  const src = engine.getCloneSource();
+  return (
+    <div className="flex items-center gap-4">
+      <Slider
+        label="Size"
+        value={clone.size}
+        min={1}
+        max={512}
+        step={1}
+        fmt={(v) => `${Math.round(v)}px`}
+        onChange={(v) => actions.setCloneParams({ size: v })}
+      />
+      <Slider
+        label="Hardness"
+        value={clone.hardness}
+        min={0}
+        max={1}
+        step={0.01}
+        fmt={(v) => `${Math.round(v * 100)}%`}
+        onChange={(v) => actions.setCloneParams({ hardness: v })}
+      />
+      <Slider
+        label="Opacity"
+        value={clone.opacity}
+        min={0}
+        max={1}
+        step={0.01}
+        fmt={(v) => `${Math.round(v * 100)}%`}
+        onChange={(v) => actions.setCloneParams({ opacity: v })}
+      />
+      <Checkbox
+        label="Aligned"
+        checked={clone.aligned}
+        title="Keep the source offset fixed across strokes (off = re-anchor each stroke)"
+        onChange={(aligned) => actions.setCloneParams({ aligned })}
+      />
+      <span className="text-[11px] text-muted">
+        Alt-click to set the {heal ? "healing" : "clone"} source
+        {src
+          ? ` · source ${Math.round(src.x)}, ${Math.round(src.y)}`
+          : " · no source set"}
+      </span>
+    </div>
+  );
+}
+
+/** Tonal-range options for dodge/burn. */
+const DB_RANGE: { id: DodgeBurnRange; label: string; title: string }[] = [
+  { id: "shadows", label: "Shadows", title: "Affect dark tones" },
+  { id: "midtones", label: "Mids", title: "Affect mid tones" },
+  { id: "highlights", label: "Highlights", title: "Affect bright tones" },
+];
+
+/** Dodge / burn option bar (shared `dodgeBurn` params). */
+function DodgeBurnBar({ burn }: { burn: boolean }) {
+  const { dodgeBurn } = useToolState();
+  return (
+    <div className="flex items-center gap-4">
+      <Slider
+        label="Size"
+        value={dodgeBurn.size}
+        min={1}
+        max={512}
+        step={1}
+        fmt={(v) => `${Math.round(v)}px`}
+        onChange={(v) => actions.setDodgeBurnParams({ size: v })}
+      />
+      <Slider
+        label="Hardness"
+        value={dodgeBurn.hardness}
+        min={0}
+        max={1}
+        step={0.01}
+        fmt={(v) => `${Math.round(v * 100)}%`}
+        onChange={(v) => actions.setDodgeBurnParams({ hardness: v })}
+      />
+      <Slider
+        label="Exposure"
+        value={dodgeBurn.exposure}
+        min={0}
+        max={1}
+        step={0.01}
+        fmt={(v) => `${Math.round(v * 100)}%`}
+        onChange={(v) => actions.setDodgeBurnParams({ exposure: v })}
+      />
+      <div className="flex items-center gap-2">
+        <span className="text-[11px] text-muted">Range</span>
+        <Segmented<DodgeBurnRange>
+          options={DB_RANGE}
+          value={dodgeBurn.range}
+          onChange={(range) => actions.setDodgeBurnParams({ range })}
+        />
+      </div>
+      <span className="text-[11px] text-muted">
+        Drag to {burn ? "darken" : "lighten"} the {dodgeBurn.range}
+      </span>
+    </div>
+  );
+}
+
+/** Smudge option bar. */
+function SmudgeBar() {
+  const { smudge } = useToolState();
+  return (
+    <div className="flex items-center gap-4">
+      <Slider
+        label="Size"
+        value={smudge.size}
+        min={1}
+        max={512}
+        step={1}
+        fmt={(v) => `${Math.round(v)}px`}
+        onChange={(v) => actions.setSmudgeParams({ size: v })}
+      />
+      <Slider
+        label="Hardness"
+        value={smudge.hardness}
+        min={0}
+        max={1}
+        step={0.01}
+        fmt={(v) => `${Math.round(v * 100)}%`}
+        onChange={(v) => actions.setSmudgeParams({ hardness: v })}
+      />
+      <Slider
+        label="Strength"
+        value={smudge.strength}
+        min={0}
+        max={1}
+        step={0.01}
+        fmt={(v) => `${Math.round(v * 100)}%`}
+        onChange={(v) => actions.setSmudgeParams({ strength: v })}
+      />
+      <span className="text-[11px] text-muted">Drag to smear color along the path</span>
+    </div>
+  );
+}
+
+/** Blur / sharpen brush option bar (shared `focus` params). */
+function FocusBar({ sharpen }: { sharpen: boolean }) {
+  const { focus } = useToolState();
+  return (
+    <div className="flex items-center gap-4">
+      <Slider
+        label="Size"
+        value={focus.size}
+        min={1}
+        max={512}
+        step={1}
+        fmt={(v) => `${Math.round(v)}px`}
+        onChange={(v) => actions.setFocusParams({ size: v })}
+      />
+      <Slider
+        label="Hardness"
+        value={focus.hardness}
+        min={0}
+        max={1}
+        step={0.01}
+        fmt={(v) => `${Math.round(v * 100)}%`}
+        onChange={(v) => actions.setFocusParams({ hardness: v })}
+      />
+      <Slider
+        label="Strength"
+        value={focus.strength}
+        min={0}
+        max={1}
+        step={0.01}
+        fmt={(v) => `${Math.round(v * 100)}%`}
+        onChange={(v) => actions.setFocusParams({ strength: v })}
+      />
+      <span className="text-[11px] text-muted">
+        Drag to {sharpen ? "sharpen" : "blur"} under the brush
+      </span>
+    </div>
+  );
+}
+
 export function ToolOptions() {
   const { active, brush, feather, foreground, background } = useToolState();
-  const paint = isPaintTool(active);
+  // The retouch brushes report as paint tools (shared gesture path) but have
+  // their own option bars, so the generic brush bar must exclude them.
+  const paint = isPaintTool(active) && !isRetouchTool(active);
   const sel = isSelectionTool(active);
 
   return (
@@ -634,6 +908,16 @@ export function ToolOptions() {
       {active === "crop" && <CropBar />}
       {active === "text" && <TextBar />}
       {active === "shape" && <ShapeBar />}
+
+      {/* Magic wand + retouch brushes. */}
+      {active === "magic-wand" && <MagicWandBar />}
+      {active === "clone" && <CloneBar heal={false} />}
+      {active === "heal" && <CloneBar heal={true} />}
+      {active === "dodge" && <DodgeBurnBar burn={false} />}
+      {active === "burn" && <DodgeBurnBar burn={true} />}
+      {active === "smudge" && <SmudgeBar />}
+      {active === "blur-brush" && <FocusBar sharpen={false} />}
+      {active === "sharpen-brush" && <FocusBar sharpen={true} />}
     </div>
   );
 }

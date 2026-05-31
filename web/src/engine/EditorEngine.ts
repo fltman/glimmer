@@ -51,13 +51,16 @@ import {
 import * as m3 from "./math/mat3";
 import { Selection } from "./Selection";
 import { BrushEngine } from "./paint/BrushEngine";
+import { RetouchEngine, type RetouchMode, type RetouchParams } from "./paint/RetouchEngine";
 import { History, paramCommand } from "./history/History";
 import {
   toolStore,
   isPaintTool,
+  isRetouchTool,
   isSelectionTool,
   selectionOpFromEvent,
   type ToolId,
+  type SelectionOp,
   type RGBAColor,
   type ShapeKind,
 } from "../state/tools";
@@ -156,6 +159,7 @@ export class EditorEngine {
 
   private selection: Selection | null = null;
   private brush: BrushEngine | null = null;
+  private retouch: RetouchEngine | null = null;
 
   /** GPU textures resolved lazily from the Document's CPU sources. */
   private textures = new Map<LayerId, TextureHandle>();
@@ -203,6 +207,7 @@ export class EditorEngine {
     | { kind: "pan" }
     | { kind: "move"; startX: number; startY: number; origX: number; origY: number; layerId: LayerId }
     | { kind: "paint"; layerId: LayerId; onMask: boolean }
+    | { kind: "retouch"; layerId: LayerId; mode: RetouchMode }
     | { kind: "marquee"; shape: "rect" | "ellipse"; startDoc: { x: number; y: number }; op: ReturnType<typeof selectionOpFromEvent> }
     | { kind: "lasso"; pts: number[]; op: ReturnType<typeof selectionOpFromEvent> }
     | { kind: "gradient"; layerId: LayerId; from: { x: number; y: number }; to: { x: number; y: number } }
@@ -332,6 +337,7 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     this.selection = new Selection(this.renderer);
     this.selection.resize(this.doc.width, this.doc.height);
     this.brush = new BrushEngine(this.renderer);
+    this.retouch = new RetouchEngine(this.renderer);
     this.markDirty();
   }
 
@@ -690,6 +696,8 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     this.selection = null;
     this.brush?.dispose();
     this.brush = null;
+    this.retouch?.dispose();
+    this.retouch = null;
   }
   private handleContextRestored(): void {
     this.initGL();
@@ -742,6 +750,16 @@ void main() { fragColor = texture(u_src, v_uv); }`,
   private resolveLayerCompositeTexture(id: LayerId): TextureHandle | null {
     const base = this.resolveTexture(id);
     if (!base) return null;
+    // Live retouch stroke: show the in-progress working copy for this layer.
+    if (
+      this.retouch &&
+      this.retouch.isActive &&
+      this.gesture.kind === "retouch" &&
+      this.gesture.layerId === id
+    ) {
+      const work = this.retouch.workTexture;
+      if (work) return work;
+    }
     const fp = this.filterPreview;
     if (fp && fp.layerId === id) {
       const layer = this.doc.getLayer(id);
@@ -1397,8 +1415,39 @@ void main() {
       return;
     }
 
+    // Retouch brushes (clone/heal/dodge/burn/smudge/blur/sharpen) operate on the
+    // active raster layer's pixels. Intercept BEFORE the generic paint branch
+    // (isPaintTool now includes them). Alt/Option-click on clone/heal sets the
+    // clone source instead of starting a stroke.
+    if (isRetouchTool(tool) && activeId) {
+      if ((tool === "clone" || tool === "heal") && e.altKey) {
+        const layer = this.doc.getLayer(activeId);
+        if (layer && layer.kind === "raster") {
+          this.retouch?.setCloneSource(doc.x - layer.x, doc.y - layer.y);
+          this.markDirty();
+          this.emit();
+        }
+        this.gesture = { kind: "none" };
+        return;
+      }
+      this.beginRetouch(activeId, tool, doc, e);
+      return;
+    }
+
     if (isPaintTool(tool) && activeId) {
       this.beginPaint(activeId, doc, e);
+      return;
+    }
+
+    if (tool === "magic-wand") {
+      const mw = toolStore.get().magicWand;
+      this.magicWandSelect(doc.x, doc.y, {
+        tolerance: mw.tolerance,
+        contiguous: mw.contiguous,
+        sampleAllLayers: mw.sampleAllLayers,
+        op: selectionOpFromEvent(e),
+      });
+      this.gesture = { kind: "none" };
       return;
     }
 
@@ -1530,6 +1579,19 @@ void main() {
       return;
     }
 
+    if (g.kind === "retouch") {
+      const events = e.getCoalescedEvents?.() ?? [e];
+      for (const ce of events) {
+        const cl = this.localPoint(ce);
+        const doc = this.screenToDoc(cl.x, cl.y);
+        const layer = this.doc.getLayer(g.layerId);
+        if (!layer || layer.kind !== "raster") break;
+        this.retouch?.stampTo(doc.x - layer.x, doc.y - layer.y, ce.pressure);
+      }
+      this.markDirty();
+      return;
+    }
+
     if (g.kind === "gradient") {
       const doc = this.screenToDoc(local.x, local.y);
       // Shift constrains to 45° increments (classic gradient behaviour).
@@ -1592,6 +1654,11 @@ void main() {
 
     if (g.kind === "paint") {
       this.commitPaint(g.layerId, g.onMask);
+      return;
+    }
+
+    if (g.kind === "retouch") {
+      this.commitRetouch(g.layerId, g.mode);
       return;
     }
 
@@ -1750,6 +1817,375 @@ void main() {
     }
     brush.end();
     this.markDirty();
+  }
+
+  // ── retouch stroke lifecycle (clone/heal/dodge/burn/smudge/blur/sharpen) ──
+  /** Map a ToolId to a RetouchEngine mode. */
+  private retouchModeFor(tool: ToolId): RetouchMode | null {
+    switch (tool) {
+      case "clone": return "clone";
+      case "heal": return "heal";
+      case "dodge": return "dodge";
+      case "burn": return "burn";
+      case "smudge": return "smudge";
+      case "blur-brush": return "blur";
+      case "sharpen-brush": return "sharpen";
+      default: return null;
+    }
+  }
+
+  /**
+   * Begin a retouch stroke on a raster layer. Seeds the working buffer from the
+   * layer's current texture, then stamps the first dab. Clone/heal need a source
+   * point (set via Alt-click) — without one, the stroke is a no-op (the dab is
+   * skipped) until a source exists.
+   */
+  private beginRetouch(
+    layerId: LayerId,
+    tool: ToolId,
+    doc: { x: number; y: number },
+    e: PointerEvent,
+  ): void {
+    const layer = this.doc.getLayer(layerId);
+    const retouch = this.retouch;
+    const sel = this.selection;
+    const mode = this.retouchModeFor(tool);
+    if (!layer || layer.kind !== "raster" || !retouch || !mode) return;
+    const tex = this.resolveTexture(layerId);
+    if (!tex) return;
+
+    const ts = toolStore.get();
+    let params: RetouchParams;
+    let aligned = true;
+    if (mode === "clone" || mode === "heal") {
+      params = { size: ts.clone.size, hardness: ts.clone.hardness, amount: ts.clone.opacity };
+      aligned = ts.clone.aligned;
+    } else if (mode === "dodge" || mode === "burn") {
+      params = {
+        size: ts.dodgeBurn.size,
+        hardness: ts.dodgeBurn.hardness,
+        amount: ts.dodgeBurn.exposure,
+        range: ts.dodgeBurn.range,
+      };
+    } else if (mode === "smudge") {
+      params = { size: ts.smudge.size, hardness: ts.smudge.hardness, amount: ts.smudge.strength };
+    } else {
+      params = { size: ts.focus.size, hardness: ts.focus.hardness, amount: ts.focus.strength };
+    }
+
+    const selTex = sel && !sel.isEmpty() ? sel.texture : null;
+    const docSize = sel ? sel.size : { width: this.doc.width, height: this.doc.height };
+    retouch.begin(
+      mode,
+      { width: layer.width, height: layer.height, x: layer.x, y: layer.y },
+      params,
+      aligned,
+      selTex,
+      docSize,
+    );
+    retouch.seed(tex);
+    this.gesture = { kind: "retouch", layerId, mode };
+    retouch.stampTo(doc.x - layer.x, doc.y - layer.y, e.pressure);
+    this.markDirty();
+  }
+
+  /** Read the retouch working buffer back into a new layer source; one undo step. */
+  private commitRetouch(layerId: LayerId, mode: RetouchMode): void {
+    const r = this.renderer;
+    const retouch = this.retouch;
+    const layer = this.doc.getLayer(layerId);
+    if (!r || !retouch || !layer || layer.kind !== "raster") {
+      retouch?.end();
+      this.markDirty();
+      return;
+    }
+    const work = retouch.workTexture;
+    // Nothing changed (e.g. clone with no source point) — discard without a step.
+    if (!work || !retouch.hasEdited()) {
+      retouch.end();
+      this.markDirty();
+      return;
+    }
+    const gl = r.gl;
+    const target = r.createRGBA8Target(layer.width, layer.height);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+    gl.viewport(0, 0, layer.width, layer.height);
+    gl.disable(gl.BLEND);
+    const prog = this.copyProgram!;
+    gl.useProgram(prog);
+    gl.uniformMatrix3fv(
+      gl.getUniformLocation(prog, "u_transform"),
+      false,
+      new Float32Array([2, 0, 0, 0, 2, 0, -1, -1, 1]),
+    );
+    gl.uniform1i(gl.getUniformLocation(prog, "u_src"), 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, work.tex);
+    r.drawQuad();
+    const rawPx = r.readPixels(target, 0, 0, layer.width, layer.height);
+    r.deleteFramebuffer(target);
+    retouch.end();
+
+    const newSource = rawToImageData(rawPx, layer.width, layer.height);
+    const prevSource = layer.source;
+    const id = layer.id;
+    const apply = () => {
+      this.doc.replaceSource(id, newSource);
+      this.textures.delete(id);
+    };
+    const revert = () => {
+      this.doc.replaceSource(id, prevSource);
+      this.textures.delete(id);
+    };
+    apply();
+    this.history.push({
+      label: RETOUCH_LABELS[mode],
+      bytes: layer.width * layer.height * 4,
+      undo: revert,
+      redo: apply,
+    });
+    this.markDirty();
+  }
+
+  /** Set the clone source in document px (UI cursor / Alt-click flow). */
+  setCloneSource(docX: number, docY: number): void {
+    const id = this.doc.getActiveLayerId();
+    if (!id) return;
+    const layer = this.doc.getLayer(id);
+    if (!layer || layer.kind !== "raster") return;
+    this.retouch?.setCloneSource(docX - layer.x, docY - layer.y);
+    this.markDirty();
+    this.emit();
+  }
+
+  /** The current clone source in DOCUMENT px (for a UI cursor hint), or null. */
+  getCloneSource(): { x: number; y: number } | null {
+    const id = this.doc.getActiveLayerId();
+    const src = this.retouch?.getCloneSource();
+    if (!src || !id) return null;
+    const layer = this.doc.getLayer(id);
+    if (!layer || layer.kind !== "raster") return null;
+    return { x: src.x + layer.x, y: src.y + layer.y };
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  MAGIC WAND / SELECT BY COLOR
+  // ════════════════════════════════════════════════════════
+  /**
+   * Build a selection from a color match at a document seed point. Reads the
+   * source pixels (active raster layer, or the flattened composite when
+   * `sampleAllLayers`) via RGBA8 readback, then either flood-fills contiguously
+   * from the seed or matches globally by color distance vs the seed color. The
+   * resulting coverage is anti-aliased one px at the edge and combined into the
+   * live selection per the boolean `op`. No undo (selections aren't on history,
+   * matching the existing marquee/lasso behaviour).
+   */
+  magicWandSelect(
+    docX: number,
+    docY: number,
+    opts: {
+      tolerance: number;
+      contiguous: boolean;
+      sampleAllLayers: boolean;
+      op?: SelectionOp;
+    },
+  ): void {
+    const r = this.renderer;
+    const sel = this.selection;
+    if (!r || !sel) return;
+    const dw = this.doc.width;
+    const dh = this.doc.height;
+    const sx = Math.round(docX);
+    const sy = Math.round(docY);
+    if (sx < 0 || sy < 0 || sx >= dw || sy >= dh) return;
+
+    // Acquire doc-sized, top-down RGBA8 source pixels.
+    const px = this.readSourcePixels(opts.sampleAllLayers);
+    if (!px) return;
+
+    const seedIdx = (sy * dw + sx) * 4;
+    const sr = px[seedIdx] ?? 0;
+    const sg = px[seedIdx + 1] ?? 0;
+    const sb = px[seedIdx + 2] ?? 0;
+    const sa = px[seedIdx + 3] ?? 0;
+    // Tolerance is a 0..255 per-channel-ish threshold; compare squared euclidean
+    // distance against tol^2 * channels for a smooth round region.
+    const tol = Math.max(0, opts.tolerance);
+    const tol2 = tol * tol * 3; // RGB; alpha handled separately below.
+
+    const mask = new Uint8Array(dw * dh);
+    const inRange = (i: number): boolean => {
+      const o = i * 4;
+      const dr = (px[o] ?? 0) - sr;
+      const dg = (px[o + 1] ?? 0) - sg;
+      const db = (px[o + 2] ?? 0) - sb;
+      const da = (px[o + 3] ?? 0) - sa;
+      // Distance includes alpha so transparent vs opaque regions separate.
+      return dr * dr + dg * dg + db * db + da * da <= tol2 + tol * tol;
+    };
+
+    if (opts.contiguous) {
+      // 4-connected flood fill from the seed (iterative stack).
+      const stack: number[] = [sy * dw + sx];
+      const seen = new Uint8Array(dw * dh);
+      seen[sy * dw + sx] = 1;
+      while (stack.length) {
+        const i = stack.pop()!;
+        if (!inRange(i)) continue;
+        mask[i] = 255;
+        const x = i % dw;
+        const y = (i - x) / dw;
+        if (x > 0 && !seen[i - 1]) { seen[i - 1] = 1; stack.push(i - 1); }
+        if (x < dw - 1 && !seen[i + 1]) { seen[i + 1] = 1; stack.push(i + 1); }
+        if (y > 0 && !seen[i - dw]) { seen[i - dw] = 1; stack.push(i - dw); }
+        if (y < dh - 1 && !seen[i + dw]) { seen[i + dw] = 1; stack.push(i + dw); }
+      }
+    } else {
+      for (let i = 0; i < dw * dh; i++) if (inRange(i)) mask[i] = 255;
+    }
+
+    // Light edge antialias: average each border texel with its 4-neighbourhood
+    // so the marching-ants contour and feathered edits look less jagged.
+    antialiasMaskEdge(mask, dw, dh);
+
+    const op: SelectionOp = opts.op ?? "replace";
+    sel.combineFromBuffer(mask, op, toolStore.get().feather);
+    this.markDirty();
+    this.emit();
+  }
+
+  /**
+   * Doc-sized, top-down RGBA8 source pixels for the magic wand. When
+   * `allLayers`, this is the flattened composite (un-premultiplied, sRGB); else
+   * the active raster layer rendered into the document frame (out-of-footprint
+   * pixels are transparent). Returns null when nothing is samplable.
+   */
+  private readSourcePixels(allLayers: boolean): Uint8ClampedArray | null {
+    const r = this.renderer;
+    if (!r) return null;
+    const dw = this.doc.width;
+    const dh = this.doc.height;
+
+    if (allLayers) {
+      const fb = this.renderDocumentComposite();
+      if (!fb) return null;
+      const raw = r.readPixels(fb, 0, 0, dw, dh);
+      r.deleteFramebuffer(fb);
+      // renderDocumentComposite returns premultiplied display-sRGB? No — it
+      // blits the LINEAR accumulator into RGBA8 verbatim (premultiplied linear
+      // bytes). Un-premultiply + encode to sRGB, and flip rows to top-down.
+      const out = new Uint8ClampedArray(dw * dh * 4);
+      for (let y = 0; y < dh; y++) {
+        const srcRow = (dh - 1 - y) * dw * 4;
+        const dstRow = y * dw * 4;
+        for (let x = 0; x < dw * 4; x += 4) {
+          const a = (raw[srcRow + x + 3] ?? 0) / 255;
+          const inv = a > 1e-4 ? 1 / a : 0;
+          for (let ch = 0; ch < 3; ch++) {
+            const lin = ((raw[srcRow + x + ch] ?? 0) / 255) * inv;
+            out[dstRow + x + ch] = Math.round(linearToSrgb(lin) * 255);
+          }
+          out[dstRow + x + 3] = raw[srcRow + x + 3] ?? 0;
+        }
+      }
+      return out;
+    }
+
+    // Active raster layer only — render it into a doc-frame RGBA8 target.
+    const id = this.doc.getActiveLayerId();
+    if (!id) return null;
+    const layer = this.doc.getLayer(id);
+    if (!layer || layer.kind !== "raster") return null;
+    const tex = this.resolveTexture(id);
+    const blend = this.normalBlendProgram;
+    if (!tex || !blend) return null;
+    const gl = r.gl;
+    const target = r.createRGBA8Target(dw, dh);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+    gl.viewport(0, 0, dw, dh);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.BLEND);
+    gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(blend);
+    const pixToClip = m3.pixelToClip(dw, dh);
+    const toDocPx = m3.multiply(
+      m3.translation(layer.x, layer.y),
+      m3.scaling(layer.width, layer.height),
+    );
+    const transform = m3.multiply(pixToClip, toDocPx);
+    gl.uniformMatrix3fv(gl.getUniformLocation(blend, "u_transform"), false, transform);
+    gl.uniform1f(gl.getUniformLocation(blend, "u_opacity"), 1);
+    gl.uniform1i(gl.getUniformLocation(blend, "u_tex"), 0);
+    gl.uniform1i(gl.getUniformLocation(blend, "u_srgbSource"), tex.srgb ? 0 : 1);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex.tex);
+    r.drawQuad();
+    gl.disable(gl.BLEND);
+    const raw = r.readPixels(target, 0, 0, dw, dh);
+    r.deleteFramebuffer(target);
+    // Premultiplied linear bytes, bottom-up -> straight sRGB, top-down.
+    const out = new Uint8ClampedArray(dw * dh * 4);
+    for (let y = 0; y < dh; y++) {
+      const srcRow = (dh - 1 - y) * dw * 4;
+      const dstRow = y * dw * 4;
+      for (let x = 0; x < dw * 4; x += 4) {
+        const a = (raw[srcRow + x + 3] ?? 0) / 255;
+        const inv = a > 1e-4 ? 1 / a : 0;
+        for (let ch = 0; ch < 3; ch++) {
+          const lin = ((raw[srcRow + x + ch] ?? 0) / 255) * inv;
+          out[dstRow + x + ch] = Math.round(linearToSrgb(lin) * 255);
+        }
+        out[dstRow + x + 3] = raw[srcRow + x + 3] ?? 0;
+      }
+    }
+    return out;
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  SELECTION REFINEMENT
+  // ════════════════════════════════════════════════════════
+  /** Invert the current selection. */
+  invertSelection(): void {
+    const sel = this.selection;
+    if (!sel) return;
+    // An empty selection inverts to "select all" (Photoshop parity).
+    if (sel.isEmpty()) sel.selectAll();
+    else sel.invert();
+    this.markDirty();
+    this.emit();
+  }
+  /** Grow the selection by `px` (morphological dilate). */
+  expandSelection(px: number): void {
+    this.selection?.expand(px);
+    this.markDirty();
+    this.emit();
+  }
+  /** Shrink the selection by `px` (morphological erode). */
+  contractSelection(px: number): void {
+    this.selection?.contract(px);
+    this.markDirty();
+    this.emit();
+  }
+  /** Feather (Gaussian-soften) the selection edge by `px`. */
+  featherSelection(px: number): void {
+    this.selection?.feather(px);
+    this.markDirty();
+    this.emit();
+  }
+
+  /**
+   * Replace the selection from a matte/alpha source (e.g. an RMBG "Select
+   * Subject" cutout). Accepts an ImageData (alpha channel used; must be
+   * doc-sized) or a doc-sized R8/alpha Uint8Array. Optionally feathers the edge.
+   */
+  setSelectionFromMask(source: ImageData | Uint8Array, feather = 0): void {
+    const sel = this.selection;
+    if (!sel) return;
+    sel.setFromAlpha(source);
+    if (feather > 0) sel.feather(feather);
+    this.markDirty();
+    this.emit();
   }
 
   /** Render layer texture + wet stroke into a new RGBA8 source; swap + undo. */
@@ -3687,6 +4123,40 @@ function pointInQuad(
     }
   }
   return true;
+}
+
+/** Undo labels per retouch mode. */
+const RETOUCH_LABELS: Record<RetouchMode, string> = {
+  clone: "Clone Stamp",
+  heal: "Healing Brush",
+  dodge: "Dodge",
+  burn: "Burn",
+  smudge: "Smudge",
+  blur: "Blur",
+  sharpen: "Sharpen",
+};
+
+/**
+ * Cheap one-pass edge antialias for a binary 0/255 R8 mask. Border texels (a
+ * selected texel adjacent to an unselected one, or vice-versa) are set to the
+ * average of their 4-neighbourhood so the contour is smoother. Operates on a
+ * copy of the input so the averaging isn't order-dependent.
+ */
+function antialiasMaskEdge(mask: Uint8Array, w: number, h: number): void {
+  const src = mask.slice();
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const c = src[i]!;
+      const l = x > 0 ? src[i - 1]! : c;
+      const rr = x < w - 1 ? src[i + 1]! : c;
+      const u = y > 0 ? src[i - w]! : c;
+      const d = y < h - 1 ? src[i + w]! : c;
+      // Only soften texels on the boundary (a neighbour differs).
+      if (l === c && rr === c && u === c && d === c) continue;
+      mask[i] = Math.round((c + l + rr + u + d) / 5);
+    }
+  }
 }
 
 function linearToSrgb(c: number): number {

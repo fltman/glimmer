@@ -12,6 +12,7 @@ import {
 import { exportPng } from "../engine/export";
 import { ADJUSTMENTS, ADJUSTMENT_ORDER } from "../engine/adjustments";
 import { FiltersMenu } from "./filters";
+import { SelectMenu } from "./select";
 
 /**
  * Image ▸ Adjustments dropdown — Photoshop's `Image > Adjustments` menu.
@@ -149,6 +150,7 @@ export function Toolbar() {
       {/* Photoshop-style menus */}
       <ImageMenu disabled={!hasLayers} />
       <FiltersMenu />
+      <SelectMenu />
 
       <div className="mx-1 h-5 w-px bg-edge" />
 
