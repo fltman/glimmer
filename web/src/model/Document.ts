@@ -79,7 +79,7 @@ export const BLEND_MODE_LABELS: { mode: BlendMode; label: string }[] = [
   { mode: "luminosity", label: "Luminosity" },
 ];
 
-export type LayerKind = "raster" | "adjustment" | "text" | "group";
+export type LayerKind = "raster" | "adjustment" | "text" | "group" | "smart";
 
 /** Horizontal text alignment for a text layer. */
 export type TextAlign = "left" | "center" | "right";
@@ -267,6 +267,70 @@ export interface AdjustmentLayer {
 }
 
 /**
+ * A non-destructive transform stored on a SMART OBJECT. Applied at RENDER time
+ * to the immutable original source (so scaling down then back up never loses
+ * quality — the engine always re-samples `naturalWidth×naturalHeight`):
+ *   tx,ty = translation in doc px of the (transformed) top-left anchor;
+ *   sx,sy = independent scale factors on the natural size;
+ *   rot   = rotation in radians, CW on screen, about the transformed center.
+ * Identity = { tx: x, ty: y, sx: 1, sy: 1, rot: 0 } where (x,y) is the layer
+ * origin. The model stores tx/ty relative to the layer's `x`/`y` so the existing
+ * Move tool (setPosition) keeps working; the engine folds them together.
+ */
+export interface SmartTransform {
+  tx: number;
+  ty: number;
+  sx: number;
+  sy: number;
+  rot: number;
+}
+
+export const IDENTITY_SMART_TRANSFORM: SmartTransform = {
+  tx: 0,
+  ty: 0,
+  sx: 1,
+  sy: 1,
+  rot: 0,
+};
+
+/**
+ * A SMART OBJECT layer: keeps the ORIGINAL source pixels immutable
+ * (`naturalWidth×naturalHeight`) and applies a non-destructive `transform` at
+ * render time. Re-scaling is lossless because the engine always re-samples the
+ * original through the transform. `x`/`y`/`width`/`height` are the AABB of the
+ * transformed source in doc space (kept in sync by the engine so hit-testing,
+ * effects, masks and clipping reuse the same pixel-layer machinery as raster).
+ */
+export interface SmartObjectLayer {
+  id: LayerId;
+  kind: "smart";
+  name: string;
+  visible: boolean;
+  opacity: number; // 0..1
+  blendMode: BlendMode;
+  mask?: LayerMask;
+  /** The IMMUTABLE original pixels (never resampled-in-place). */
+  source: ImageBitmap | ImageData;
+  /** Original (pre-transform) pixel dimensions of `source`. */
+  naturalWidth: number;
+  naturalHeight: number;
+  /** Top-left of the transformed footprint AABB in doc space. */
+  x: number;
+  y: number;
+  /** AABB of the transformed source in doc px (engine-maintained). */
+  width: number;
+  height: number;
+  /** Non-destructive transform applied to the original at render time. */
+  transform: SmartTransform;
+  /** Id of the group this layer belongs to, or null at the document root. */
+  parentId?: LayerId | null;
+  /** When true, clipped to the alpha of the layer directly below. */
+  clipping?: boolean;
+  /** Non-destructive layer styles. */
+  effects?: LayerEffects;
+}
+
+/**
  * A straight (non-premultiplied) sRGB color, components 0..1. Structurally
  * identical to `RGBAColor` in state/tools.ts; redeclared here so the model layer
  * does not depend on the state layer (keeps the dependency direction one-way).
@@ -320,7 +384,47 @@ export interface TextLayer {
   clipping?: boolean;
   /** Non-destructive layer styles. */
   effects?: LayerEffects;
+
+  // ── type on a path / warp (non-destructive, re-rasterized) ──
+  /**
+   * When set, the glyphs are laid out ALONG this committed path (by arc-length,
+   * each glyph rotated to the local tangent) instead of as flat lines. The id
+   * references a path from the engine's Paths system. Cleared (null/undefined) =
+   * plain flat text (byte-identical to the original rendering).
+   */
+  pathId?: string | null;
+  /** Optional Photoshop-style envelope warp applied to the rasterized text. */
+  warp?: TextWarp;
 }
+
+/** Warp envelope styles (Photoshop "Warp Text"). */
+export type TextWarpStyle =
+  | "none"
+  | "arc"
+  | "arch"
+  | "bulge"
+  | "wave"
+  | "flag"
+  | "rise";
+
+/**
+ * A text warp envelope. `bend` -1..1 is the primary amount; `horizontal` /
+ * `vertical` -1..1 add perspective-style horizontal/vertical distortion.
+ * style 'none' = no warp (today's flat text, unchanged).
+ */
+export interface TextWarp {
+  style: TextWarpStyle;
+  bend: number;
+  horizontal?: number;
+  vertical?: number;
+}
+
+export const IDENTITY_TEXT_WARP: TextWarp = {
+  style: "none",
+  bend: 0,
+  horizontal: 0,
+  vertical: 0,
+};
 
 /**
  * A layer GROUP. Holds an ordered list of child layer ids (bottom -> top, same
@@ -346,10 +450,15 @@ export interface GroupLayer {
   parentId?: LayerId | null;
 }
 
-export type LayerNode = RasterLayer | AdjustmentLayer | TextLayer | GroupLayer;
+export type LayerNode =
+  | RasterLayer
+  | AdjustmentLayer
+  | TextLayer
+  | GroupLayer
+  | SmartObjectLayer;
 
-/** Layers that carry positioned pixels in the compositor (raster + text). */
-export type PixelLayer = RasterLayer | TextLayer;
+/** Layers that carry positioned pixels in the compositor (raster + text + smart). */
+export type PixelLayer = RasterLayer | TextLayer | SmartObjectLayer;
 
 /** Narrowing helpers. */
 export function isRasterLayer(n: LayerNode): n is RasterLayer {
@@ -364,9 +473,12 @@ export function isTextLayer(n: LayerNode): n is TextLayer {
 export function isGroupLayer(n: LayerNode): n is GroupLayer {
   return n.kind === "group";
 }
-/** True for layers with a positioned bitmap source (raster OR text). */
+export function isSmartLayer(n: LayerNode): n is SmartObjectLayer {
+  return n.kind === "smart";
+}
+/** True for layers with a positioned bitmap source (raster, text OR smart). */
 export function isPixelLayer(n: LayerNode): n is PixelLayer {
-  return n.kind === "raster" || n.kind === "text";
+  return n.kind === "raster" || n.kind === "text" || n.kind === "smart";
 }
 
 /** Lightweight snapshot for React (no pixel sources, no GL). */
@@ -401,6 +513,15 @@ export interface LayerSnapshot {
   collapsed?: boolean;
   /** Compact summary of active layer effects (for style badges), if any. */
   effects?: LayerEffectsSummary;
+  /** Smart-object layers only: a copy of the non-destructive transform summary. */
+  smart?: SmartLayerSnapshot;
+}
+
+/** Compact smart-object summary for the snapshot (transform + natural size). */
+export interface SmartLayerSnapshot {
+  naturalWidth: number;
+  naturalHeight: number;
+  transform: SmartTransform;
 }
 
 /** Serializable copy of a text layer's typographic params (for React). */
@@ -413,6 +534,10 @@ export interface TextLayerSnapshot {
   bold: boolean;
   italic: boolean;
   lineHeight: number;
+  /** Bound path id (type-on-a-path), or null/undefined for flat text. */
+  pathId?: string | null;
+  /** Warp envelope, or undefined when not warped. */
+  warp?: TextWarp;
 }
 
 export interface DocumentSnapshot {
@@ -479,6 +604,17 @@ function textSnapshot(n: TextLayer): TextLayerSnapshot {
     bold: n.bold,
     italic: n.italic,
     lineHeight: n.lineHeight,
+    pathId: n.pathId ?? null,
+    warp: n.warp ? { ...n.warp } : undefined,
+  };
+}
+
+/** Compact smart-object summary for a snapshot. */
+function smartSnapshot(n: SmartObjectLayer): SmartLayerSnapshot {
+  return {
+    naturalWidth: n.naturalWidth,
+    naturalHeight: n.naturalHeight,
+    transform: { ...n.transform },
   };
 }
 
@@ -492,6 +628,10 @@ export interface TextLayerPatch {
   bold?: boolean;
   italic?: boolean;
   lineHeight?: number;
+  /** Bind/unbind a path (type-on-a-path). null clears the binding. */
+  pathId?: string | null;
+  /** Set/clear the warp envelope. null clears it. */
+  warp?: TextWarp | null;
 }
 
 export class Document {
@@ -583,7 +723,8 @@ export class Document {
         const isAdj = n.kind === "adjustment";
         const isText = n.kind === "text";
         const isGroup = n.kind === "group";
-        const isPixel = n.kind === "raster" || n.kind === "text";
+        const isSmart = n.kind === "smart";
+        const isPixel = n.kind === "raster" || n.kind === "text" || n.kind === "smart";
         const clipping =
           isAdj || isPixel
             ? !!(n as AdjustmentLayer | PixelLayer).clipping
@@ -609,6 +750,7 @@ export class Document {
           isGroup,
           collapsed: isGroup ? (n as GroupLayer).collapsed : undefined,
           effects: isPixel ? effectsSummary((n as PixelLayer).effects) : undefined,
+          smart: isSmart ? smartSnapshot(n as SmartObjectLayer) : undefined,
         });
         if (isGroup) {
           emit((n as GroupLayer).childrenIds, depth + 1, n.id);
@@ -729,7 +871,12 @@ export class Document {
   setClipping(id: LayerId, clipping: boolean): void {
     const n = this.nodes.get(id);
     if (!n) return;
-    if (n.kind === "adjustment" || n.kind === "raster" || n.kind === "text") {
+    if (
+      n.kind === "adjustment" ||
+      n.kind === "raster" ||
+      n.kind === "text" ||
+      n.kind === "smart"
+    ) {
       (n as AdjustmentLayer | PixelLayer).clipping = clipping;
       this.emit();
     }
@@ -827,6 +974,13 @@ export class Document {
   setPosition(id: LayerId, x: number, y: number): void {
     const n = this.nodes.get(id);
     if (!n || !isPixelLayer(n)) return;
+    if (n.kind === "smart") {
+      // The smart transform's tx/ty drive placement; the move delta must shift
+      // them too (x/y is the AABB origin). Keep the AABB offset from tx/ty.
+      const dx = x - n.x;
+      const dy = y - n.y;
+      n.transform = { ...n.transform, tx: n.transform.tx + dx, ty: n.transform.ty + dy };
+    }
     n.x = x;
     n.y = y;
     this.emit();
@@ -1106,6 +1260,10 @@ export class Document {
     if (patch.bold !== undefined) n.bold = patch.bold;
     if (patch.italic !== undefined) n.italic = patch.italic;
     if (patch.lineHeight !== undefined) n.lineHeight = patch.lineHeight;
+    if (patch.pathId !== undefined) n.pathId = patch.pathId;
+    if (patch.warp !== undefined) {
+      n.warp = patch.warp && patch.warp.style !== "none" ? { ...patch.warp } : undefined;
+    }
     n.version += 1;
     this.emit();
   }
@@ -1126,6 +1284,8 @@ export class Document {
     n.bold = params.bold;
     n.italic = params.italic;
     n.lineHeight = params.lineHeight;
+    n.pathId = params.pathId ?? null;
+    n.warp = params.warp ? { ...params.warp } : undefined;
     n.version += 1;
     this.emit();
   }
@@ -1135,6 +1295,32 @@ export class Document {
     const n = this.nodes.get(id);
     if (!n || n.kind !== "text") return null;
     return textSnapshot(n);
+  }
+
+  /**
+   * Bind (or unbind) a text layer to a path (type-on-a-path). Bumps `version`
+   * so the engine re-rasterizes the glyphs along the path. Passing null clears
+   * the binding (back to flat text). No-op for non-text layers.
+   */
+  setTextPath(id: LayerId, pathId: string | null): void {
+    const n = this.nodes.get(id);
+    if (!n || n.kind !== "text") return;
+    n.pathId = pathId;
+    n.version += 1;
+    this.emit();
+  }
+
+  /**
+   * Set (or clear) a text layer's warp envelope. Bumps `version` so the engine
+   * re-rasterizes. A null/`style:'none'` warp restores flat text. No-op for
+   * non-text layers.
+   */
+  setTextWarp(id: LayerId, warp: TextWarp | null): void {
+    const n = this.nodes.get(id);
+    if (!n || n.kind !== "text") return;
+    n.warp = warp && warp.style !== "none" ? { ...warp } : undefined;
+    n.version += 1;
+    this.emit();
   }
 
   /**
@@ -1201,6 +1387,8 @@ export class Document {
       bold: params.bold,
       italic: params.italic,
       lineHeight: params.lineHeight,
+      pathId: params.pathId ?? null,
+      warp: params.warp ? { ...params.warp } : undefined,
     };
     this.nodes.set(id, text);
     this.emit();
@@ -1280,6 +1468,120 @@ export class Document {
     n.source = source;
     n.width = source.width;
     n.height = source.height;
+    this.emit();
+  }
+
+  // ── smart objects (non-destructive transform) ───────────
+  /**
+   * Replace a pixel layer (raster/text) IN PLACE (same id/order/parent/
+   * opacity/blendMode/mask/effects/clipping) with a SmartObjectLayer whose
+   * immutable original source is `source` (its current baked pixels). The
+   * transform starts at identity so the footprint equals (x,y,natW,natH). Used
+   * by EditorEngine.convertToSmartObject. No-op if the layer is unknown.
+   */
+  wrapAsSmartObject(
+    id: LayerId,
+    source: ImageBitmap | ImageData,
+    x: number,
+    y: number,
+  ): void {
+    const n = this.nodes.get(id);
+    if (!n || !isPixelLayer(n)) return;
+    const smart: SmartObjectLayer = {
+      id,
+      kind: "smart",
+      name: n.name,
+      visible: n.visible,
+      opacity: n.opacity,
+      blendMode: n.blendMode,
+      mask: n.mask,
+      source,
+      naturalWidth: source.width,
+      naturalHeight: source.height,
+      x,
+      y,
+      width: source.width,
+      height: source.height,
+      // tx/ty are ABSOLUTE doc placement of the (un-rotated) scaled box top-left;
+      // identity transform places the original at (x,y) at natural scale.
+      transform: { ...IDENTITY_SMART_TRANSFORM, tx: x, ty: y },
+      parentId: (n as { parentId?: LayerId | null }).parentId ?? null,
+      clipping: (n as { clipping?: boolean }).clipping ?? false,
+      effects: (n as { effects?: LayerEffects }).effects,
+    };
+    this.nodes.set(id, smart);
+    this.emit();
+  }
+
+  /**
+   * Update a smart object's non-destructive transform AND its footprint AABB
+   * (x,y,width,height) in one step. The engine computes the AABB of the
+   * transformed original and passes it here. No-op for non-smart layers.
+   */
+  setSmartTransform(
+    id: LayerId,
+    transform: SmartTransform,
+    aabb: { x: number; y: number; width: number; height: number },
+  ): void {
+    const n = this.nodes.get(id);
+    if (!n || n.kind !== "smart") return;
+    n.transform = { ...transform };
+    n.x = aabb.x;
+    n.y = aabb.y;
+    n.width = Math.max(1, aabb.width);
+    n.height = Math.max(1, aabb.height);
+    this.emit();
+  }
+
+  /** Snapshot a copy of a smart object's transform (for undo). */
+  getSmartTransform(id: LayerId): SmartTransform | null {
+    const n = this.nodes.get(id);
+    if (!n || n.kind !== "smart") return null;
+    return { ...n.transform };
+  }
+
+  /**
+   * Bake a smart object into a plain raster layer IN PLACE (same id) using the
+   * already-resampled `source` at doc origin (x,y). Used by
+   * EditorEngine.rasterizeSmartObject. No-op for non-smart layers.
+   */
+  bakeSmartToRaster(
+    id: LayerId,
+    source: ImageBitmap | ImageData,
+    x: number,
+    y: number,
+  ): void {
+    const n = this.nodes.get(id);
+    if (!n || n.kind !== "smart") return;
+    const raster: RasterLayer = {
+      id,
+      kind: "raster",
+      name: n.name,
+      visible: n.visible,
+      opacity: n.opacity,
+      blendMode: n.blendMode,
+      source,
+      width: source.width,
+      height: source.height,
+      x,
+      y,
+      mask: n.mask,
+      parentId: n.parentId ?? null,
+      clipping: n.clipping,
+      effects: n.effects,
+    };
+    this.nodes.set(id, raster);
+    this.emit();
+  }
+
+  /**
+   * Replace a node wholesale in place (same id slot), preserving position in its
+   * sibling list. Used by smart-object / rasterize undo to restore the exact
+   * prior node. The caller supplies a fully-formed node with the same id.
+   */
+  replaceNode(node: LayerNode): void {
+    if (!this.nodes.has(node.id)) return;
+    this.nodes.set(node.id, node);
     this.emit();
   }
 }

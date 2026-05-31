@@ -30,7 +30,10 @@ import {
   useGradientParams,
   useSamState,
   useViewExtras,
+  type TextWarp,
+  type TextWarpStyle,
 } from "../state/useEngine";
+import type { TextLayerSnapshot } from "../model/Document";
 import { ColorPicker } from "./color/ColorPicker";
 import { rgbaCss } from "./color/colorMath";
 import { BrushDynamicsButton, BrushPresetsButton } from "./brush";
@@ -146,6 +149,7 @@ function Slider({
   step,
   fmt,
   onChange,
+  onCommit,
 }: {
   label: string;
   value: number;
@@ -154,6 +158,13 @@ function Slider({
   step: number;
   fmt: (v: number) => string;
   onChange: (v: number) => void;
+  /**
+   * Optional "drag ended" callback (pointer-up / blur). When provided, `onChange`
+   * is treated as a LIVE update (no undo step per tick) and `onCommit` records
+   * the single undo step. Backward-compatible: omitting it keeps the old
+   * one-undo-per-change behaviour for existing call sites.
+   */
+  onCommit?: (v: number) => void;
 }) {
   return (
     <label className="flex items-center gap-2">
@@ -166,6 +177,12 @@ function Slider({
         step={step}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
+        onPointerUp={
+          onCommit ? (e) => onCommit(Number((e.target as HTMLInputElement).value)) : undefined
+        }
+        onKeyUp={
+          onCommit ? (e) => onCommit(Number((e.target as HTMLInputElement).value)) : undefined
+        }
       />
       <span className="w-10 text-right text-[11px] tabular-nums text-muted">
         {fmt(value)}
@@ -416,11 +433,180 @@ const FONT_FAMILIES: { value: string; label: string }[] = [
   { value: "Arial, sans-serif", label: "Arial" },
 ];
 
+/** Warp envelope styles for the Type warp dropdown (label + id). */
+const TEXT_WARP_STYLES: { id: TextWarpStyle; label: string }[] = [
+  { id: "none", label: "None" },
+  { id: "arc", label: "Arc" },
+  { id: "arch", label: "Arch" },
+  { id: "bulge", label: "Bulge" },
+  { id: "wave", label: "Wave" },
+  { id: "flag", label: "Flag" },
+  { id: "rise", label: "Rise" },
+];
+
+/**
+ * Per-layer Type controls that operate on the ACTIVE text layer (read from the
+ * snapshot): "On path" (type-on-a-path binding) + "Warp" (Photoshop-style
+ * envelope). These only appear when the active layer is a text layer; the
+ * font/size/style/align/color defaults above always apply to NEW type. We
+ * subscribe to the engine snapshot so the readouts track path construction,
+ * layer switches, and undo/redo.
+ *
+ *   · On path: a dropdown of committed paths (engine.getPaths()) + a "none"
+ *     entry. Selecting a path calls actions.setTextPath(layerId, pathId|null).
+ *     Disabled when no paths exist (hint: draw one with the Pen tool first).
+ *   · Warp: a style dropdown + a Bend slider (-100..100 → -1..1) and optional
+ *     H/V distortion sliders, calling actions.setTextWarp(layerId, {...}).
+ *     Picking "None" clears the warp (flat text restored).
+ */
+function TextPathWarpControls() {
+  const snap = useEngineSnapshot();
+  // Snapshot of the text params captured at the start of a live slider drag, so
+  // a continuous drag commits exactly ONE undo step (prev = drag-start, next =
+  // release) instead of one step per range-input tick.
+  const dragStart = useRef<TextLayerSnapshot | null>(null);
+  // The active text layer (if any). Path/warp bind to a concrete layer, so we
+  // only render these controls when the active layer actually is text.
+  const active = snap.layers.find((l) => l.id === snap.activeLayerId);
+  const textLayer =
+    active && active.kind === "text" && active.text ? active : null;
+  if (!textLayer || !textLayer.text) return null;
+
+  const layerId = textLayer.id;
+  const ts = textLayer.text;
+  const paths = engine.getPaths();
+  const hasPaths = paths.length > 0;
+  // The bound path id, normalized to "" (none) for the <select> value. If the
+  // bound path was since deleted it won't be in the list, so fall back to none.
+  const boundId =
+    ts.pathId && paths.some((p) => p.id === ts.pathId) ? ts.pathId : "";
+
+  const warp: TextWarp = ts.warp ?? { style: "none", bend: 0 };
+  const warped = warp.style !== "none";
+
+  // Style changes are discrete → one undo step via the engine's setTextWarp.
+  const setWarpStyle = (style: TextWarpStyle) => {
+    if (style === "none") actions.setTextWarp(layerId, null);
+    else actions.setTextWarp(layerId, { ...warp, style });
+  };
+
+  // LIVE warp slider update (no undo step) — re-rasterizes via updateTextLayer.
+  const liveWarp = (patch: Partial<TextWarp>) => {
+    if (!dragStart.current) {
+      // Capture the pre-drag params so the eventual commit has a correct "prev".
+      dragStart.current = { ...ts, color: { ...ts.color }, warp: ts.warp ? { ...ts.warp } : undefined };
+    }
+    const next: TextWarp = { ...warp, ...patch };
+    actions.updateTextLayer(layerId, {
+      warp: next.style === "none" ? null : next,
+    });
+  };
+  // Commit the drag as a single undo step (prev = drag-start, next = live state).
+  const commitWarp = (patch: Partial<TextWarp>) => {
+    const prev = dragStart.current;
+    dragStart.current = null;
+    const next: TextWarp = { ...warp, ...patch };
+    const nextWarp = next.style === "none" ? undefined : next;
+    if (!prev) {
+      // No live drag was tracked (e.g. keyboard nudge): fall back to a direct
+      // undoable set so the change is still recorded.
+      actions.setTextWarp(layerId, nextWarp ?? null);
+      return;
+    }
+    actions.commitTextLayer(layerId, prev, { ...prev, warp: nextWarp });
+  };
+
+  return (
+    <div className="flex items-center gap-3 border-l border-edge pl-3">
+      {/* ── Type on a path ── */}
+      <label
+        className="flex items-center gap-1"
+        title={
+          hasPaths
+            ? "Lay the glyphs along a committed vector path"
+            : "Draw a path with the Pen tool first"
+        }
+      >
+        <span className="text-[11px] text-muted">On path</span>
+        <select
+          value={boundId}
+          disabled={!hasPaths}
+          onChange={(e) =>
+            actions.setTextPath(layerId, e.target.value || null)
+          }
+          className="rounded border border-edge bg-panelraised px-1 py-0.5 text-[11px] text-ink disabled:opacity-40"
+        >
+          <option value="">{hasPaths ? "None" : "No paths"}</option>
+          {paths.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {/* ── Warp envelope ── */}
+      <label className="flex items-center gap-1" title="Photoshop-style text warp">
+        <span className="text-[11px] text-muted">Warp</span>
+        <select
+          value={warp.style}
+          onChange={(e) => setWarpStyle(e.target.value as TextWarpStyle)}
+          className="rounded border border-edge bg-panelraised px-1 py-0.5 text-[11px] text-ink"
+        >
+          {TEXT_WARP_STYLES.map((w) => (
+            <option key={w.id} value={w.id}>
+              {w.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {/* Bend + H/V distortion only matter once a warp style is chosen. */}
+      {warped && (
+        <>
+          <Slider
+            label="Bend"
+            value={Math.round((warp.bend ?? 0) * 100)}
+            min={-100}
+            max={100}
+            step={1}
+            fmt={(v) => `${Math.round(v)}%`}
+            onChange={(v) => liveWarp({ bend: v / 100 })}
+            onCommit={(v) => commitWarp({ bend: v / 100 })}
+          />
+          <Slider
+            label="H"
+            value={Math.round((warp.horizontal ?? 0) * 100)}
+            min={-100}
+            max={100}
+            step={1}
+            fmt={(v) => `${Math.round(v)}%`}
+            onChange={(v) => liveWarp({ horizontal: v / 100 })}
+            onCommit={(v) => commitWarp({ horizontal: v / 100 })}
+          />
+          <Slider
+            label="V"
+            value={Math.round((warp.vertical ?? 0) * 100)}
+            min={-100}
+            max={100}
+            step={1}
+            fmt={(v) => `${Math.round(v)}%`}
+            onChange={(v) => liveWarp({ vertical: v / 100 })}
+            onCommit={(v) => commitWarp({ vertical: v / 100 })}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
 /**
  * Type-tool option bar. Edits the tool-store defaults for NEW text layers (and,
  * when a text layer is being edited, the engine separately mirrors these into
  * the live layer via updateTextLayer — wired in CanvasHost's textarea overlay).
  * `color` is the explicit per-tool color, or null to follow the foreground.
+ * When the active layer is a text layer, per-layer Type-on-path + Warp controls
+ * are appended (see TextPathWarpControls).
  */
 function TextBar() {
   const { text, foreground } = useToolState();
@@ -494,6 +680,9 @@ function TextBar() {
       </div>
 
       <span className="text-[11px] text-muted">Click the canvas to add type</span>
+
+      {/* Per-layer Type-on-path + Warp (shown only for the active text layer). */}
+      <TextPathWarpControls />
     </div>
   );
 }
@@ -1434,9 +1623,13 @@ export function ToolOptions() {
       )}
 
       {active === "move" && (
-        <span className="text-[11px] text-muted">
-          Drag to move the active layer · Space to pan
-        </span>
+        <>
+          <span className="text-[11px] text-muted">
+            Drag to move the active layer · Space to pan
+          </span>
+          {/* If the active layer is text, expose its path/warp here too. */}
+          <TextPathWarpControls />
+        </>
       )}
       {active === "hand" && (
         <span className="text-[11px] text-muted">Drag to pan · scroll to zoom</span>
@@ -1446,7 +1639,13 @@ export function ToolOptions() {
       {active === "crop" && <CropBar />}
       {active === "text" && <TextBar />}
       {active === "shape" && <ShapeBar />}
-      {active === "pen" && <PenBar />}
+      {active === "pen" && (
+        <>
+          <PenBar />
+          {/* Bind the active text layer to the path you just drew, in place. */}
+          <TextPathWarpControls />
+        </>
+      )}
 
       {/* Magic wand + AI Magic Select + retouch brushes. */}
       {active === "magic-wand" && <MagicWandBar />}

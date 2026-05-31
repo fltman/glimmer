@@ -20,6 +20,7 @@ import {
   isTextLayer,
   isAdjustmentLayer,
   isGroupLayer,
+  isSmartLayer,
   type LayerId,
   type LayerEffects,
   type LayerMask,
@@ -27,6 +28,7 @@ import {
   type AdjustmentType,
   type AdjustmentParams,
   type TextLayerSnapshot,
+  type SmartTransform,
 } from "../model/Document";
 
 /** Bump when the on-disk shape changes incompatibly. */
@@ -70,7 +72,22 @@ interface SerText extends SerBase {
   y: number;
   clipping: boolean;
   effects?: LayerEffects;
+  /** TextLayerSnapshot now carries pathId + warp, so they round-trip here. */
   text: TextLayerSnapshot;
+}
+interface SerSmart extends SerBase {
+  kind: "smart";
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  naturalWidth: number;
+  naturalHeight: number;
+  transform: SmartTransform;
+  clipping: boolean;
+  effects?: LayerEffects;
+  /** PNG data URL of the IMMUTABLE original (straight-alpha) pixels. */
+  pixels: string;
 }
 interface SerAdjustment extends SerBase {
   kind: "adjustment";
@@ -83,7 +100,7 @@ interface SerGroup extends SerBase {
   collapsed: boolean;
   childrenIds: LayerId[];
 }
-type SerNode = SerRaster | SerText | SerAdjustment | SerGroup;
+type SerNode = SerRaster | SerText | SerAdjustment | SerGroup | SerSmart;
 
 interface AipsFile {
   magic: typeof AIPS_MAGIC;
@@ -244,7 +261,26 @@ export async function serializeDocument(engine: EditorEngine): Promise<Blob> {
           bold: n.bold,
           italic: n.italic,
           lineHeight: n.lineHeight,
+          pathId: n.pathId ?? null,
+          warp: n.warp ? { ...n.warp } : undefined,
         },
+      });
+    } else if (isSmartLayer(n)) {
+      nodes.push({
+        ...base,
+        kind: "smart",
+        x: n.x,
+        y: n.y,
+        width: n.width,
+        height: n.height,
+        naturalWidth: n.naturalWidth,
+        naturalHeight: n.naturalHeight,
+        transform: { ...n.transform },
+        clipping: !!n.clipping,
+        effects: n.effects ? structuredClone(n.effects) : undefined,
+        // The immutable original (naturalWidth×naturalHeight) — heavier than a
+        // baked raster, but keeps the smart object non-destructive on reload.
+        pixels: await sourceToPngDataUrl(n.source),
       });
     } else if (isAdjustmentLayer(n)) {
       nodes.push({
@@ -320,6 +356,18 @@ export async function deserializeDocument(
         italic: sn.text.italic,
         lineHeight: sn.text.lineHeight,
       });
+    } else if (sn.kind === "smart") {
+      // Recreate as a raster of the original pixels, then wrap as a smart object
+      // and restore the exact transform + footprint AABB.
+      const img = await dataUrlToImageData(sn.pixels);
+      newId = doc.addRasterLayer(img, sn.name, { x: sn.x, y: sn.y });
+      doc.wrapAsSmartObject(newId, img, sn.x, sn.y);
+      doc.setSmartTransform(newId, sn.transform, {
+        x: sn.x,
+        y: sn.y,
+        width: sn.width,
+        height: sn.height,
+      });
     } else if (sn.kind === "adjustment") {
       newId = doc.addAdjustmentLayer(sn.adjustmentType, structuredClone(sn.params), sn.name);
     } else {
@@ -335,11 +383,22 @@ export async function deserializeDocument(
     doc.setOpacity(newId, sn.opacity);
     doc.setBlendMode(newId, sn.blendMode);
     doc.rename(newId, sn.name);
-    if (sn.kind === "raster" || sn.kind === "text" || sn.kind === "adjustment") {
+    if (
+      sn.kind === "raster" ||
+      sn.kind === "text" ||
+      sn.kind === "adjustment" ||
+      sn.kind === "smart"
+    ) {
       doc.setClipping(newId, sn.clipping);
     }
-    if ((sn.kind === "raster" || sn.kind === "text") && sn.effects) {
+    if ((sn.kind === "raster" || sn.kind === "text" || sn.kind === "smart") && sn.effects) {
       doc.setEffects(newId, structuredClone(sn.effects));
+    }
+    if (sn.kind === "text") {
+      // pathId references a path restored later (step 5); the id is preserved as
+      // saved (Paths keep their own ids — see deletePath/setPaths). warp is local.
+      if (sn.text.pathId != null) doc.setTextPath(newId, sn.text.pathId);
+      if (sn.text.warp) doc.setTextWarp(newId, sn.text.warp);
     }
     if (sn.mask) {
       doc.addMask(newId, base64ToBytes(sn.mask.data));

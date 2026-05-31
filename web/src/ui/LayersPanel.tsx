@@ -72,6 +72,21 @@ function FolderIcon() {
   );
 }
 
+/**
+ * Smart-object marker: a framed bitmap with the Photoshop-style corner badge,
+ * signalling that the layer holds immutable original pixels behind a
+ * non-destructive (lossless) transform.
+ */
+function SmartObjectIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M3 17l5-5 4 4 3-3 6 6" />
+      <rect x="14" y="14" width="9" height="9" rx="1.5" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
 export function LayersPanel() {
   const snap = useEngineSnapshot();
   const active = snap.layers.find((l) => l.id === snap.activeLayerId) ?? null;
@@ -204,8 +219,20 @@ export function LayersPanel() {
   );
 }
 
-/** True for layers that support clipping + layer styles (raster / text). */
+/**
+ * True for layers that support clipping + layer styles + masks (raster / text /
+ * smart). Smart objects reuse the full pixel-layer machinery in the engine, so
+ * they get the same per-row controls as a raster layer.
+ */
 function isPixelKind(l: LayerSnapshot): boolean {
+  return l.kind === "raster" || l.kind === "text" || l.kind === "smart";
+}
+
+/** Smart objects can be rasterized; raster/text layers can be wrapped into one. */
+function isSmart(l: LayerSnapshot): boolean {
+  return l.kind === "smart";
+}
+function canConvertToSmart(l: LayerSnapshot): boolean {
   return l.kind === "raster" || l.kind === "text";
 }
 
@@ -232,7 +259,13 @@ function LayerRow({
   const isAdjustment = l.kind === "adjustment";
   const isGroup = l.isGroup;
   const pixel = isPixelKind(l);
+  const smart = isSmart(l) ? l.smart : null;
   const clippable = isAdjustment || pixel;
+  // Lossless scale of a smart object relative to its immutable original size.
+  const smartScalePct =
+    smart && smart.naturalWidth > 0
+      ? Math.round((smart.transform.sx || 1) * 100)
+      : null;
   const typeLabel =
     isAdjustment && l.adjustmentType ? ADJUSTMENTS[l.adjustmentType].label : null;
   // Indent by nesting depth; clipped layers get an extra nudge so they read as
@@ -282,6 +315,14 @@ function LayerRow({
             <AdjustmentIcon />
           </span>
         )}
+        {smart && (
+          <span
+            className="shrink-0 text-accent"
+            title="Smart Object — non-destructive transform over immutable original pixels"
+          >
+            <SmartObjectIcon />
+          </span>
+        )}
         {l.clipping && (
           <span
             className="shrink-0 text-muted"
@@ -319,6 +360,14 @@ function LayerRow({
           >
             mask
           </button>
+        )}
+        {smart && smartScalePct !== null && (
+          <span
+            className="shrink-0 rounded bg-panelraised px-1 text-[9px] font-semibold tabular-nums text-muted"
+            title={`Scaled ${smartScalePct}% of the original ${smart.naturalWidth}×${smart.naturalHeight}px (lossless)`}
+          >
+            {smartScalePct}%
+          </span>
         )}
         <span className="text-[10px] uppercase tracking-wide text-muted">
           {isGroup ? "group" : isAdjustment ? typeLabel : `${l.width}×${l.height}`}
@@ -390,6 +439,24 @@ function LayerRow({
               title="Edit layer styles (fx)"
             >
               fx…
+            </button>
+          )}
+          {canConvertToSmart(l) && (
+            <button
+              onClick={() => actions.convertToSmartObject(l.id)}
+              className="rounded border border-edge bg-panelraised px-1.5 py-0.5 text-[10px] text-muted hover:text-ink"
+              title="Convert to Smart Object — wrap these pixels so Free Transform is lossless"
+            >
+              → Smart Object
+            </button>
+          )}
+          {smart && (
+            <button
+              onClick={() => actions.rasterizeSmartObject(l.id)}
+              className="rounded border border-edge bg-panelraised px-1.5 py-0.5 text-[10px] text-muted hover:text-ink"
+              title="Rasterize — bake the current transform into a plain raster layer"
+            >
+              Rasterize
             </button>
           )}
         </div>

@@ -253,6 +253,10 @@ function snapshotFromActive(e: ActiveEdit): TextLayerSnapshot {
     bold: e.bold,
     italic: e.italic,
     lineHeight: e.lineHeight,
+    // Carry the path binding + warp so editing the TEXT of a path-bound/warped
+    // layer doesn't wipe them when commitTextLayer rewrites the params wholesale.
+    pathId: e.pathId,
+    warp: e.warp ? { ...e.warp } : undefined,
   };
 }
 

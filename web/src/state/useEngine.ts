@@ -15,6 +15,9 @@ import type {
   AdjustmentParams,
   TextLayerSnapshot,
   TextLayerPatch,
+  TextWarp,
+  TextWarpStyle,
+  SmartTransform,
   LayerEffects,
   LayerEffectType,
 } from "../model/Document";
@@ -47,6 +50,10 @@ import type {
 import type { PathDescription, FillRule } from "../engine/Paths";
 
 export const engine = new EditorEngine();
+
+// Re-export the smart-object + text path/warp types the UI panels need, so they
+// can `import type { TextWarp, ... } from "../state/useEngine"` alongside actions.
+export type { TextWarp, TextWarpStyle, SmartTransform };
 
 export function useEngineSnapshot(): DocumentSnapshot {
   return useSyncExternalStore(
@@ -754,6 +761,20 @@ export const actions = {
     engine.cancelTransform();
   },
 
+  // ── smart objects (non-destructive transform) ──
+  /**
+   * Wrap a raster/text layer (default: active) into a Smart Object: its current
+   * pixels become the immutable original, and Free Transform then edits a
+   * non-destructive transform (lossless re-scaling). One undo step.
+   */
+  convertToSmartObject(layerId?: string) {
+    engine.convertToSmartObject(layerId);
+  },
+  /** Bake a smart object's transform into a plain raster layer (one undo step). */
+  rasterizeSmartObject(layerId?: string) {
+    engine.rasterizeSmartObject(layerId);
+  },
+
   // ── crop ──
   beginCrop() {
     engine.beginCrop();
@@ -789,6 +810,20 @@ export const actions = {
   /** Type-tool defaults for new text layers. */
   setTextParams(patch: Partial<TextParams>) {
     toolStore.setText(patch);
+  },
+  /**
+   * Bind a text layer to a committed path (type-on-a-path), or pass null to
+   * unbind it. The path id comes from getPaths()/getActivePath(). One undo step.
+   */
+  setTextPath(textLayerId: string, pathId: string | null) {
+    engine.setTextPath(textLayerId, pathId);
+  },
+  /**
+   * Set (or clear) a text layer's warp envelope. Pass null or {style:'none'} to
+   * remove it (flat text, unchanged). One undo step.
+   */
+  setTextWarp(textLayerId: string, warp: TextWarp | null) {
+    engine.setTextWarp(textLayerId, warp);
   },
 
   // ── shapes ──

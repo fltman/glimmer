@@ -6,6 +6,7 @@ import {
   isRasterLayer,
   isTextLayer,
   isPixelLayer,
+  isSmartLayer,
   type BlendMode,
 } from "./Document";
 
@@ -115,5 +116,146 @@ describe("Document text layers", () => {
     const t = doc.getLayer(id)!;
     expect(isPixelLayer(t) && t.x).toBe(11);
     expect(isPixelLayer(t) && t.y).toBe(22);
+  });
+});
+
+describe("Document smart objects", () => {
+  it("wraps a raster into a smart object preserving id/blend/mask + identity footprint", () => {
+    const doc = new Document(64, 64);
+    const id = doc.addRasterLayer(
+      { width: 20, height: 10, data: new Uint8ClampedArray(20 * 10 * 4) } as ImageData,
+      "L",
+      { x: 5, y: 7 },
+    );
+    doc.setBlendMode(id, "multiply");
+    doc.addMask(id);
+    doc.wrapAsSmartObject(
+      id,
+      { width: 20, height: 10, data: new Uint8ClampedArray(20 * 10 * 4) } as ImageData,
+      5,
+      7,
+    );
+    const s = doc.getLayer(id)!;
+    expect(isSmartLayer(s)).toBe(true);
+    if (!isSmartLayer(s)) return;
+    expect(s.blendMode).toBe("multiply"); // continuity through the wrap
+    expect(!!s.mask).toBe(true);
+    expect(s.naturalWidth).toBe(20);
+    expect(s.naturalHeight).toBe(10);
+    // Identity transform places the original at (x,y) at natural scale.
+    expect(s.transform).toMatchObject({ tx: 5, ty: 7, sx: 1, sy: 1, rot: 0 });
+    expect(s.width).toBe(20);
+    expect(s.height).toBe(10);
+    // It is a pixel layer (so masks/effects/clip/move/export all reuse raster paths).
+    expect(isPixelLayer(s)).toBe(true);
+  });
+
+  it("setPosition shifts a smart object's transform.tx/ty by the move delta", () => {
+    const doc = new Document(64, 64);
+    const id = doc.addRasterLayer(
+      { width: 8, height: 8, data: new Uint8ClampedArray(8 * 8 * 4) } as ImageData,
+      "L",
+      { x: 2, y: 3 },
+    );
+    doc.wrapAsSmartObject(
+      id,
+      { width: 8, height: 8, data: new Uint8ClampedArray(8 * 8 * 4) } as ImageData,
+      2,
+      3,
+    );
+    // Move by (+10, +5): both the AABB origin and the transform translation shift.
+    doc.setPosition(id, 12, 8);
+    const s = doc.getLayer(id)!;
+    if (!isSmartLayer(s)) throw new Error("expected smart");
+    expect(s.x).toBe(12);
+    expect(s.y).toBe(8);
+    expect(s.transform.tx).toBe(12); // 2 + 10
+    expect(s.transform.ty).toBe(8); // 3 + 5
+  });
+
+  it("setSmartTransform updates the transform + footprint AABB; getSmartTransform copies it", () => {
+    const doc = new Document(64, 64);
+    const id = doc.addRasterLayer(
+      { width: 8, height: 8, data: new Uint8ClampedArray(8 * 8 * 4) } as ImageData,
+      "L",
+      { x: 0, y: 0 },
+    );
+    doc.wrapAsSmartObject(
+      id,
+      { width: 8, height: 8, data: new Uint8ClampedArray(8 * 8 * 4) } as ImageData,
+      0,
+      0,
+    );
+    doc.setSmartTransform(
+      id,
+      { tx: 4, ty: 4, sx: 2, sy: 2, rot: 0 },
+      { x: 4, y: 4, width: 16, height: 16 },
+    );
+    const t = doc.getSmartTransform(id)!;
+    expect(t).toMatchObject({ tx: 4, ty: 4, sx: 2, sy: 2 });
+    const s = doc.getLayer(id)!;
+    expect(isSmartLayer(s) && s.width).toBe(16);
+    // The returned transform is a copy (mutating it must not affect the layer).
+    t.sx = 99;
+    expect(doc.getSmartTransform(id)!.sx).toBe(2);
+  });
+
+  it("bakeSmartToRaster converts back to a plain raster at the resampled footprint", () => {
+    const doc = new Document(64, 64);
+    const id = doc.addRasterLayer(
+      { width: 8, height: 8, data: new Uint8ClampedArray(8 * 8 * 4) } as ImageData,
+      "L",
+    );
+    doc.wrapAsSmartObject(
+      id,
+      { width: 8, height: 8, data: new Uint8ClampedArray(8 * 8 * 4) } as ImageData,
+      0,
+      0,
+    );
+    const baked = { width: 16, height: 16, data: new Uint8ClampedArray(16 * 16 * 4) } as ImageData;
+    doc.bakeSmartToRaster(id, baked, 1, 2);
+    const r = doc.getLayer(id)!;
+    expect(isRasterLayer(r)).toBe(true);
+    expect(isRasterLayer(r) && r.width).toBe(16);
+    expect(isRasterLayer(r) && r.x).toBe(1);
+    expect(isRasterLayer(r) && r.y).toBe(2);
+  });
+
+  it("snapshot carries a smart summary (natural size + transform) only for smart layers", () => {
+    const doc = new Document(64, 64);
+    const id = doc.addRasterLayer(
+      { width: 12, height: 6, data: new Uint8ClampedArray(12 * 6 * 4) } as ImageData,
+      "L",
+    );
+    doc.wrapAsSmartObject(
+      id,
+      { width: 12, height: 6, data: new Uint8ClampedArray(12 * 6 * 4) } as ImageData,
+      0,
+      0,
+    );
+    const snap = doc.snapshot();
+    const ls = snap.layers.find((l) => l.id === id)!;
+    expect(ls.kind).toBe("smart");
+    expect(ls.isGroup).toBe(false);
+    expect(ls.smart).toBeDefined();
+    expect(ls.smart!.naturalWidth).toBe(12);
+    expect(ls.smart!.naturalHeight).toBe(6);
+    expect(ls.smart!.transform.sx).toBe(1);
+  });
+
+  it("setTextPath / setTextWarp round-trip through the text snapshot; null clears them", () => {
+    const doc = new Document(64, 64);
+    const id = doc.addTextLayer(0, 0, { text: "abc" });
+    doc.setTextPath(id, "path_42");
+    doc.setTextWarp(id, { style: "arc", bend: 0.5, horizontal: 0.1, vertical: 0 });
+    let ts = doc.snapshot().layers.find((l) => l.id === id)!.text!;
+    expect(ts.pathId).toBe("path_42");
+    expect(ts.warp).toMatchObject({ style: "arc", bend: 0.5 });
+    // style 'none' (or null) clears the warp back to flat text.
+    doc.setTextWarp(id, { style: "none", bend: 0 });
+    doc.setTextPath(id, null);
+    ts = doc.snapshot().layers.find((l) => l.id === id)!.text!;
+    expect(ts.warp).toBeUndefined();
+    expect(ts.pathId).toBe(null);
   });
 });

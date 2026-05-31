@@ -47,7 +47,9 @@ import {
   isPixelLayer,
   isTextLayer,
   isGroupLayer,
+  isSmartLayer,
   hasActiveEffects,
+  IDENTITY_SMART_TRANSFORM,
   type DocumentSnapshot,
   type LayerId,
   type LayerNode,
@@ -58,8 +60,11 @@ import {
   type TextLayer,
   type PixelLayer,
   type GroupLayer,
+  type SmartObjectLayer,
+  type SmartTransform,
   type TextLayerSnapshot,
   type TextLayerPatch,
+  type TextWarp,
   type LayerEffects,
   type LayerEffectType,
 } from "../model/Document";
@@ -69,6 +74,7 @@ import {
   cornerAnchor,
   tracePath,
   pathHasClosedRegion,
+  pathBounds,
   type Path,
   type PathDescription,
   type FillRule,
@@ -467,8 +473,20 @@ export class EditorEngine {
   // ── text editing ────────────────────────────────────────
   /** The text layer currently being edited via the UI overlay, or null. */
   private textEditing: { layerId: LayerId } | null = null;
-  /** Re-rasterize cache: last version a text layer's bitmap was built for. */
-  private textRasterVersion = new Map<LayerId, number>();
+  /**
+   * Re-rasterize cache: last composite key a text layer's bitmap was built for.
+   * The key is the layer `version` plus (for path-bound text) a signature of the
+   * bound path's geometry, so editing the PATH re-rasterizes even when the text
+   * params are unchanged.
+   */
+  private textRasterVersion = new Map<LayerId, string>();
+
+  /**
+   * Remembered flat (non-path) doc-space origin of a text layer, captured the
+   * moment it is first bound to a path. Restored when the binding is removed so
+   * unbinding/undo returns the text to where it was, not the path's bbox origin.
+   */
+  private flatTextPos = new Map<LayerId, { x: number; y: number }>();
 
   /** Live shape drag (doc px) for the overlay preview, or null. */
   private liveShape: { kind: ShapeKind; from: { x: number; y: number }; to: { x: number; y: number } } | null = null;
@@ -3485,11 +3503,15 @@ void main() {
     if (!layer || !brush) return;
     // Paint on the mask when the layer has an enabled mask; else on pixels.
     const onMask = !!layer.mask?.enabled;
-    // Adjustment layers carry no pixels — only paintable target is their mask.
-    if (layer.kind === "adjustment" && !onMask) return;
-    // Geometry: raster layers use their footprint; adjustment masks are full-doc.
-    const lx0 = layer.kind === "raster" ? layer.x : 0;
-    const ly0 = layer.kind === "raster" ? layer.y : 0;
+    // Only RASTER pixels are paintable; adjustment/text/smart layers have no
+    // mutable pixel source (a smart object's source is immutable, text is
+    // re-rasterized from params). When such a layer is the target we can only
+    // paint its mask — otherwise the stroke would preview then silently vanish.
+    if (layer.kind !== "raster" && !onMask) return;
+    // Geometry: pixel layers (raster/smart/text) use their footprint origin so
+    // brush coords are layer-local; adjustment/group masks are full-doc (origin 0).
+    const lx0 = isPixelLayer(layer) ? layer.x : 0;
+    const ly0 = isPixelLayer(layer) ? layer.y : 0;
     const target = {
       width: onMask ? layer.mask!.width : (layer as RasterLayer).width,
       height: onMask ? layer.mask!.height : (layer as RasterLayer).height,
@@ -6078,16 +6100,78 @@ void main(){
   //  FREE TRANSFORM
   // ════════════════════════════════════════════════════════
   /**
+   * Unit-quad -> doc px for a SMART OBJECT through its STORED non-destructive
+   * transform. The original `naturalWidth×naturalHeight` source is scaled, then
+   * rotated about the scaled box's center, then translated so the un-rotated
+   * scaled box's top-left sits at (x+tx, y+ty). Re-sampling the original quad
+   * through this matrix is lossless regardless of prior scaling.
+   */
+  private smartBaseMatrix(layer: SmartObjectLayer): Float32Array {
+    const t = layer.transform;
+    const sw = layer.naturalWidth * t.sx;
+    const sh = layer.naturalHeight * t.sy;
+    // T(tx, ty) · Tc · R(rot) · Tc⁻¹ · S(sw, sh)   (scale, rotate about center, place).
+    // tx/ty are the ABSOLUTE doc position of the un-rotated scaled box's top-left;
+    // the layer's x/y/width/height are the AABB (hit-testing/effects/clip) only.
+    let m = m3.translation(t.tx, t.ty);
+    m = m3.multiply(m, m3.translation(sw / 2, sh / 2));
+    m = m3.multiply(m, m3.rotation(t.rot));
+    m = m3.multiply(m, m3.translation(-sw / 2, -sh / 2));
+    m = m3.multiply(m, m3.scaling(sw, sh));
+    return m;
+  }
+
+  /** AABB (doc px) of a smart object's stored-transform footprint. */
+  private smartAabb(
+    layer: SmartObjectLayer,
+  ): { x: number; y: number; width: number; height: number } {
+    const m = this.smartBaseMatrix(layer);
+    const corners = [
+      { x: 0, y: 0 },
+      { x: 1, y: 0 },
+      { x: 1, y: 1 },
+      { x: 0, y: 1 },
+    ].map((c) => m3.transformPoint(m, c.x, c.y));
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of corners) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  }
+
+  /**
+   * The unit-quad -> doc px BASE for a pixel layer (before the live transform
+   * session). Raster/text map the quad onto their (x,y,width,height) footprint;
+   * a smart object maps it through its stored non-destructive transform applied
+   * to the immutable original (lossless re-sampling).
+   */
+  private pixelBaseMatrix(layer: PixelLayer): Float32Array {
+    if (layer.kind === "smart") return this.smartBaseMatrix(layer);
+    return m3.multiply(
+      m3.translation(layer.x, layer.y),
+      m3.scaling(layer.width, layer.height),
+    );
+  }
+
+  /**
    * Doc-space model matrix mapping the unit quad to a pixel layer's footprint,
    * folding in the live free-transform when this layer is under an active
    * session. The transform is: translate (dx,dy), then rotate+scale about the
    * base footprint's center.
    */
   private layerModelMatrix(layer: LayerNode): Float32Array {
-    const base = m3.multiply(
-      m3.translation((layer as PixelLayer).x, (layer as PixelLayer).y),
-      m3.scaling((layer as PixelLayer).width, (layer as PixelLayer).height),
-    );
+    // Pixel layers (raster/text/smart) carry geometry; non-pixel layers never
+    // reach here in practice (compositor handles them separately) but fall back
+    // to a unit footprint so the call stays total.
+    const base = isPixelLayer(layer)
+      ? this.pixelBaseMatrix(layer)
+      : m3.multiply(
+          m3.translation((layer as unknown as PixelLayer).x ?? 0, (layer as unknown as PixelLayer).y ?? 0),
+          m3.scaling((layer as unknown as PixelLayer).width ?? 1, (layer as unknown as PixelLayer).height ?? 1),
+        );
     const sess = this.transformSession;
     if (!sess || sess.layerId !== layer.id) return base;
     const t = sess.base;
@@ -6128,8 +6212,11 @@ void main(){
       m = m3.multiply(m, m3.rotation((t.rotDeg * Math.PI) / 180));
       m = m3.multiply(m, m3.scaling(t.scaleX, t.scaleY));
       m = m3.multiply(m, m3.translation(-cx, -cy));
-      m = m3.multiply(m, m3.translation(layer.x, layer.y));
-      m = m3.multiply(m, m3.scaling(layer.width, layer.height));
+      m = m3.multiply(m, this.pixelBaseMatrix(layer));
+      return corners.map((c) => m3.transformPoint(m, c.x, c.y));
+    }
+    if (layer.kind === "smart") {
+      const m = this.smartBaseMatrix(layer);
       return corners.map((c) => m3.transformPoint(m, c.x, c.y));
     }
     return corners.map((c) => ({
@@ -6409,6 +6496,14 @@ void main(){
       return;
     }
 
+    // ── SMART OBJECT: fold the session transform into the STORED non-destructive
+    //    transform (no resample / no quality loss). The original pixels stay
+    //    immutable; only `transform` + the AABB change. ONE undo step.
+    if (isSmartLayer(layer)) {
+      this.commitSmartTransform(layer, sess.base, sess.baseBounds);
+      return;
+    }
+
     if (layer.kind === "text") this.ensureTextRasterized(layer);
     const tex = this.resolveTexture(layer.id);
     if (!tex) {
@@ -6520,6 +6615,247 @@ void main(){
     this.transformSession = null;
     this.markDirty();
     this.emit();
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  SMART OBJECTS (non-destructive transform)
+  // ════════════════════════════════════════════════════════
+  /**
+   * Fold a live free-transform (session, relative to the base bounds center)
+   * into a smart object's STORED transform and update its AABB. Lossless: the
+   * immutable original is never resampled — we only re-derive {tx,ty,sx,sy,rot}.
+   * ONE undo step (prev/next transform + AABB). Called by commitTransform().
+   */
+  private commitSmartTransform(
+    layer: SmartObjectLayer,
+    sess: TransformState,
+    baseBounds: Rect,
+  ): void {
+    const id = layer.id;
+    // Compose: A = Tsess · oldBase  (unit quad -> doc px after the session).
+    const cx = baseBounds.x + baseBounds.width / 2;
+    const cy = baseBounds.y + baseBounds.height / 2;
+    let Tsess = m3.translation(sess.dx, sess.dy);
+    Tsess = m3.multiply(Tsess, m3.translation(cx, cy));
+    Tsess = m3.multiply(Tsess, m3.rotation((sess.rotDeg * Math.PI) / 180));
+    Tsess = m3.multiply(Tsess, m3.scaling(sess.scaleX, sess.scaleY));
+    Tsess = m3.multiply(Tsess, m3.translation(-cx, -cy));
+    const A = m3.multiply(Tsess, this.smartBaseMatrix(layer));
+
+    const next = this.decomposeSmartMatrix(A, layer.naturalWidth, layer.naturalHeight);
+    const prev = { ...layer.transform };
+
+    const applyTransform = (tr: SmartTransform) => {
+      const tmp: SmartObjectLayer = { ...layer, transform: tr };
+      const aabb = this.smartAabb(tmp);
+      this.doc.setSmartTransform(id, tr, {
+        x: Math.floor(aabb.x),
+        y: Math.floor(aabb.y),
+        width: Math.ceil(aabb.width),
+        height: Math.ceil(aabb.height),
+      });
+      this.textures.delete(id); // footprint changed; re-resolve not needed but cheap
+    };
+
+    this.transformSession = null;
+    applyTransform(next);
+    this.history.push(
+      paramCommand(
+        "Free Transform (Smart Object)",
+        () => applyTransform(next),
+        () => applyTransform(prev),
+      ),
+    );
+    this.markDirty();
+    this.emit();
+  }
+
+  /**
+   * Decompose an affine unit-quad -> doc matrix `A` (column-major) into smart
+   * transform params {tx,ty,sx,sy,rot}, matching smartBaseMatrix's composition
+   * (scale, rotate about the scaled-box center, translate). Assumes no shear
+   * (free-transform sessions only scale + rotate). natW/natH are the original
+   * source dimensions.
+   */
+  private decomposeSmartMatrix(
+    A: Float32Array,
+    natW: number,
+    natH: number,
+  ): SmartTransform {
+    const a = A[0]!, b = A[1]!, c = A[3]!, d = A[4]!, e = A[6]!, f = A[7]!;
+    // Linear part L = R(rot) · diag(sw, sh): col0 length = sw, col1 length = sh.
+    const sw = Math.hypot(a, b) || 1e-4;
+    const sh = Math.hypot(c, d) || 1e-4;
+    const rot = Math.atan2(b, a);
+    const sx = sw / Math.max(1e-4, natW);
+    const sy = sh / Math.max(1e-4, natH);
+    // A maps (0,0) -> (e,f) = top-left AFTER rotation about the scaled center.
+    // smartBaseMatrix maps (0,0) -> T(tx,ty) · [Tc·R·Tc⁻¹ · (0,0)].
+    // Px = Tc·R·Tc⁻¹·(0,0):
+    const cosr = Math.cos(rot), sinr = Math.sin(rot);
+    const hx = sw / 2, hy = sh / 2;
+    const Px = hx + (cosr * -hx - sinr * -hy);
+    const Py = hy + (sinr * -hx + cosr * -hy);
+    const tx = e - Px;
+    const ty = f - Py;
+    return { tx, ty, sx, sy, rot };
+  }
+
+  /**
+   * Wrap a raster OR text layer into a SMART OBJECT (non-destructive transform):
+   * snapshot its CURRENT pixels as the immutable original source, replace the
+   * node in place with a SmartObjectLayer (identity transform), one undo step.
+   * No-op for adjustment/group layers or if the layer can't be rasterized.
+   * Defaults to the active layer.
+   */
+  convertToSmartObject(layerId?: LayerId): void {
+    const id = layerId ?? this.doc.getActiveLayerId();
+    if (!id) return;
+    const layer = this.doc.getLayer(id);
+    if (!layer || !isPixelLayer(layer) || isSmartLayer(layer)) return;
+    if (layer.kind === "text") this.ensureTextRasterized(layer);
+    const src = (layer as RasterLayer | TextLayer).source;
+    if (!src) return;
+    // Snapshot the immutable original as plain ImageData (decoupled from GL).
+    const original = this.snapshotSourceImageData(src);
+    if (!original) return;
+    const x = layer.x;
+    const y = layer.y;
+
+    // Capture the full prior node so undo restores it exactly (raster or text).
+    const prevNode = this.cloneNode(layer);
+
+    const apply = () => {
+      this.doc.wrapAsSmartObject(id, original, x, y);
+      this.textRasterVersion.delete(id);
+      this.textures.delete(id);
+    };
+    const revert = () => {
+      if (prevNode) this.doc.replaceNode(this.cloneNode(prevNode)!);
+      this.textRasterVersion.delete(id);
+      this.textures.delete(id);
+    };
+
+    apply();
+    this.history.push(
+      paramCommand("Convert to Smart Object", () => apply(), () => revert()),
+    );
+    this.markDirty();
+    this.emit();
+  }
+
+  /**
+   * Bake a smart object's current transform into a plain raster layer: resample
+   * the immutable original through the stored transform into a new RGBA8 source
+   * at the transformed AABB (GPU pass + readback), replace the node in place.
+   * ONE undo step (restores the exact smart node on undo). Defaults to active.
+   */
+  rasterizeSmartObject(layerId?: LayerId): void {
+    const id = layerId ?? this.doc.getActiveLayerId();
+    if (!id) return;
+    const layer = this.doc.getLayer(id);
+    const r = this.renderer;
+    if (!layer || !isSmartLayer(layer) || !r) return;
+    const tex = this.resolveTexture(id);
+    if (!tex) return;
+
+    // Resample the original through the stored transform into its AABB.
+    const aabb = this.smartAabb(layer);
+    const nx = Math.floor(aabb.x);
+    const ny = Math.floor(aabb.y);
+    const nw = Math.max(1, Math.ceil(aabb.x + aabb.width) - nx);
+    const nh = Math.max(1, Math.ceil(aabb.y + aabb.height) - ny);
+
+    const gl = r.gl;
+    const target = r.createRGBA8Target(nw, nh);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+    gl.viewport(0, 0, nw, nh);
+    gl.disable(gl.BLEND);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    const prog = this.normalBlendProgram!;
+    gl.useProgram(prog);
+    const pixToClip = m3.pixelToClip(nw, nh);
+    const docModel = this.smartBaseMatrix(layer); // unit quad -> doc px (orig through xform)
+    const offset = m3.translation(-nx, -ny);
+    const transform = m3.multiply(pixToClip, m3.multiply(offset, docModel));
+    gl.uniformMatrix3fv(gl.getUniformLocation(prog, "u_transform"), false, transform);
+    gl.uniform1f(gl.getUniformLocation(prog, "u_opacity"), 1);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_tex"), 0);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_srgbSource"), tex.srgb ? 0 : 1);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex.tex);
+    r.drawQuad();
+
+    const rawLinear = r.readPixels(target, 0, 0, nw, nh);
+    r.deleteFramebuffer(target);
+    const out = new Uint8ClampedArray(nw * nh * 4);
+    for (let y = 0; y < nh; y++) {
+      const srcRow = (nh - 1 - y) * nw * 4; // GL readback is bottom-up
+      const dstRow = y * nw * 4;
+      for (let x = 0; x < nw * 4; x += 4) {
+        const a = (rawLinear[srcRow + x + 3] ?? 0) / 255;
+        const inv = a > 1e-4 ? 1 / a : 0;
+        for (let ch = 0; ch < 3; ch++) {
+          const lin = ((rawLinear[srcRow + x + ch] ?? 0) / 255) * inv;
+          out[dstRow + x + ch] = Math.round(linearToSrgb(lin) * 255);
+        }
+        out[dstRow + x + 3] = rawLinear[srcRow + x + 3] ?? 0;
+      }
+    }
+    const newSource = new ImageData(out, nw, nh);
+
+    const prevNode = this.cloneNode(layer);
+    const apply = () => {
+      this.doc.bakeSmartToRaster(id, newSource, nx, ny);
+      this.textures.delete(id);
+    };
+    const revert = () => {
+      if (prevNode) this.doc.replaceNode(this.cloneNode(prevNode)!);
+      this.textures.delete(id);
+    };
+    apply();
+    this.history.push({
+      label: "Rasterize Smart Object",
+      bytes: nw * nh * 4,
+      undo: revert,
+      redo: apply,
+    });
+    this.markDirty();
+    this.emit();
+  }
+
+  /** Snapshot a layer source to plain (ArrayBuffer-backed) ImageData. */
+  private snapshotSourceImageData(
+    src: ImageBitmap | ImageData,
+  ): ImageData | null {
+    if (typeof ImageData !== "undefined" && src instanceof ImageData) {
+      return new ImageData(new Uint8ClampedArray(src.data), src.width, src.height);
+    }
+    const cv = makeCanvas(src.width, src.height);
+    const ctx = get2d(cv);
+    ctx.drawImage(src as ImageBitmap, 0, 0);
+    const img = ctx.getImageData(0, 0, src.width, src.height);
+    return new ImageData(new Uint8ClampedArray(img.data), src.width, src.height);
+  }
+
+  /**
+   * Deep-clone a layer node (for undo of in-place node replacement). Pixel
+   * sources are shared by reference (immutable); mask buffers + transform are
+   * copied so a later in-place edit cannot mutate the captured snapshot.
+   */
+  private cloneNode(n: LayerNode): LayerNode | null {
+    const copy: LayerNode = { ...(n as LayerNode) };
+    const anyN = copy as { mask?: { data: Uint8Array; width: number; height: number; version: number; enabled: boolean } };
+    if (anyN.mask) {
+      anyN.mask = { ...anyN.mask, data: new Uint8Array(anyN.mask.data) };
+    }
+    if (isSmartLayer(copy)) copy.transform = { ...copy.transform };
+    if (copy.kind === "text") {
+      (copy as TextLayer).color = { ...(copy as TextLayer).color };
+      if ((copy as TextLayer).warp) (copy as TextLayer).warp = { ...(copy as TextLayer).warp! };
+    }
+    return copy;
   }
 
   // ════════════════════════════════════════════════════════
@@ -6773,21 +7109,86 @@ void main(){
 
   /** Record a single undo step for a text edit (prev/next full param sets). */
   commitTextLayer(id: LayerId, prev: TextLayerSnapshot, next: TextLayerSnapshot): void {
-    const before = { ...prev, color: { ...prev.color } };
-    const after = { ...next, color: { ...next.color } };
-    this.doc.setTextLayerParams(id, after);
+    const clone = (s: TextLayerSnapshot): TextLayerSnapshot => ({
+      ...s,
+      color: { ...s.color },
+      warp: s.warp ? { ...s.warp } : undefined,
+    });
+    const before = clone(prev);
+    const after = clone(next);
+    this.doc.setTextLayerParams(id, clone(after));
     this.textures.delete(id);
     this.history.push(
       paramCommand(
         "Edit text",
         () => {
-          this.doc.setTextLayerParams(id, { ...after, color: { ...after.color } });
+          this.doc.setTextLayerParams(id, clone(after));
           this.textures.delete(id);
         },
         () => {
-          this.doc.setTextLayerParams(id, { ...before, color: { ...before.color } });
+          this.doc.setTextLayerParams(id, clone(before));
           this.textures.delete(id);
         },
+      ),
+    );
+    this.markDirty();
+    this.emit();
+  }
+
+  /**
+   * Bind a text layer to a committed path (type-on-a-path), or pass null to
+   * unbind it (back to flat text). Re-rasterizes; ONE undo step. No-op for
+   * non-text layers or an unknown path id.
+   */
+  setTextPath(textLayerId: LayerId, pathId: string | null): void {
+    const layer = this.doc.getLayer(textLayerId);
+    if (!layer || layer.kind !== "text") return;
+    if (pathId != null && !this.paths.resolve(pathId)) return;
+    const prev = layer.pathId ?? null;
+    if (prev === pathId) return;
+    // Binding to a path re-rasterizes the glyphs at the PATH's bbox origin,
+    // overwriting the layer's flat x/y. Capture the flat position so unbinding
+    // (or undo back to flat text) restores the text to where it actually was,
+    // instead of leaving it parked at the path's location.
+    const flatPos =
+      prev === null ? { x: layer.x, y: layer.y } : this.flatTextPos.get(textLayerId);
+    if (prev === null) this.flatTextPos.set(textLayerId, { x: layer.x, y: layer.y });
+    const apply = (p: string | null) => {
+      this.doc.setTextPath(textLayerId, p);
+      // Going back to flat text: restore the remembered flat origin so the
+      // next (flat) rasterize anchors at the original position.
+      if (p === null && flatPos) this.doc.setPosition(textLayerId, flatPos.x, flatPos.y);
+      this.textRasterVersion.delete(textLayerId);
+      this.textures.delete(textLayerId);
+    };
+    apply(pathId);
+    this.history.push(
+      paramCommand("Text on Path", () => apply(pathId), () => apply(prev)),
+    );
+    this.markDirty();
+    this.emit();
+  }
+
+  /**
+   * Set (or clear) a text layer's warp envelope. Pass null or `{style:'none'}`
+   * to remove the warp (flat text, unchanged). Re-rasterizes; ONE undo step.
+   */
+  setTextWarp(textLayerId: LayerId, warp: TextWarp | null): void {
+    const layer = this.doc.getLayer(textLayerId);
+    if (!layer || layer.kind !== "text") return;
+    const prev = layer.warp ? { ...layer.warp } : null;
+    const next = warp && warp.style !== "none" ? { ...warp } : null;
+    const apply = (w: TextWarp | null) => {
+      this.doc.setTextWarp(textLayerId, w);
+      this.textRasterVersion.delete(textLayerId);
+      this.textures.delete(textLayerId);
+    };
+    apply(next);
+    this.history.push(
+      paramCommand(
+        "Warp Text",
+        () => apply(next ? { ...next } : null),
+        () => apply(prev ? { ...prev } : null),
       ),
     );
     this.markDirty();
@@ -6810,6 +7211,9 @@ void main(){
     bold: boolean;
     italic: boolean;
     lineHeight: number;
+    /** Path binding + warp, so the overlay's undo snapshot keeps them intact. */
+    pathId: string | null;
+    warp?: TextWarp;
   } | null {
     const te = this.textEditing;
     if (!te) return null;
@@ -6837,6 +7241,8 @@ void main(){
       bold: layer.bold,
       italic: layer.italic,
       lineHeight: layer.lineHeight,
+      pathId: layer.pathId ?? null,
+      warp: layer.warp ? { ...layer.warp } : undefined,
     };
   }
 
@@ -6868,10 +7274,27 @@ void main(){
    * draw within [0,width]).
    */
   private ensureTextRasterized(layer: TextLayer): void {
+    // The bound path (if any), resolved from the Paths store.
+    const boundPath =
+      layer.pathId != null ? this.paths.resolve(layer.pathId) : null;
+    const key = this.textRasterKey(layer, boundPath);
     const last = this.textRasterVersion.get(layer.id);
-    if (last === layer.version && layer.source) return;
+    if (last === key && layer.source) return;
 
     const fontStyle = `${layer.italic ? "italic " : ""}${layer.bold ? "700 " : "400 "}${layer.fontSize}px ${layer.fontFamily}`;
+
+    // ── TYPE ON A PATH ──────────────────────────────────────
+    if (boundPath) {
+      const built = this.rasterizeTextOnPath(layer, boundPath, fontStyle);
+      if (built) {
+        this.doc.setTextRaster(layer.id, built.source, built.x, built.y);
+        this.textRasterVersion.set(layer.id, key);
+        this.textures.delete(layer.id);
+        return;
+      }
+      // Path missing/degenerate → fall through to flat text.
+    }
+
     const lineH = Math.max(1, Math.round(layer.fontSize * layer.lineHeight));
     const lines = (layer.text.length ? layer.text : " ").split("\n");
 
@@ -6887,8 +7310,15 @@ void main(){
     // Pad for descenders / italic overhang.
     const padX = Math.ceil(layer.fontSize * 0.25);
     const padY = Math.ceil(layer.fontSize * 0.3);
-    const W = Math.max(1, Math.ceil(maxW) + padX * 2);
-    const H = Math.max(1, lines.length * lineH + padY * 2);
+    // When a warp is active, the envelope displaces glyphs OUTSIDE the tight
+    // text box (an arc/bulge can push content by a large fraction of the box
+    // height). Reserve extra margin so strong bends are not clipped — and offset
+    // the layer origin by the same margin so the text stays visually anchored.
+    // For style 'none' both margins are 0 → the flat raster is byte-identical.
+    const warped = layer.warp && layer.warp.style !== "none";
+    const wm = warpMargins(layer.warp, Math.ceil(maxW) + padX * 2, lines.length * lineH + padY * 2);
+    const W = Math.max(1, Math.ceil(maxW) + padX * 2 + wm.x * 2);
+    const H = Math.max(1, lines.length * lineH + padY * 2 + wm.y * 2);
 
     const cv = makeCanvas(W, H);
     const ctx = get2d(cv);
@@ -6898,25 +7328,131 @@ void main(){
     ctx.textAlign = layer.align;
     const col = layer.color;
     ctx.fillStyle = `rgba(${Math.round(col.r * 255)},${Math.round(col.g * 255)},${Math.round(col.b * 255)},${col.a})`;
-    let anchorX = padX;
+    // Glyphs draw inset by the warp margin so they sit centered in the padded box.
+    let anchorX = wm.x + padX;
     if (layer.align === "center") anchorX = W / 2;
-    else if (layer.align === "right") anchorX = W - padX;
+    else if (layer.align === "right") anchorX = W - wm.x - padX;
     // Baseline of line i: padY + ascent + i*lineH. Approximate ascent ~0.8em.
     const ascent = layer.fontSize * 0.8;
     for (let i = 0; i < lines.length; i++) {
-      const baseY = padY + ascent + i * lineH;
+      const baseY = wm.y + padY + ascent + i * lineH;
       ctx.fillText(lines[i] ?? "", anchorX, baseY);
     }
 
     const img = ctx.getImageData(0, 0, W, H);
-    const source = new ImageData(
-      new Uint8ClampedArray(img.data),
-      W,
-      H,
-    );
+    let source = new ImageData(new Uint8ClampedArray(img.data), W, H);
+
+    // ── WARP ENVELOPE ───────────────────────────────────────
+    // style 'none' (or absent) leaves the flat raster byte-identical.
+    if (layer.warp && layer.warp.style !== "none") {
+      source = warpImageData(source, layer.warp);
+    }
+
+    // Keep the bitmap anchored at the layer origin (idempotent: re-rasterizing
+    // with the same params must not drift x/y). The glyphs sit inset by the warp
+    // margin INSIDE this larger bitmap, so toggling warp on shifts them slightly
+    // within their box but never clips the displaced envelope.
     this.doc.setTextRaster(layer.id, source, layer.x, layer.y);
-    this.textRasterVersion.set(layer.id, layer.version);
+    this.textRasterVersion.set(layer.id, key);
     this.textures.delete(layer.id);
+  }
+
+  /**
+   * Composite cache key for a text layer's raster. Plain text keys on `version`
+   * only (so flat-text behaviour is unchanged); path-bound text appends a
+   * geometry signature so editing the PATH re-rasterizes.
+   */
+  private textRasterKey(layer: TextLayer, boundPath: Path | null): string {
+    if (!boundPath) return `v${layer.version}`;
+    let sig = "";
+    for (const sp of boundPath.subpaths) {
+      sig += sp.closed ? "c" : "o";
+      for (const a of sp.anchors) {
+        sig += `;${a.x.toFixed(1)},${a.y.toFixed(1)},${a.outX.toFixed(1)},${a.outY.toFixed(1)},${a.inX.toFixed(1)},${a.inY.toFixed(1)}`;
+      }
+    }
+    return `v${layer.version}|p${boundPath.id}|${sig}`;
+  }
+
+  /**
+   * Rasterize a text layer's glyphs laid out ALONG a path by arc-length: each
+   * glyph is placed at its center distance along the flattened path and rotated
+   * to the local tangent. Drawn into a doc-sized raster offset to the path's
+   * bbox (padded for glyph height). Returns the bitmap + its doc-space origin,
+   * or null when the path is degenerate. align controls the start offset.
+   */
+  private rasterizeTextOnPath(
+    layer: TextLayer,
+    path: Path,
+    fontStyle: string,
+  ): { source: ImageData; x: number; y: number } | null {
+    // Flatten the first usable subpath into a dense polyline (doc px) and build
+    // a cumulative arc-length table.
+    const pts = flattenPathPoints(path);
+    if (pts.length < 2) return null;
+    const cum: number[] = [0];
+    let total = 0;
+    for (let i = 1; i < pts.length; i++) {
+      total += Math.hypot(pts[i]!.x - pts[i - 1]!.x, pts[i]!.y - pts[i - 1]!.y);
+      cum.push(total);
+    }
+    if (total < 1) return null;
+
+    // Measure each glyph (single line: newlines are treated as spaces on a path).
+    const text = layer.text.replace(/\n/g, " ");
+    const measureCv = makeCanvas(8, 8);
+    const mctx = get2d(measureCv);
+    mctx.font = fontStyle;
+    const glyphs = [...text];
+    const widths = glyphs.map((g) => mctx.measureText(g).width);
+    const textW = widths.reduce((a, b) => a + b, 0);
+
+    // Start offset by alignment.
+    let start = 0;
+    if (layer.align === "center") start = Math.max(0, (total - textW) / 2);
+    else if (layer.align === "right") start = Math.max(0, total - textW);
+
+    // Bitmap covers the whole path bbox, padded by the font size for the
+    // baseline rise/descent of rotated glyphs.
+    const pb = pathBounds(path)!;
+    const pad = Math.ceil(layer.fontSize * 1.2);
+    const ox = Math.floor(pb.x - pad);
+    const oy = Math.floor(pb.y - pad);
+    const W = Math.max(1, Math.ceil(pb.width + pad * 2));
+    const H = Math.max(1, Math.ceil(pb.height + pad * 2));
+
+    const cv = makeCanvas(W, H);
+    const ctx = get2d(cv);
+    ctx.clearRect(0, 0, W, H);
+    ctx.font = fontStyle;
+    ctx.textBaseline = "alphabetic";
+    ctx.textAlign = "center";
+    const col = layer.color;
+    ctx.fillStyle = `rgba(${Math.round(col.r * 255)},${Math.round(col.g * 255)},${Math.round(col.b * 255)},${col.a})`;
+
+    let dist = start;
+    for (let i = 0; i < glyphs.length; i++) {
+      const w = widths[i]!;
+      const center = dist + w / 2;
+      dist += w;
+      if (center > total) break; // ran off the end of the path
+      const sample = sampleAtDistance(pts, cum, center);
+      if (!sample) continue;
+      ctx.save();
+      // Place into bitmap space (offset by the bbox origin), rotate to tangent.
+      ctx.translate(sample.x - ox, sample.y - oy);
+      ctx.rotate(sample.angle);
+      // Draw the glyph sitting ON the path (baseline on the curve).
+      ctx.fillText(glyphs[i]!, 0, 0);
+      ctx.restore();
+    }
+
+    const img = ctx.getImageData(0, 0, W, H);
+    let source = new ImageData(new Uint8ClampedArray(img.data), W, H);
+    if (layer.warp && layer.warp.style !== "none") {
+      source = warpImageData(source, layer.warp);
+    }
+    return { source, x: ox, y: oy };
   }
 
   /** Convert a text layer to a plain raster layer in place (transform-commit). */
@@ -7150,9 +7686,32 @@ void main(){
 
   /** Delete a path (or the active one). One UI emit; no undo step (cheap). */
   deletePath(pathId?: LayerId): void {
+    // Resolve the concrete id about to be deleted so we can unbind any text
+    // layer typed along it (otherwise it would keep rendering the cached glyphs
+    // laid out on a now-gone path).
+    const target = this.paths.resolve(pathId);
+    const deletedId = target?.id ?? null;
     if (this.paths.deletePath(pathId)) {
+      if (deletedId) this.unbindTextLayersFromPath(deletedId);
       this.markDirty();
       this.emit();
+    }
+  }
+
+  /**
+   * Drop the path binding on every text layer typed along `pathId` (after the
+   * path was deleted) and invalidate their raster caches so they fall back to
+   * flat text on the next render. Not individually undoable (path deletion is
+   * itself cheap/non-undoable here), but keeps the model + GPU caches coherent.
+   */
+  private unbindTextLayersFromPath(pathId: string): void {
+    for (const id of this.doc.allLayerIds()) {
+      const l = this.doc.getLayer(id);
+      if (l && l.kind === "text" && l.pathId === pathId) {
+        this.doc.setTextPath(id, null);
+        this.textRasterVersion.delete(id);
+        this.textures.delete(id);
+      }
     }
   }
   /** Discard the in-progress live path (Esc equivalent for the UI). */
@@ -7350,6 +7909,7 @@ void main(){
     if (r) for (const e of this.adjustmentLUTs.values()) r.deleteTexture(e.tex);
     this.adjustmentLUTs.clear();
     this.textRasterVersion.clear();
+    this.flatTextPos.clear();
     this.filterPreview = null;
     this.transformSession = null;
     this.cropSession = null;
@@ -7597,4 +8157,212 @@ async function encodePng(
       "image/png",
     );
   });
+}
+
+// ════════════════════════════════════════════════════════════
+//  TYPE-ON-A-PATH GEOMETRY (pure CPU)
+// ════════════════════════════════════════════════════════════
+/**
+ * Flatten the FIRST usable subpath of a path into a dense polyline (doc px) by
+ * sampling each cubic-bezier segment. ~24 samples/segment is plenty for glyph
+ * placement. Closed subpaths add the wrap segment. Returns [] if degenerate.
+ */
+function flattenPathPoints(path: Path): { x: number; y: number }[] {
+  const sp = path.subpaths.find((s) => s.anchors.length >= 2);
+  if (!sp) return [];
+  const a = sp.anchors;
+  const out: { x: number; y: number }[] = [{ x: a[0]!.x, y: a[0]!.y }];
+  const STEPS = 24;
+  const emitSeg = (A: typeof a[number], B: typeof a[number]) => {
+    for (let s = 1; s <= STEPS; s++) {
+      const t = s / STEPS;
+      const mt = 1 - t;
+      const b0 = mt * mt * mt;
+      const b1 = 3 * mt * mt * t;
+      const b2 = 3 * mt * t * t;
+      const b3 = t * t * t;
+      out.push({
+        x: b0 * A.x + b1 * A.outX + b2 * B.inX + b3 * B.x,
+        y: b0 * A.y + b1 * A.outY + b2 * B.inY + b3 * B.y,
+      });
+    }
+  };
+  for (let i = 0; i < a.length - 1; i++) emitSeg(a[i]!, a[i + 1]!);
+  if (sp.closed) emitSeg(a[a.length - 1]!, a[0]!);
+  return out;
+}
+
+/**
+ * Sample a flattened polyline at arc-length `dist`, returning the point + the
+ * local tangent angle (radians). `cum` is the cumulative arc length per vertex.
+ */
+function sampleAtDistance(
+  pts: { x: number; y: number }[],
+  cum: number[],
+  dist: number,
+): { x: number; y: number; angle: number } | null {
+  if (pts.length < 2) return null;
+  const total = cum[cum.length - 1]!;
+  const d = Math.max(0, Math.min(total, dist));
+  // Find the segment containing `d` (linear scan is fine for our vertex counts).
+  let i = 1;
+  while (i < cum.length && cum[i]! < d) i++;
+  if (i >= cum.length) i = cum.length - 1;
+  const p0 = pts[i - 1]!;
+  const p1 = pts[i]!;
+  const segLen = cum[i]! - cum[i - 1]! || 1e-4;
+  const f = (d - cum[i - 1]!) / segLen;
+  return {
+    x: p0.x + (p1.x - p0.x) * f,
+    y: p0.y + (p1.y - p0.y) * f,
+    angle: Math.atan2(p1.y - p0.y, p1.x - p0.x),
+  };
+}
+
+// ════════════════════════════════════════════════════════════
+//  WARP TEXT (CPU displacement of the rasterized glyphs)
+// ════════════════════════════════════════════════════════════
+/**
+ * Apply a Photoshop-style warp envelope to a rasterized text bitmap by
+ * inverse-displacing each output pixel (bilinear sampled from the source). The
+ * displacement maps normalized coords (u,v in 0..1) through the warp style, so
+ * the result has the same dimensions and stays correct + cached (keyed by the
+ * text layer version). style 'none' is handled by callers (never reaches here).
+ */
+function warpImageData(src: ImageData, warp: TextWarp): ImageData {
+  const W = src.width;
+  const H = src.height;
+  const sd = src.data;
+  const out = new Uint8ClampedArray(W * H * 4);
+  const bend = clampSigned(warp.bend);
+  const hz = clampSigned(warp.horizontal ?? 0);
+  const vt = clampSigned(warp.vertical ?? 0);
+
+  // For each OUTPUT pixel, find the SOURCE coord it samples (inverse map) so the
+  // shape is filled with no holes. We approximate the inverse of the forward
+  // warp by applying the inverse vertical offset; it's visually faithful for the
+  // moderate bends these styles use.
+  for (let y = 0; y < H; y++) {
+    const v = H > 1 ? y / (H - 1) : 0; // 0 top .. 1 bottom
+    for (let x = 0; x < W; x++) {
+      const u = W > 1 ? x / (W - 1) : 0; // 0 left .. 1 right
+      const uc = u * 2 - 1; // -1..1 centered horizontal
+      const vc = v * 2 - 1; // -1..1 centered vertical
+
+      // dy: vertical displacement as a fraction of height (style-dependent).
+      // dx: horizontal displacement as a fraction of width.
+      let dyFrac = 0;
+      let dxFrac = 0;
+      switch (warp.style) {
+        case "arc":
+          // A smooth arc: top/bottom edges bow by a parabola; bend sign flips it.
+          dyFrac = bend * 0.5 * (1 - uc * uc) * (1 - v);
+          break;
+        case "arch":
+          dyFrac = bend * 0.5 * (1 - uc * uc);
+          break;
+        case "bulge":
+          dyFrac = bend * 0.5 * (1 - uc * uc) * (vc);
+          break;
+        case "wave":
+          dyFrac = bend * 0.3 * Math.sin(uc * Math.PI * 2);
+          break;
+        case "flag":
+          dyFrac = bend * 0.3 * Math.sin(uc * Math.PI * 2) * (0.4 + 0.6 * u);
+          break;
+        case "rise":
+          dyFrac = bend * 0.5 * uc;
+          break;
+        default:
+          dyFrac = 0;
+      }
+      // Perspective-style extra distortion (shared by all styles).
+      if (hz !== 0) dxFrac += hz * 0.3 * vc;
+      if (vt !== 0) dyFrac += vt * 0.3 * uc;
+
+      // Inverse-sample: the output (x,y) shows the source pixel offset the
+      // OPPOSITE way (so content moves WITH the envelope).
+      const sx = x - dxFrac * W;
+      const sy = y - dyFrac * H;
+      sampleBilinear(sd, W, H, sx, sy, out, (y * W + x) * 4);
+    }
+  }
+  return new ImageData(out, W, H);
+}
+
+function clampSigned(v: number): number {
+  return v < -1 ? -1 : v > 1 ? 1 : v;
+}
+
+/**
+ * Extra bitmap margin (px, per side) needed so a warp envelope's maximum
+ * displacement is not clipped. Mirrors the worst-case `dxFrac`/`dyFrac` in
+ * warpImageData: vertical styles reach ~0.5·bend of the box height, the wave/
+ * flag styles ~0.3, plus the shared perspective terms (vt·0.3 vertical,
+ * hz·0.3 horizontal). Returns {x:0,y:0} for no/absent warp so flat text is
+ * byte-identical. `boxW`/`boxH` are the tight (pre-margin) text-box dimensions.
+ */
+function warpMargins(
+  warp: TextWarp | undefined,
+  boxW: number,
+  boxH: number,
+): { x: number; y: number } {
+  if (!warp || warp.style === "none") return { x: 0, y: 0 };
+  const bend = Math.abs(clampSigned(warp.bend));
+  const hz = Math.abs(clampSigned(warp.horizontal ?? 0));
+  const vt = Math.abs(clampSigned(warp.vertical ?? 0));
+  let vFrac = 0;
+  switch (warp.style) {
+    case "arc":
+    case "arch":
+    case "bulge":
+    case "rise":
+      vFrac = bend * 0.5;
+      break;
+    case "wave":
+    case "flag":
+      vFrac = bend * 0.3;
+      break;
+    default:
+      vFrac = 0;
+  }
+  vFrac += vt * 0.3;
+  const hFrac = hz * 0.3;
+  return {
+    x: Math.ceil(hFrac * boxW) + 2,
+    y: Math.ceil(vFrac * boxH) + 2,
+  };
+}
+
+/** Bilinear-sample straight-RGBA `sd` at (sx,sy); write to out[off..off+3]. */
+function sampleBilinear(
+  sd: Uint8ClampedArray,
+  W: number,
+  H: number,
+  sx: number,
+  sy: number,
+  out: Uint8ClampedArray,
+  off: number,
+): void {
+  if (sx < -1 || sy < -1 || sx > W || sy > H) {
+    out[off] = 0; out[off + 1] = 0; out[off + 2] = 0; out[off + 3] = 0;
+    return;
+  }
+  const x0 = Math.floor(sx);
+  const y0 = Math.floor(sy);
+  const fx = sx - x0;
+  const fy = sy - y0;
+  const at = (xx: number, yy: number, ch: number) => {
+    if (xx < 0 || yy < 0 || xx >= W || yy >= H) return 0;
+    return sd[(yy * W + xx) * 4 + ch] ?? 0;
+  };
+  for (let ch = 0; ch < 4; ch++) {
+    const a = at(x0, y0, ch);
+    const b = at(x0 + 1, y0, ch);
+    const c = at(x0, y0 + 1, ch);
+    const d = at(x0 + 1, y0 + 1, ch);
+    const top = a + (b - a) * fx;
+    const bot = c + (d - c) * fx;
+    out[off + ch] = Math.round(top + (bot - top) * fy);
+  }
 }
