@@ -47,6 +47,7 @@ export const TOOLS: ToolDef[] = [
   { id: "blur-brush", glyph: "❍", label: "Blur / Sharpen / Smudge", key: "", group: 3 },
   { id: "bucket", glyph: "🪣", label: "Paint bucket", key: "K", group: 4 },
   { id: "gradient", glyph: "🌈", label: "Gradient", key: "G", group: 4 },
+  { id: "pen", glyph: "✒", label: "Pen (vector path)", key: "P", group: 5 },
   { id: "text", glyph: "T", label: "Type", key: "Y", group: 5 },
   // Shape lives in the rail too, but its glyph + flyout are handled specially.
   { id: "shape", glyph: "▱", label: "Shape", key: "U", group: 5 },

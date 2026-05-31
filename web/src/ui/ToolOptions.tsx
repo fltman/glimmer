@@ -17,8 +17,15 @@ import {
   type RGBAColor,
   type ShapeKind,
   type DodgeBurnRange,
+  type GradientStopUI,
 } from "../state/tools";
-import { actions, engine, useEngineSnapshot } from "../state/useEngine";
+import {
+  actions,
+  engine,
+  useEngineSnapshot,
+  useGradientParams,
+  useViewExtras,
+} from "../state/useEngine";
 import { ColorPicker } from "./color/ColorPicker";
 import { rgbaCss } from "./color/colorMath";
 
@@ -792,8 +799,352 @@ function FocusBar({ sharpen }: { sharpen: boolean }) {
   );
 }
 
+/** True if a path description has at least one closed subpath (>= 2 anchors). */
+function pathHasClosedRegion(
+  p: ReturnType<typeof engine.getActivePath>,
+): boolean {
+  return (
+    !!p && p.subpaths.some((sp) => sp.closed && sp.anchors.length >= 2)
+  );
+}
+
+/**
+ * Pen-tool option bar: turn the active/live vector path into a selection, fill
+ * it, or stroke it on the active raster layer (using the foreground color + the
+ * brush width for the stroke), plus delete the path. Fill / Make-Selection need
+ * a closed region; Stroke + Delete only need a path to exist. We subscribe to
+ * the engine snapshot so enablement tracks live path construction.
+ */
+function PenBar() {
+  useEngineSnapshot();
+  const { foreground, brush } = useToolState();
+  const active = engine.getActivePath();
+  const drawing = engine.isDrawingPath();
+  const hasPath = active !== null;
+  const hasClosed = pathHasClosedRegion(active);
+
+  return (
+    <div className="flex items-center gap-3">
+      <button
+        className="btn"
+        disabled={!hasClosed}
+        title="Convert the closed path into the active selection"
+        onClick={() => actions.makePathSelection(undefined, "replace", "nonzero")}
+      >
+        Make Selection
+      </button>
+      <button
+        className="btn"
+        disabled={!hasClosed}
+        title="Fill the closed region with the foreground color"
+        onClick={() => actions.fillPath(undefined, foreground, "nonzero")}
+      >
+        Fill Path
+      </button>
+      <button
+        className="btn"
+        disabled={!hasPath}
+        title="Stroke the path outline with the foreground color at the brush width"
+        onClick={() =>
+          actions.strokePath(undefined, {
+            width: Math.max(1, Math.round(brush.size)),
+            color: foreground,
+          })
+        }
+      >
+        Stroke Path
+      </button>
+      <button
+        className="btn"
+        disabled={!hasPath}
+        title="Delete the active path"
+        onClick={() => {
+          // Discard an in-progress live path; otherwise drop the committed one.
+          if (drawing) actions.clearActivePath();
+          else actions.deletePath();
+        }}
+      >
+        Delete Path
+      </button>
+      <span className="text-[11px] text-muted">
+        {drawing
+          ? "Click to add anchors · drag for curves · click the first anchor to close · Enter commits · Esc discards"
+          : hasPath
+            ? "Click the canvas to start a new path"
+            : "Click the canvas to place the first anchor"}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Compact gradient editor: a horizontal preview bar with draggable stops.
+ *   · click empty bar  → add a stop at that position (color sampled from the ramp)
+ *   · drag a stop      → move it (position 0..1)
+ *   · click a stop     → open the shared ColorPicker to recolor it
+ *   · double-click / Del on a selected stop → remove it (min two stops kept)
+ * Edits go through actions.setGradientStops (which clamps + sorts + floors at 2).
+ */
+function GradientEditor({
+  stops,
+  reverse,
+}: {
+  stops: GradientStopUI[];
+  reverse: boolean;
+}) {
+  const barRef = useRef<HTMLDivElement | null>(null);
+  const [selected, setSelected] = useState(0);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const dragRef = useRef<{ index: number; moved: boolean } | null>(null);
+
+  // Keep the selected index in range as stops are added/removed.
+  const sel = Math.min(selected, stops.length - 1);
+  const selStop = stops[sel]!;
+
+  // The CSS preview gradient (respecting the reverse toggle, like the engine).
+  // Sort the color-stop list by the displayed position so CSS sees ascending
+  // offsets regardless of the (already-sorted-by-pos) store order under reverse.
+  const previewCss = `linear-gradient(to right, ${stops
+    .map((s) => ({
+      at: (reverse ? 1 - s.pos : s.pos) * 100,
+      css: rgbaCss(s.color),
+    }))
+    .sort((a, b) => a.at - b.at)
+    .map((s) => `${s.css} ${s.at}%`)
+    .join(", ")})`;
+
+  /**
+   * Map a clientX to a STORED 0..1 stop position. The bar is drawn (and handles
+   * placed) in DISPLAY space, which is flipped when `reverse` is on, so the raw
+   * left-to-right bar fraction must be inverted back into stored-pos space —
+   * otherwise dragging/adding a stop under reverse lands on the opposite side.
+   */
+  const posFromClientX = (clientX: number): number => {
+    const el = barRef.current;
+    if (!el) return 0;
+    const r = el.getBoundingClientRect();
+    const t = (clientX - r.left) / r.width;
+    const barPos = t < 0 ? 0 : t > 1 ? 1 : t;
+    return reverse ? 1 - barPos : barPos;
+  };
+
+  // Sample the ramp color at a position (linear interp between bounding stops).
+  const sampleRamp = (pos: number): RGBAColor => {
+    const ordered = [...stops].sort((a, b) => a.pos - b.pos);
+    if (pos <= ordered[0]!.pos) return { ...ordered[0]!.color };
+    const last = ordered[ordered.length - 1]!;
+    if (pos >= last.pos) return { ...last.color };
+    for (let i = 0; i < ordered.length - 1; i++) {
+      const lo = ordered[i]!;
+      const hi = ordered[i + 1]!;
+      if (pos >= lo.pos && pos <= hi.pos) {
+        const t = hi.pos === lo.pos ? 0 : (pos - lo.pos) / (hi.pos - lo.pos);
+        const mix = (a: number, b: number) => a + (b - a) * t;
+        return {
+          r: mix(lo.color.r, hi.color.r),
+          g: mix(lo.color.g, hi.color.g),
+          b: mix(lo.color.b, hi.color.b),
+          a: mix(lo.color.a, hi.color.a),
+        };
+      }
+    }
+    return { ...last.color };
+  };
+
+  // Add a stop at the clicked position (selecting it). Identity match by the
+  // (pos,color) we just inserted so we can re-select after the store re-sorts.
+  const addStopAt = (pos: number) => {
+    const color = sampleRamp(pos);
+    const next = [...stops, { pos, color }];
+    actions.setGradientStops(next);
+    // After normalize the new stop is sorted in; find it by position.
+    const sorted = [...next].sort((a, b) => a.pos - b.pos);
+    setSelected(sorted.findIndex((s) => s === next[next.length - 1]));
+    setPickerOpen(false);
+  };
+
+  const moveStop = (index: number, pos: number) => {
+    const next = stops.map((s, i) => (i === index ? { ...s, pos } : s));
+    actions.setGradientStops(next);
+    // Re-find the dragged stop after the store sorts so the handle keeps focus.
+    const sorted = [...next].sort((a, b) => a.pos - b.pos);
+    setSelected(sorted.indexOf(next[index]!));
+  };
+
+  const removeStop = (index: number) => {
+    if (stops.length <= 2) return; // store floors at two anyway
+    const next = stops.filter((_, i) => i !== index);
+    actions.setGradientStops(next);
+    setSelected((s) => Math.max(0, Math.min(s, next.length - 1)));
+    setPickerOpen(false);
+  };
+
+  const recolor = (index: number, color: RGBAColor) => {
+    actions.setGradientStops(stops.map((s, i) => (i === index ? { ...s, color } : s)));
+  };
+
+  // Window-level drag handling while a stop is being moved.
+  useEffect(() => {
+    function onMove(e: PointerEvent) {
+      const d = dragRef.current;
+      if (!d) return;
+      d.moved = true;
+      moveStop(d.index, posFromClientX(e.clientX));
+    }
+    function onUp() {
+      dragRef.current = null;
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    // moveStop closes over `stops`; re-bind when they change.
+  }, [stops]);
+
+  // Del key removes the selected stop while the editor area is focused.
+  return (
+    <div className="flex items-center gap-2">
+      <div
+        className="relative"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "Delete" || e.key === "Backspace") {
+            e.preventDefault();
+            removeStop(sel);
+          }
+        }}
+      >
+        {/* The ramp preview + click-to-add surface. */}
+        <div
+          ref={barRef}
+          title="Click to add a stop · drag stops to move · double-click a stop to remove"
+          onPointerDown={(e) => {
+            // Clicks on a stop handle are caught by the handle (stopPropagation);
+            // a bare bar click adds a stop here.
+            const pos = posFromClientX(e.clientX);
+            addStopAt(pos);
+          }}
+          className="h-5 w-44 cursor-copy rounded border border-edge"
+          style={{
+            backgroundImage: `${previewCss}, linear-gradient(45deg, #555 25%, transparent 25%, transparent 75%, #555 75%), linear-gradient(45deg, #555 25%, transparent 25%, transparent 75%, #555 75%)`,
+            backgroundSize: "auto, 6px 6px, 6px 6px",
+            backgroundPosition: "0 0, 0 0, 3px 3px",
+          }}
+        />
+        {/* Stop handles (positioned by pos; reverse flips visual placement). */}
+        {stops.map((s, i) => {
+          const left = (reverse ? 1 - s.pos : s.pos) * 100;
+          return (
+            <button
+              key={i}
+              type="button"
+              title={`Stop ${Math.round(s.pos * 100)}% · click to recolor · double-click to remove`}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                setSelected(i);
+                dragRef.current = { index: i, moved: false };
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                // A plain click (no drag) opens the color picker for this stop.
+                if (!dragRef.current?.moved) {
+                  setSelected(i);
+                  setPickerOpen((o) => (sel === i ? !o : true));
+                }
+              }}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                removeStop(i);
+              }}
+              className={`absolute top-full -mt-0.5 h-3 w-3 -translate-x-1/2 rounded-sm border ${
+                sel === i ? "border-accent ring-1 ring-accent" : "border-white"
+              }`}
+              style={{
+                left: `${left}%`,
+                backgroundColor: rgbaCss(s.color),
+                boxShadow: "0 0 0 1px rgba(0,0,0,0.6)",
+              }}
+            />
+          );
+        })}
+        {pickerOpen && (
+          <div
+            className="absolute left-0 top-full z-50 mt-3"
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <ColorPicker
+              value={selStop.color}
+              onChange={(c) => recolor(sel, c)}
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Gradient-tool option bar: type + reverse + the multi-stop editor. */
+function GradientBar() {
+  const { type, stops, reverse } = useGradientParams();
+  return (
+    <div className="flex items-center gap-3">
+      <Segmented<"linear" | "radial">
+        options={[
+          { id: "linear", label: "Linear" },
+          { id: "radial", label: "Radial" },
+        ]}
+        value={type}
+        onChange={(t) => actions.setGradient({ type: t })}
+      />
+      <Checkbox
+        label="Reverse"
+        checked={reverse}
+        title="Flip the ramp direction on apply"
+        onChange={(r) => actions.setGradient({ reverse: r })}
+      />
+      <GradientEditor stops={stops} reverse={reverse} />
+      <span className="text-[11px] text-muted">
+        Drag the canvas to draw · Shift constrains the angle to 45°
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Persistent right-aligned View toggles: Rulers / Grid / Snap. Wired directly to
+ * the engine setters; reads the reactive useViewExtras() so the toggles reflect
+ * external changes (View menu, project load).
+ */
+function ViewToggles() {
+  const { rulersVisible, grid, snapEnabled } = useViewExtras();
+  return (
+    <div className="ml-auto flex items-center gap-3 border-l border-edge pl-3">
+      <Checkbox
+        label="Rulers"
+        checked={rulersVisible}
+        title="Show document rulers (drag from a ruler to pull a guide)"
+        onChange={(v) => actions.setRulersVisible(v)}
+      />
+      <Checkbox
+        label="Grid"
+        checked={grid.visible}
+        title="Show the alignment grid"
+        onChange={(v) => actions.setGridVisible(v)}
+      />
+      <Checkbox
+        label="Snap"
+        checked={snapEnabled}
+        title="Snap moves/marquees/shapes to guides, grid, edges and center"
+        onChange={(v) => actions.setSnapEnabled(v)}
+      />
+    </div>
+  );
+}
+
 export function ToolOptions() {
-  const { active, brush, feather, foreground, background } = useToolState();
+  const { active, brush, feather, foreground } = useToolState();
   // The retouch brushes report as paint tools (shared gesture path) but have
   // their own option bars, so the generic brush bar must exclude them.
   const paint = isPaintTool(active) && !isRetouchTool(active);
@@ -877,17 +1228,7 @@ export function ToolOptions() {
         </div>
       )}
 
-      {active === "gradient" && (
-        <div className="flex items-center gap-2">
-          <span className="text-[11px] text-muted">Linear</span>
-          <ColorChip color={foreground} title="Foreground (start)" />
-          <span className="text-[11px] text-muted">→</span>
-          <ColorChip color={background} title="Background (end)" />
-          <span className="text-[11px] text-muted">
-            Drag to draw · Shift constrains the angle to 45°
-          </span>
-        </div>
-      )}
+      {active === "gradient" && <GradientBar />}
 
       {active === "eyedropper" && (
         <span className="text-[11px] text-muted">
@@ -908,6 +1249,7 @@ export function ToolOptions() {
       {active === "crop" && <CropBar />}
       {active === "text" && <TextBar />}
       {active === "shape" && <ShapeBar />}
+      {active === "pen" && <PenBar />}
 
       {/* Magic wand + retouch brushes. */}
       {active === "magic-wand" && <MagicWandBar />}
@@ -918,6 +1260,9 @@ export function ToolOptions() {
       {active === "smudge" && <SmudgeBar />}
       {active === "blur-brush" && <FocusBar sharpen={false} />}
       {active === "sharpen-brush" && <FocusBar sharpen={true} />}
+
+      {/* Persistent right-aligned View toggles (Rulers / Grid / Snap). */}
+      <ViewToggles />
     </div>
   );
 }

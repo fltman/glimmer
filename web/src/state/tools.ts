@@ -20,6 +20,7 @@ export type ToolId =
   | "eyedropper"
   | "bucket"
   | "gradient"
+  | "pen"
   | "transform"
   | "crop"
   | "text"
@@ -143,6 +144,25 @@ export interface ShapeParams {
   stroke: { color: RGBAColor; width: number };
 }
 
+/** A single gradient stop: position 0..1 along the ramp + a straight-sRGB color. */
+export interface GradientStopUI {
+  pos: number;
+  color: RGBAColor;
+}
+
+/**
+ * Gradient-tool params. The gradient tool drag uses these `stops` (the engine's
+ * applyGradientFill takes the same stop list). `reverse` flips the ramp on
+ * apply. Defaults are a two-stop foreground -> background ramp.
+ */
+export interface GradientParams {
+  type: "linear" | "radial";
+  /** Ordered stops (pos 0..1). At least two are kept by the store. */
+  stops: GradientStopUI[];
+  /** Reverse the ramp direction on apply. */
+  reverse: boolean;
+}
+
 export interface ToolState {
   active: ToolId;
   brush: BrushParams;
@@ -156,6 +176,8 @@ export interface ToolState {
   text: TextParams;
   /** Shape-tool params (incl. active shapeKind). */
   shape: ShapeParams;
+  /** Gradient-tool params (type + multi-stop ramp + reverse). */
+  gradient: GradientParams;
   /** Magic-wand / select-by-color params. */
   magicWand: MagicWandParams;
   /** Clone-stamp + healing-brush params (shared). */
@@ -187,6 +209,15 @@ const DEFAULT: ToolState = {
     kind: "rect",
     fill: null, // follow foreground
     stroke: { color: { r: 0, g: 0, b: 0, a: 1 }, width: 0 },
+  },
+  gradient: {
+    type: "linear",
+    // Default two-stop foreground -> background ramp (black -> white).
+    stops: [
+      { pos: 0, color: { r: 0, g: 0, b: 0, a: 1 } },
+      { pos: 1, color: { r: 1, g: 1, b: 1, a: 1 } },
+    ],
+    reverse: false,
   },
   magicWand: { tolerance: 32, contiguous: true, sampleAllLayers: false },
   clone: { size: 48, hardness: 0.6, opacity: 1, aligned: true },
@@ -243,6 +274,21 @@ class ToolStore {
     this.set({ ...this.state, shape: { ...this.state.shape, kind } });
   }
 
+  // ── gradient tool ──────────────────────────────────────
+  /** Patch gradient params (type / reverse / stops). Stops are normalized. */
+  setGradient(patch: Partial<GradientParams>): void {
+    const next = { ...this.state.gradient, ...patch };
+    if (patch.stops) next.stops = normalizeGradientStops(patch.stops);
+    this.set({ ...this.state, gradient: next });
+  }
+  /** Replace the gradient stop list (clamped + sorted; min two stops kept). */
+  setGradientStops(stops: GradientStopUI[]): void {
+    this.set({
+      ...this.state,
+      gradient: { ...this.state.gradient, stops: normalizeGradientStops(stops) },
+    });
+  }
+
   // ── magic wand + retouch tools ─────────────────────────
   setMagicWand(patch: Partial<MagicWandParams>): void {
     this.set({ ...this.state, magicWand: { ...this.state.magicWand, ...patch } });
@@ -295,6 +341,25 @@ function clampColor(c: RGBAColor): RGBAColor {
   return { r: clamp01(c.r), g: clamp01(c.g), b: clamp01(c.b), a: clamp01(c.a) };
 }
 
+/**
+ * Normalize a gradient stop list: clamp positions/colors, sort by position, and
+ * guarantee at least two stops (a black/white ramp if the caller passes fewer).
+ */
+function normalizeGradientStops(stops: GradientStopUI[]): GradientStopUI[] {
+  const cleaned = stops.map((s) => ({ pos: clamp01(s.pos), color: clampColor(s.color) }));
+  cleaned.sort((a, b) => a.pos - b.pos);
+  if (cleaned.length === 0) {
+    return [
+      { pos: 0, color: { r: 0, g: 0, b: 0, a: 1 } },
+      { pos: 1, color: { r: 1, g: 1, b: 1, a: 1 } },
+    ];
+  }
+  if (cleaned.length === 1) {
+    return [{ pos: 0, color: cleaned[0]!.color }, { pos: 1, color: cleaned[0]!.color }];
+  }
+  return cleaned;
+}
+
 export const toolStore = new ToolStore();
 
 export function useToolState(): ToolState {
@@ -341,4 +406,72 @@ export function selectionOpFromEvent(e: PointerEvent | MouseEvent): SelectionOp 
   if (e.shiftKey) return "add";
   if (e.altKey) return "subtract";
   return "replace";
+}
+
+// ════════════════════════════════════════════════════════════
+//  SWATCHES STORE
+// ════════════════════════════════════════════════════════════
+/**
+ * A list of saved color swatches (straight sRGB 0..1). The Swatches panel reads
+ * this reactively (useSwatches) and adds/removes via the exported `swatchStore`.
+ * Mirrors the toolStore pattern (imperative store + useSyncExternalStore).
+ */
+const DEFAULT_SWATCHES: RGBAColor[] = [
+  { r: 0, g: 0, b: 0, a: 1 }, // black
+  { r: 1, g: 1, b: 1, a: 1 }, // white
+  { r: 0.9, g: 0.16, b: 0.22, a: 1 }, // red
+  { r: 0.97, g: 0.62, b: 0.04, a: 1 }, // orange
+  { r: 0.98, g: 0.85, b: 0.18, a: 1 }, // yellow
+  { r: 0.2, g: 0.74, b: 0.36, a: 1 }, // green
+  { r: 0.16, g: 0.5, b: 0.9, a: 1 }, // blue
+  { r: 0.55, g: 0.27, b: 0.86, a: 1 }, // purple
+];
+
+class SwatchStore {
+  private swatches: RGBAColor[] = DEFAULT_SWATCHES.map((c) => ({ ...c }));
+  private listeners = new Set<Listener>();
+
+  get(): readonly RGBAColor[] {
+    return this.swatches;
+  }
+  subscribe(cb: Listener): () => void {
+    this.listeners.add(cb);
+    return () => this.listeners.delete(cb);
+  }
+  private set(next: RGBAColor[]): void {
+    this.swatches = next;
+    for (const cb of this.listeners) cb();
+  }
+
+  /** Append a swatch (de-duplicating an identical existing color). */
+  add(color: RGBAColor): void {
+    const c = clampColor(color);
+    if (this.swatches.some((s) => colorsEqual(s, c))) return;
+    this.set([...this.swatches, c]);
+  }
+  /** Remove the swatch at `index` (no-op if out of range). */
+  removeAt(index: number): void {
+    if (index < 0 || index >= this.swatches.length) return;
+    this.set(this.swatches.filter((_, i) => i !== index));
+  }
+  /** Reset to the built-in defaults. */
+  reset(): void {
+    this.set(DEFAULT_SWATCHES.map((c) => ({ ...c })));
+  }
+}
+
+function colorsEqual(a: RGBAColor, b: RGBAColor): boolean {
+  const eq = (x: number, y: number) => Math.abs(x - y) < 1 / 512;
+  return eq(a.r, b.r) && eq(a.g, b.g) && eq(a.b, b.b) && eq(a.a, b.a);
+}
+
+export const swatchStore = new SwatchStore();
+
+/** Reactive saved-swatch list for a Swatches panel. */
+export function useSwatches(): readonly RGBAColor[] {
+  return useSyncExternalStore(
+    (cb) => swatchStore.subscribe(cb),
+    () => swatchStore.get(),
+    () => swatchStore.get(),
+  );
 }

@@ -61,6 +61,15 @@ import {
   type LayerEffectType,
 } from "../model/Document";
 import * as m3 from "./math/mat3";
+import {
+  PathStore,
+  cornerAnchor,
+  tracePath,
+  pathHasClosedRegion,
+  type Path,
+  type PathDescription,
+  type FillRule,
+} from "./Paths";
 import { Selection } from "./Selection";
 import { BrushEngine } from "./paint/BrushEngine";
 import { RetouchEngine, type RetouchMode, type RetouchParams } from "./paint/RetouchEngine";
@@ -112,6 +121,24 @@ interface Rect {
   y: number;
   width: number;
   height: number;
+}
+
+/** A ruler guide: a horizontal (h) or vertical (v) line at `pos` doc px. */
+export interface Guide {
+  id: string;
+  /** 'h' = a horizontal line (constant Y); 'v' = a vertical line (constant X). */
+  axis: "h" | "v";
+  /** Position in doc px (the Y for an 'h' guide, the X for a 'v' guide). */
+  pos: number;
+}
+
+/** Grid display config (sizes in doc px). */
+export interface GridState {
+  visible: boolean;
+  /** Major grid spacing in doc px. */
+  size: number;
+  /** Minor divisions per major cell (>=1). */
+  subdivisions: number;
 }
 
 /**
@@ -187,6 +214,9 @@ export class EditorEngine {
   private brush: BrushEngine | null = null;
   private retouch: RetouchEngine | null = null;
 
+  /** Vector-path store (pen tool). CPU-only geometry; never touches GL. */
+  readonly paths = new PathStore();
+
   /** GPU textures resolved lazily from the Document's CPU sources. */
   private textures = new Map<LayerId, TextureHandle>();
   private maskTextures = new Map<LayerId, MaskTexEntry>();
@@ -208,6 +238,18 @@ export class EditorEngine {
     | null = null;
 
   private view: ViewState = { scale: 1, tx: 0, ty: 0 };
+
+  // ── rulers / guides / grid / snapping ───────────────────
+  /** Document guides (positions in doc px). */
+  private guides: Guide[] = [];
+  private guideSeq = 0;
+  /** Grid config (size + subdivisions in doc px). */
+  private grid: GridState = { visible: false, size: 64, subdivisions: 4 };
+  private rulersVisible = false;
+  private snapEnabled = true;
+  /** Live guide being dragged off a ruler (or null). UI overlay reads it. */
+  private liveGuide: Guide | null = null;
+
   private dpr = 1;
   private dirty = true;
   private rafId = 0;
@@ -239,7 +281,8 @@ export class EditorEngine {
     | { kind: "gradient"; layerId: LayerId; from: { x: number; y: number }; to: { x: number; y: number } }
     | { kind: "transform"; mode: TransformDragMode; startDoc: { x: number; y: number }; start: TransformState; handle: TransformHandleId | null }
     | { kind: "crop"; mode: CropDragMode; startDoc: { x: number; y: number }; startRect: Rect }
-    | { kind: "shape"; from: { x: number; y: number }; to: { x: number; y: number } } = {
+    | { kind: "shape"; from: { x: number; y: number }; to: { x: number; y: number } }
+    | { kind: "pen"; anchorPt: { x: number; y: number } } = {
     kind: "none",
   };
   /** Live gradient drag line (doc px) for a UI overlay, or null. */
@@ -1873,6 +1916,229 @@ void main() {
     };
   }
 
+  // ════════════════════════════════════════════════════════
+  //  RULERS / GUIDES / GRID / SNAPPING
+  // ════════════════════════════════════════════════════════
+  /** Add a guide (axis + doc-px position); returns its id. */
+  addGuide(axis: "h" | "v", pos: number): string {
+    this.guideSeq += 1;
+    const id = `guide_${this.guideSeq}`;
+    this.guides.push({ id, axis, pos });
+    this.markDirty();
+    this.emit();
+    return id;
+  }
+  /** Remove a guide by id. */
+  removeGuide(id: string): void {
+    const before = this.guides.length;
+    this.guides = this.guides.filter((g) => g.id !== id);
+    if (this.guides.length !== before) {
+      this.markDirty();
+      this.emit();
+    }
+  }
+  /** Move an existing guide to a new doc-px position. */
+  moveGuide(id: string, pos: number): void {
+    const g = this.guides.find((x) => x.id === id);
+    if (!g) return;
+    g.pos = pos;
+    this.markDirty();
+    this.emit();
+  }
+  /** All guides (copied; doc px) for the UI overlay. */
+  getGuides(): Guide[] {
+    return this.guides.map((g) => ({ ...g }));
+  }
+  /** Remove every guide. */
+  clearGuides(): void {
+    if (this.guides.length === 0) return;
+    this.guides = [];
+    this.markDirty();
+    this.emit();
+  }
+
+  /**
+   * Begin dragging a NEW guide off a ruler. `axis` is the guide orientation
+   * (drag off the top ruler -> 'h'; off the left ruler -> 'v'). The UI feeds
+   * screen points to updateGuideDrag and finalizes with endGuideDrag.
+   */
+  beginGuideDrag(axis: "h" | "v", screenX: number, screenY: number): void {
+    const doc = this.screenToDoc(screenX, screenY);
+    this.liveGuide = { id: "live", axis, pos: axis === "h" ? doc.y : doc.x };
+    this.markDirty();
+    this.emit();
+  }
+  /** Update the live guide drag from a screen point (snaps when enabled). */
+  updateGuideDrag(screenX: number, screenY: number): void {
+    if (!this.liveGuide) return;
+    const doc = this.snapEnabled
+      ? this.snapPointDoc(this.screenToDoc(screenX, screenY), 8)
+      : this.screenToDoc(screenX, screenY);
+    this.liveGuide.pos = this.liveGuide.axis === "h" ? doc.y : doc.x;
+    this.markDirty();
+    this.emit();
+  }
+  /**
+   * Finish a live guide drag: commit it as a real guide if dropped inside the
+   * document bounds, else discard (dragged back onto the ruler). Returns the new
+   * guide id, or null.
+   */
+  endGuideDrag(): string | null {
+    const lg = this.liveGuide;
+    this.liveGuide = null;
+    if (!lg) return null;
+    const within =
+      lg.axis === "h"
+        ? lg.pos >= 0 && lg.pos <= this.doc.height
+        : lg.pos >= 0 && lg.pos <= this.doc.width;
+    let id: string | null = null;
+    if (within) id = this.addGuide(lg.axis, lg.pos);
+    this.markDirty();
+    this.emit();
+    return id;
+  }
+  /** The live guide being dragged off a ruler (doc px), or null. */
+  getLiveGuide(): Guide | null {
+    return this.liveGuide ? { ...this.liveGuide } : null;
+  }
+
+  // ── grid ────────────────────────────────────────────────
+  setGridVisible(visible: boolean): void {
+    if (this.grid.visible === visible) return;
+    this.grid = { ...this.grid, visible };
+    this.markDirty();
+    this.emit();
+  }
+  setGridSize(size: number, subdivisions?: number): void {
+    this.grid = {
+      ...this.grid,
+      size: Math.max(1, size),
+      subdivisions: Math.max(1, Math.round(subdivisions ?? this.grid.subdivisions)),
+    };
+    this.markDirty();
+    this.emit();
+  }
+  /** Current grid config (copied). */
+  getGrid(): GridState {
+    return { ...this.grid };
+  }
+
+  // ── rulers + snapping toggles ───────────────────────────
+  setRulersVisible(visible: boolean): void {
+    if (this.rulersVisible === visible) return;
+    this.rulersVisible = visible;
+    this.markDirty();
+    this.emit();
+  }
+  getRulersVisible(): boolean {
+    return this.rulersVisible;
+  }
+  setSnapEnabled(enabled: boolean): void {
+    if (this.snapEnabled === enabled) return;
+    this.snapEnabled = enabled;
+    this.emit();
+  }
+  getSnapEnabled(): boolean {
+    return this.snapEnabled;
+  }
+
+  /**
+   * Snap a document-space point to nearby guides, grid lines (when the grid is
+   * on), the canvas bounds (0,0,w,h) and the canvas center/halves. Each axis
+   * snaps independently to the closest candidate within `thresholdScreenPx`
+   * (converted to doc px via the view scale). Returns the (possibly snapped)
+   * point. A no-op when snapping is disabled.
+   */
+  snapPointDoc(
+    p: { x: number; y: number },
+    thresholdScreenPx = 8,
+  ): { x: number; y: number } {
+    if (!this.snapEnabled) return { x: p.x, y: p.y };
+    const thr = thresholdScreenPx / Math.max(1e-4, this.view.scale); // doc px
+    const w = this.doc.width;
+    const h = this.doc.height;
+
+    // Candidate snap lines per axis.
+    const xs: number[] = [0, w, w / 2];
+    const ys: number[] = [0, h, h / 2];
+    for (const g of this.guides) {
+      if (g.axis === "v") xs.push(g.pos);
+      else ys.push(g.pos);
+    }
+    if (this.grid.visible) {
+      const step = this.grid.size / this.grid.subdivisions;
+      if (step > 0.5) {
+        const gx = Math.round(p.x / step) * step;
+        const gy = Math.round(p.y / step) * step;
+        xs.push(gx);
+        ys.push(gy);
+      }
+    }
+
+    const best = (val: number, cands: number[]): number => {
+      let out = val;
+      let bestD = thr;
+      for (const c of cands) {
+        const d = Math.abs(val - c);
+        if (d < bestD) {
+          bestD = d;
+          out = c;
+        }
+      }
+      return out;
+    };
+    return { x: best(p.x, xs), y: best(p.y, ys) };
+  }
+
+  /**
+   * Snap a moving box (top-left `x,y` of size `w,h`) so that ANY of its left /
+   * center / right edges (and top / mid / bottom) lands on a snap line, choosing
+   * the smallest correction per axis. Returns the snapped top-left. Uses the
+   * same candidate lines as snapPointDoc.
+   */
+  private snapMovedBox(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    thresholdScreenPx: number,
+  ): { x: number; y: number } {
+    const thr = thresholdScreenPx / Math.max(1e-4, this.view.scale);
+    const dw = this.doc.width;
+    const dh = this.doc.height;
+    const xs: number[] = [0, dw, dw / 2];
+    const ys: number[] = [0, dh, dh / 2];
+    for (const g of this.guides) {
+      if (g.axis === "v") xs.push(g.pos);
+      else ys.push(g.pos);
+    }
+    if (this.grid.visible) {
+      const step = this.grid.size / this.grid.subdivisions;
+      if (step > 0.5) {
+        // Nearest grid lines to each of the box's three probe positions.
+        for (const probe of [x, x + w / 2, x + w]) xs.push(Math.round(probe / step) * step);
+        for (const probe of [y, y + h / 2, y + h]) ys.push(Math.round(probe / step) * step);
+      }
+    }
+    // For each axis, the three probes are at offsets 0, w/2, w from the origin.
+    const snapAxis = (origin: number, size: number, cands: number[]): number => {
+      let bestCorr = 0;
+      let bestD = thr;
+      for (const off of [0, size / 2, size]) {
+        const probe = origin + off;
+        for (const c of cands) {
+          const d = Math.abs(probe - c);
+          if (d < bestD) {
+            bestD = d;
+            bestCorr = c - probe;
+          }
+        }
+      }
+      return origin + bestCorr;
+    };
+    return { x: snapAxis(x, w, xs), y: snapAxis(y, h, ys) };
+  }
+
   /** Active marquee rect in document px while dragging, or null. */
   getLiveMarquee(): { x0: number; y0: number; x1: number; y1: number; shape: "rect" | "ellipse" } | null {
     if (!this.liveMarquee || this.gesture.kind !== "marquee") return null;
@@ -1999,6 +2265,14 @@ void main() {
       return;
     }
 
+    // Pen tool: build a vector path. Clicking the first anchor closes the
+    // subpath; otherwise a click adds a corner anchor (a subsequent drag pulls
+    // its out handle, turning it into a smooth anchor).
+    if (tool === "pen") {
+      this.penPointerDown(doc, e);
+      return;
+    }
+
     if (tool === "move" && activeId) {
       const layer = this.doc.getLayer(activeId);
       if (layer && isPixelLayer(layer)) {
@@ -2110,9 +2384,19 @@ void main() {
 
     if (g.kind === "move") {
       const doc = this.screenToDoc(local.x, local.y);
-      const nx = Math.round(g.origX + (doc.x - g.startX));
-      const ny = Math.round(g.origY + (doc.y - g.startY));
-      this.doc.setPosition(g.layerId, nx, ny);
+      let nx = g.origX + (doc.x - g.startX);
+      let ny = g.origY + (doc.y - g.startY);
+      // Snap the moved layer's top-left corner (and, via the snapped delta, its
+      // edges/center read through the same lines) to guides/grid/bounds/center.
+      if (this.snapEnabled) {
+        const layer = this.doc.getLayer(g.layerId);
+        const lw = layer && isPixelLayer(layer) ? layer.width : 0;
+        const lh = layer && isPixelLayer(layer) ? layer.height : 0;
+        const snapped = this.snapMovedBox(nx, ny, lw, lh, 8);
+        nx = snapped.x;
+        ny = snapped.y;
+      }
+      this.doc.setPosition(g.layerId, Math.round(nx), Math.round(ny));
       return;
     }
 
@@ -2133,7 +2417,10 @@ void main() {
     }
 
     if (g.kind === "shape") {
-      const doc = this.screenToDoc(local.x, local.y);
+      let doc = this.screenToDoc(local.x, local.y);
+      // Snap the moving endpoint to guides/grid/bounds/center (Shift still
+      // constrains off the snapped point below).
+      if (this.snapEnabled && !e.shiftKey) doc = this.snapPointDoc(doc, 8);
       let tx = doc.x;
       let ty = doc.y;
       const kind = this.liveShape?.kind ?? toolStore.get().shape.kind;
@@ -2156,6 +2443,16 @@ void main() {
       g.to = { x: tx, y: ty };
       this.liveShape = { kind, from: g.from, to: g.to };
       this.markDirty();
+      return;
+    }
+
+    if (g.kind === "pen") {
+      // Drag the just-placed anchor's out handle (mirrors to the in handle), so
+      // a click-drag produces a smooth anchor.
+      const doc = this.screenToDoc(local.x, local.y);
+      this.paths.setLastAnchorOut(doc.x, doc.y, true);
+      this.markDirty();
+      this.emit();
       return;
     }
 
@@ -2211,7 +2508,9 @@ void main() {
     }
 
     if (g.kind === "marquee" && this.liveMarquee) {
-      const doc = this.screenToDoc(local.x, local.y);
+      let doc = this.screenToDoc(local.x, local.y);
+      // Snap the dragged (moving) corner; the start corner stays put.
+      if (this.snapEnabled) doc = this.snapPointDoc(doc, 8);
       this.liveMarquee = {
         x0: g.startDoc.x,
         y0: g.startDoc.y,
@@ -2263,17 +2562,18 @@ void main() {
 
     if (g.kind === "gradient") {
       this.liveGradient = null;
-      const ts = toolStore.get();
+      const grad = toolStore.get().gradient;
       // Zero-length drag = no gradient.
       if (Math.hypot(g.to.x - g.from.x, g.to.y - g.from.y) >= 1) {
+        // Pass the tool's multi-stop ramp (reversed if requested) through.
+        const stops = grad.reverse
+          ? grad.stops.map((s) => ({ pos: 1 - s.pos, color: { ...s.color } }))
+          : grad.stops.map((s) => ({ pos: s.pos, color: { ...s.color } }));
         this.applyGradientFill(g.layerId, {
-          type: "linear",
+          type: grad.type,
           from: g.from,
           to: g.to,
-          stops: [
-            { pos: 0, color: { ...ts.foreground } },
-            { pos: 1, color: { ...ts.background } },
-          ],
+          stops,
         });
       }
       this.markDirty();
@@ -2313,6 +2613,13 @@ void main() {
       this.markDirty();
       return;
     }
+
+    if (g.kind === "pen") {
+      // Anchor (+ optional handle drag) already applied during the gesture.
+      this.markDirty();
+      this.emit();
+      return;
+    }
   }
 
   private handleKeyDown(e: KeyboardEvent): void {
@@ -2332,6 +2639,25 @@ void main() {
         e.preventDefault();
         if (this.transformSession) this.cancelTransform();
         else if (this.cropSession) this.cancelCrop();
+        return;
+      }
+    }
+
+    // Pen tool: Enter/Esc finish (commit) the in-progress path. Enter keeps the
+    // committed path active (so it can be filled/stroked); Esc discards it.
+    if (!this.textEditing && this.activeTool() === "pen" && this.paths.isDrawing) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        this.paths.finishLive();
+        this.markDirty();
+        this.emit();
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        this.paths.clearLive();
+        this.markDirty();
+        this.emit();
         return;
       }
     }
@@ -4064,7 +4390,16 @@ void main(){
     const dyDoc = doc.y - g.startDoc.y;
 
     if (g.mode === "move") {
-      sess.base = { ...g.start, dx: g.start.dx + dxDoc, dy: g.start.dy + dyDoc };
+      let ndx = g.start.dx + dxDoc;
+      let ndy = g.start.dy + dyDoc;
+      // Snap the transformed footprint's bounding box (translated by the new
+      // delta) to guides/grid/canvas bounds/center.
+      if (this.snapEnabled) {
+        const snapped = this.snapMovedBox(b.x + ndx, b.y + ndy, b.width, b.height, 8);
+        ndx += snapped.x - (b.x + ndx);
+        ndy += snapped.y - (b.y + ndy);
+      }
+      sess.base = { ...g.start, dx: ndx, dy: ndy };
       return;
     }
 
@@ -4708,6 +5043,258 @@ void main(){
     return this.gesture.kind === "shape" ? this.liveShape : null;
   }
 
+  // ════════════════════════════════════════════════════════
+  //  VECTOR PATHS / PEN TOOL
+  // ════════════════════════════════════════════════════════
+  /**
+   * Pen pointerdown: route a click into the live vector path.
+   *   - clicking the FIRST anchor of the open subpath closes it;
+   *   - otherwise a corner anchor is placed at the point (a following drag pulls
+   *     its out handle, making it smooth — handled in handlePointerMove).
+   * Screen-px hit radius converts to doc px via the current view scale.
+   */
+  private penPointerDown(doc: { x: number; y: number }, _e: PointerEvent): void {
+    const hitDoc = 8 / Math.max(1e-4, this.view.scale); // ~8 screen px
+    // Close the subpath when clicking near its first anchor (>=2 anchors placed).
+    if (this.paths.liveHasAnchors) {
+      const first = this.paths.liveFirstAnchor();
+      const last = this.paths.liveLastAnchor();
+      if (
+        first &&
+        last &&
+        first !== last &&
+        Math.hypot(doc.x - first.x, doc.y - first.y) <= hitDoc
+      ) {
+        this.paths.closeLive();
+        // A closed subpath ends this subpath; finish the whole path so a fresh
+        // pen click starts a new one (v1 single-subpath-per-gesture behaviour).
+        this.paths.finishLive();
+        this.gesture = { kind: "none" };
+        this.markDirty();
+        this.emit();
+        return;
+      }
+    }
+    // Place a corner anchor; the move handler may upgrade it to smooth on drag.
+    this.paths.beginAnchor(cornerAnchor(doc.x, doc.y));
+    this.gesture = { kind: "pen", anchorPt: { x: doc.x, y: doc.y } };
+    this.markDirty();
+    this.emit();
+  }
+
+  /**
+   * The in-progress (live) path + active committed path, in DOC px, for the UI
+   * overlay to render the curve, anchors and handles (it maps via
+   * getViewTransform). Null when there is no live or active path.
+   */
+  getActivePath(): PathDescription | null {
+    return this.paths.getActivePath();
+  }
+  /** All committed paths (serializable, doc px). */
+  getPaths(): PathDescription[] {
+    return this.paths.getPaths();
+  }
+  /** Whether the pen tool is mid-draw (UI may show "Enter to finish"). */
+  isDrawingPath(): boolean {
+    return this.paths.isDrawing;
+  }
+
+  // ── path + guide/grid persistence (used by serialize.ts) ──
+  /** All committed paths as plain serializable objects (doc px). */
+  serializePaths(): Path[] {
+    return this.paths.getPaths().map((p) => ({
+      id: p.id,
+      name: p.name,
+      subpaths: p.subpaths,
+    }));
+  }
+  /** Restore the committed path list (project load). */
+  setPathsSerialized(paths: Path[]): void {
+    this.paths.setPaths(paths);
+    this.markDirty();
+    this.emit();
+  }
+  /** Snapshot guides + grid + ruler/snap toggles for project save. */
+  serializeViewExtras(): {
+    guides: Guide[];
+    grid: GridState;
+    rulersVisible: boolean;
+    snapEnabled: boolean;
+  } {
+    return {
+      guides: this.getGuides(),
+      grid: this.getGrid(),
+      rulersVisible: this.rulersVisible,
+      snapEnabled: this.snapEnabled,
+    };
+  }
+  /** Restore guides + grid + ruler/snap toggles (project load). */
+  setViewExtras(extras: {
+    guides?: Guide[];
+    grid?: GridState;
+    rulersVisible?: boolean;
+    snapEnabled?: boolean;
+  }): void {
+    if (extras.guides) {
+      this.guides = extras.guides.map((g) => ({ ...g }));
+      // Keep the id counter ahead of any restored numeric ids.
+      for (const g of this.guides) {
+        const n = Number(String(g.id).replace(/[^0-9]/g, ""));
+        if (Number.isFinite(n) && n > this.guideSeq) this.guideSeq = n;
+      }
+    }
+    if (extras.grid) this.grid = { ...extras.grid };
+    if (typeof extras.rulersVisible === "boolean") this.rulersVisible = extras.rulersVisible;
+    if (typeof extras.snapEnabled === "boolean") this.snapEnabled = extras.snapEnabled;
+    this.markDirty();
+    this.emit();
+  }
+
+  /**
+   * Rasterize a closed path into the selection. Uses the path's closed subpaths
+   * (fill rule nonzero/evenodd), drawn on a 2D canvas at doc resolution, then
+   * combined into the selection with `op` (default replace) + the tool feather.
+   * No-op if the path has no closed region.
+   */
+  makePathSelection(
+    pathId?: LayerId,
+    op: SelectionOp = "replace",
+    rule: FillRule = "nonzero",
+  ): void {
+    const sel = this.selection;
+    const path = this.paths.resolve(pathId);
+    if (!sel || !path || !pathHasClosedRegion(path)) return;
+    const dw = this.doc.width;
+    const dh = this.doc.height;
+    const cv = makeCanvas(dw, dh);
+    const ctx = get2d(cv) as CanvasRenderingContext2D;
+    ctx.clearRect(0, 0, dw, dh);
+    ctx.fillStyle = "#fff";
+    ctx.beginPath();
+    tracePath(ctx, path as Path, 0, 0, /*onlyClosed*/ true);
+    ctx.fill(rule);
+    const img = ctx.getImageData(0, 0, dw, dh);
+    // Pack the red channel into an R8 buffer (canvas row 0 = doc top, matching
+    // the selection's stored orientation).
+    const r8 = new Uint8Array(dw * dh);
+    for (let i = 0; i < r8.length; i++) r8[i] = img.data[i * 4]!;
+    sel.combineFromBuffer(r8, op, toolStore.get().feather);
+    this.markDirty();
+    this.emit();
+  }
+
+  /**
+   * Fill the closed region(s) of a path with a color (default foreground) on the
+   * active raster layer, as one undo step. No-op if no closed region / no raster
+   * layer. The path is rendered in the layer's local space (doc - layer origin).
+   */
+  fillPath(pathId?: LayerId, color?: RGBAColor, rule: FillRule = "nonzero"): void {
+    const path = this.paths.resolve(pathId);
+    const id = this.doc.getActiveLayerId();
+    if (!path || !pathHasClosedRegion(path) || !id) return;
+    const layer = this.doc.getLayer(id);
+    if (!layer || layer.kind !== "raster") return;
+    const fill = color ?? toolStore.get().foreground;
+    this.compositePathOntoLayer(layer, (ctx, ox, oy) => {
+      ctx.fillStyle = cssColor(fill);
+      ctx.beginPath();
+      tracePath(ctx, path as Path, ox, oy, /*onlyClosed*/ true);
+      ctx.fill(rule);
+    }, "Fill path");
+  }
+
+  /**
+   * Stroke a path's outline onto the active raster layer (default foreground,
+   * width 2 doc px), as one undo step. Strokes ALL subpaths (open + closed).
+   */
+  strokePath(
+    pathId?: LayerId,
+    opts?: { width?: number; color?: RGBAColor },
+  ): void {
+    const path = this.paths.resolve(pathId);
+    const id = this.doc.getActiveLayerId();
+    if (!path || !id) return;
+    const layer = this.doc.getLayer(id);
+    if (!layer || layer.kind !== "raster") return;
+    const width = Math.max(0.25, opts?.width ?? 2);
+    const color = opts?.color ?? toolStore.get().foreground;
+    this.compositePathOntoLayer(layer, (ctx, ox, oy) => {
+      ctx.strokeStyle = cssColor(color);
+      ctx.lineWidth = width;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      tracePath(ctx, path as Path, ox, oy, /*onlyClosed*/ false);
+      ctx.stroke();
+    }, "Stroke path");
+  }
+
+  /** Delete a path (or the active one). One UI emit; no undo step (cheap). */
+  deletePath(pathId?: LayerId): void {
+    if (this.paths.deletePath(pathId)) {
+      this.markDirty();
+      this.emit();
+    }
+  }
+  /** Discard the in-progress live path (Esc equivalent for the UI). */
+  clearActivePath(): void {
+    this.paths.clearLive();
+    this.markDirty();
+    this.emit();
+  }
+
+  /**
+   * Composite a 2D-canvas draw (in the layer's local space) over the active
+   * raster layer's existing pixels and replace the layer source, recording one
+   * undo step. The `draw` callback paints into a layer-sized canvas already
+   * seeded with the current pixels; `ox,oy` translate doc px -> layer-local px.
+   */
+  private compositePathOntoLayer(
+    layer: RasterLayer,
+    draw: (
+      ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+      ox: number,
+      oy: number,
+    ) => void,
+    label: string,
+  ): void {
+    const w = layer.width;
+    const h = layer.height;
+    const cv = makeCanvas(w, h);
+    const ctx = get2d(cv);
+    ctx.clearRect(0, 0, w, h);
+    // Seed with the layer's current pixels (straight alpha).
+    const src = layer.source;
+    if (typeof ImageData !== "undefined" && src instanceof ImageData) {
+      ctx.putImageData(src, 0, 0);
+    } else if (src) {
+      ctx.drawImage(src as ImageBitmap, 0, 0);
+    }
+    // Draw the path in layer-local space (doc - layer origin).
+    draw(ctx, layer.x, layer.y);
+    const img = ctx.getImageData(0, 0, w, h);
+    const newSource = new ImageData(new Uint8ClampedArray(img.data), w, h);
+    const lid = layer.id;
+    const prevSource = src;
+    const apply = () => {
+      this.doc.replaceSource(lid, newSource);
+      this.textures.delete(lid);
+    };
+    const revert = () => {
+      this.doc.replaceSource(lid, prevSource);
+      this.textures.delete(lid);
+    };
+    apply();
+    this.history.push({
+      label,
+      bytes: w * h * 4,
+      undo: revert,
+      redo: apply,
+    });
+    this.markDirty();
+    this.emit();
+  }
+
   /**
    * Rasterize a shape (rect/ellipse/line) defined by two doc-space points into a
    * NEW raster layer, filled with the shape fill (or foreground) + optional
@@ -4848,6 +5435,11 @@ void main(){
     this.transformSession = null;
     this.cropSession = null;
     this.textEditing = null;
+    // Paths + guides belong to the (now-replaced) document; deserialize restores
+    // them after this via setPathsSerialized / setGuidesSerialized.
+    this.paths.clearAll();
+    this.guides = [];
+    this.liveGuide = null;
     this.selection?.resize(this.doc.width, this.doc.height);
     this.selection?.clear();
     this.history.clear();
@@ -4878,6 +5470,11 @@ function get2d(
     | null;
   if (!ctx) throw new Error("2D context unavailable");
   return ctx;
+}
+
+/** Format a straight-sRGB RGBAColor (0..1) as a CSS rgba() string. */
+function cssColor(c: RGBAColor): string {
+  return `rgba(${Math.round(c.r * 255)},${Math.round(c.g * 255)},${Math.round(c.b * 255)},${c.a})`;
 }
 
 /**

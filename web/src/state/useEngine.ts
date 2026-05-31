@@ -21,14 +21,23 @@ import type {
 import { exportImage, type ExportOptions } from "../engine/export";
 import {
   toolStore,
+  swatchStore,
   type RGBAColor,
   type TextParams,
   type ShapeParams,
   type ShapeKind,
+  type GradientParams,
+  type GradientStopUI,
+  type SelectionOp,
 } from "./tools";
 import type { GradientStop } from "../engine/adjustments";
 import type { FilterType, FilterParams } from "../engine/filters";
-import type { TransformState } from "../engine/EditorEngine";
+import type {
+  TransformState,
+  Guide,
+  GridState,
+} from "../engine/EditorEngine";
+import type { PathDescription, FillRule } from "../engine/Paths";
 
 export const engine = new EditorEngine();
 
@@ -122,6 +131,62 @@ function colorsCacheFor(fg: RGBAColor, bg: RGBAColor) {
     _colorsCache = { foreground: fg, background: bg };
   }
   return _colorsCache;
+}
+
+/** Reactive gradient-tool params (type + multi-stop ramp + reverse). */
+export function useGradientParams(): GradientParams {
+  return useSyncExternalStore(
+    (cb) => toolStore.subscribe(cb),
+    () => toolStore.get().gradient,
+    () => toolStore.get().gradient,
+  );
+}
+
+/**
+ * Reactive guides + grid + ruler/snap toggles for the rulers/grid overlay and
+ * the View menu. The engine emits on any change to these.
+ */
+export function useViewExtras(): {
+  guides: Guide[];
+  grid: GridState;
+  rulersVisible: boolean;
+  snapEnabled: boolean;
+} {
+  return useSyncExternalStore(
+    (cb) => engine.subscribe(cb),
+    () => viewExtrasCache(),
+    () => viewExtrasCache(),
+  );
+}
+let _viewExtrasCache: {
+  guides: Guide[];
+  grid: GridState;
+  rulersVisible: boolean;
+  snapEnabled: boolean;
+} = {
+  guides: [],
+  grid: { visible: false, size: 64, subdivisions: 4 },
+  rulersVisible: false,
+  snapEnabled: true,
+};
+function viewExtrasCache() {
+  const next = engine.serializeViewExtras();
+  const prev = _viewExtrasCache;
+  const guidesSame =
+    prev.guides.length === next.guides.length &&
+    prev.guides.every((g, i) => {
+      const n = next.guides[i];
+      return n && g.id === n.id && g.axis === n.axis && g.pos === n.pos;
+    });
+  const same =
+    guidesSame &&
+    prev.grid.visible === next.grid.visible &&
+    prev.grid.size === next.grid.size &&
+    prev.grid.subdivisions === next.grid.subdivisions &&
+    prev.rulersVisible === next.rulersVisible &&
+    prev.snapEnabled === next.snapEnabled;
+  if (!same) _viewExtrasCache = next;
+  return _viewExtrasCache;
 }
 
 // Thin action helpers so components don't reach into the engine directly.
@@ -446,5 +511,105 @@ export const actions = {
   },
   setFocusParams(patch: Partial<import("./tools").FocusParams>) {
     toolStore.setFocus(patch);
+  },
+
+  // ── gradient tool (multi-stop) ──
+  /** Patch gradient params (type / reverse / stops). */
+  setGradient(patch: Partial<GradientParams>) {
+    toolStore.setGradient(patch);
+  },
+  /** Replace the gradient stop ramp. */
+  setGradientStops(stops: GradientStopUI[]) {
+    toolStore.setGradientStops(stops);
+  },
+
+  // ── swatches ──
+  addSwatch(color: RGBAColor) {
+    swatchStore.add(color);
+  },
+  removeSwatch(index: number) {
+    swatchStore.removeAt(index);
+  },
+  resetSwatches() {
+    swatchStore.reset();
+  },
+
+  // ── pen tool / vector paths ──
+  /** The live (in-progress) or active committed path, in doc px (overlay). */
+  getActivePath(): PathDescription | null {
+    return engine.getActivePath();
+  },
+  /** All committed paths in doc px. */
+  getPaths(): PathDescription[] {
+    return engine.getPaths();
+  },
+  /** Rasterize a closed path into the selection. */
+  makePathSelection(pathId?: string, op?: SelectionOp, rule?: FillRule) {
+    engine.makePathSelection(pathId, op, rule);
+  },
+  /** Fill a closed path on the active raster layer (foreground default). */
+  fillPath(pathId?: string, color?: RGBAColor, rule?: FillRule) {
+    engine.fillPath(pathId, color, rule);
+  },
+  /** Stroke a path's outline on the active raster layer. */
+  strokePath(pathId?: string, opts?: { width?: number; color?: RGBAColor }) {
+    engine.strokePath(pathId, opts);
+  },
+  /** Delete a path (or the active path). */
+  deletePath(pathId?: string) {
+    engine.deletePath(pathId);
+  },
+  /** Discard the in-progress live path. */
+  clearActivePath() {
+    engine.clearActivePath();
+  },
+
+  // ── rulers / guides / grid / snapping ──
+  addGuide(axis: "h" | "v", pos: number) {
+    return engine.addGuide(axis, pos);
+  },
+  removeGuide(id: string) {
+    engine.removeGuide(id);
+  },
+  moveGuide(id: string, pos: number) {
+    engine.moveGuide(id, pos);
+  },
+  getGuides() {
+    return engine.getGuides();
+  },
+  clearGuides() {
+    engine.clearGuides();
+  },
+  /** Begin dragging a new guide off a ruler (axis = guide orientation). */
+  beginGuideDrag(axis: "h" | "v", screenX: number, screenY: number) {
+    engine.beginGuideDrag(axis, screenX, screenY);
+  },
+  updateGuideDrag(screenX: number, screenY: number) {
+    engine.updateGuideDrag(screenX, screenY);
+  },
+  endGuideDrag() {
+    return engine.endGuideDrag();
+  },
+  getLiveGuide() {
+    return engine.getLiveGuide();
+  },
+  setGridVisible(visible: boolean) {
+    engine.setGridVisible(visible);
+  },
+  setGridSize(size: number, subdivisions?: number) {
+    engine.setGridSize(size, subdivisions);
+  },
+  getGrid() {
+    return engine.getGrid();
+  },
+  setRulersVisible(visible: boolean) {
+    engine.setRulersVisible(visible);
+  },
+  setSnapEnabled(enabled: boolean) {
+    engine.setSnapEnabled(enabled);
+  },
+  /** Snap a doc-space point (UI escape hatch; gestures snap internally). */
+  snapPointDoc(p: { x: number; y: number }, thresholdScreenPx?: number) {
+    return engine.snapPointDoc(p, thresholdScreenPx);
   },
 };

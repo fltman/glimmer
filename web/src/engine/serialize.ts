@@ -13,7 +13,8 @@
  * touches GL): serialize reads `engine.doc`; deserialize clears + rebuilds the
  * document and asks the engine to drop its GPU caches.
  */
-import type { EditorEngine } from "./EditorEngine";
+import type { EditorEngine, Guide, GridState } from "./EditorEngine";
+import type { Path } from "./Paths";
 import {
   isRasterLayer,
   isTextLayer,
@@ -94,6 +95,15 @@ interface AipsFile {
   rootOrder: LayerId[];
   /** Every node, keyed by id (order is irrelevant; structure is in tree fields). */
   nodes: SerNode[];
+  /** Vector paths (pen tool). Optional for backward compatibility. */
+  paths?: Path[];
+  /** Ruler guides (doc px). Optional. */
+  guides?: Guide[];
+  /** Grid config. Optional. */
+  grid?: GridState;
+  /** Ruler / snap visibility toggles. Optional. */
+  rulersVisible?: boolean;
+  snapEnabled?: boolean;
 }
 
 // ── base64 helpers ─────────────────────────────────────────
@@ -254,6 +264,7 @@ export async function serializeDocument(engine: EditorEngine): Promise<Blob> {
     }
   }
 
+  const extras = engine.serializeViewExtras();
   const file: AipsFile = {
     magic: AIPS_MAGIC,
     version: AIPS_VERSION,
@@ -262,6 +273,11 @@ export async function serializeDocument(engine: EditorEngine): Promise<Blob> {
     activeLayerId: doc.getActiveLayerId(),
     rootOrder: [...doc.orderBottomToTop()],
     nodes,
+    paths: engine.serializePaths(),
+    guides: extras.guides,
+    grid: extras.grid,
+    rulersVisible: extras.rulersVisible,
+    snapEnabled: extras.snapEnabled,
   };
   return new Blob([JSON.stringify(file)], { type: "application/json" });
 }
@@ -354,6 +370,16 @@ export async function deserializeDocument(
 
   // 4) Drop GPU caches + resize the selection; re-render.
   engine.reloadAfterDeserialize();
+
+  // 5) Restore vector paths + guides/grid/ruler-snap toggles (after reload,
+  //    which clears them along with the old document).
+  if (Array.isArray(file.paths)) engine.setPathsSerialized(file.paths);
+  engine.setViewExtras({
+    guides: file.guides,
+    grid: file.grid,
+    rulersVisible: file.rulersVisible,
+    snapEnabled: file.snapEnabled,
+  });
 }
 
 /** Coerce any accepted input into a validated AipsFile. */

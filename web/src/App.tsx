@@ -14,6 +14,8 @@ import { LayersPanel } from "./ui/LayersPanel";
 import { AIPanel } from "./ai/AIPanel";
 import { AdjustmentsPanel } from "./ui/adjustments/AdjustmentsPanel";
 import { HistoryPanel } from "./ui/history/HistoryPanel";
+import { PathsPanel } from "./ui/paths/PathsPanel";
+import { SwatchesPanel } from "./ui/swatches/SwatchesPanel";
 import { engine, useEngineSnapshot } from "./state/useEngine";
 import { toolStore, type ToolId } from "./state/tools";
 
@@ -25,6 +27,7 @@ const KEY_TO_TOOL: Record<string, ToolId> = {
   b: "brush",
   e: "eraser",
   g: "gradient",
+  p: "pen",
   i: "eyedropper",
   k: "bucket",
   h: "hand",
@@ -56,7 +59,7 @@ function useToolShortcuts() {
   }, []);
 }
 
-type SidebarTab = "ai" | "adjust" | "history";
+type SidebarTab = "ai" | "adjust" | "history" | "paths" | "swatches";
 
 export default function App() {
   useToolShortcuts();
@@ -86,7 +89,7 @@ export default function App() {
           <TextEditOverlay />
         </main>
         <aside className="flex w-80 flex-col border-l border-edge bg-panel">
-          {/* Tabbed top section: AI tools / Adjustments / History. */}
+          {/* Tabbed top section: AI / Adjust / History / Paths / Swatches. */}
           <div className="flex shrink-0 border-b border-edge">
             <TabButton active={tab === "ai"} onClick={() => setTab("ai")}>
               AI
@@ -97,14 +100,24 @@ export default function App() {
             <TabButton active={tab === "history"} onClick={() => setTab("history")}>
               History
             </TabButton>
+            <TabButton active={tab === "paths"} onClick={() => setTab("paths")}>
+              Paths
+            </TabButton>
+            <TabButton active={tab === "swatches"} onClick={() => setTab("swatches")}>
+              Swatch
+            </TabButton>
           </div>
           <div className="min-h-0 flex-[3] overflow-hidden">
             {tab === "ai" ? (
               <AIPanel />
             ) : tab === "adjust" ? (
               <AdjustmentsPanel />
-            ) : (
+            ) : tab === "history" ? (
               <HistoryPanel />
+            ) : tab === "paths" ? (
+              <PathsPanel />
+            ) : (
+              <SwatchesPanel />
             )}
           </div>
           <div className="min-h-0 flex-[2] overflow-hidden border-t border-edge">
@@ -128,7 +141,7 @@ function TabButton({
   return (
     <button
       onClick={onClick}
-      className={`flex-1 px-3 py-2 text-xs font-semibold uppercase tracking-wider transition-colors ${
+      className={`flex-1 px-1.5 py-2 text-[11px] font-semibold uppercase tracking-wide transition-colors ${
         active
           ? "border-b-2 border-accent text-ink"
           : "border-b-2 border-transparent text-muted hover:text-ink"
