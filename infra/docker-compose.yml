@@ -1,0 +1,138 @@
+# ──────────────────────────────────────────────────────────────
+# ai-ps — local / self-host stack.
+#
+# Brings up everything except the web frontend (the React/Vite app
+# runs on the host: `pnpm --filter web dev`). Provider keys are loaded
+# from ../.env into the api + worker only — never into the browser.
+#
+#   docker compose up -d           # start all backend services
+#   docker compose logs -f api     # tail the API
+#   docker compose down            # stop (data persists in ./data)
+# ──────────────────────────────────────────────────────────────
+name: aips
+
+services:
+  # --- Postgres: app + job/billing tables ---------------------------------
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aips}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aips_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-aips}
+      # Keep the cluster data in a fixed subdir so the bind mount is clean.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    # No host port published — api/worker reach it in-network as `postgres:5432`.
+    # (Avoids colliding with other Postgres instances on the host.)
+    expose:
+      - "5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aips} -d ${POSTGRES_DB:-aips}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # --- Redis: Celery broker/result backend + job progress pub/sub ---------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    # Internal-only; reached as `redis:6379` by api/worker.
+    expose:
+      - "6379"
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # --- MinIO: S3-compatible object storage for pixel blobs + weights ------
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    env_file: ../.env
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-aips}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-aips_dev_password}
+    ports:
+      - "9100:9000" # S3 API (host 9100 -> container 9000; matches MINIO_PUBLIC_ENDPOINT)
+      - "9101:9001" # Web console
+    volumes:
+      - ./data/minio:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # --- One-shot bucket/prefix bootstrap (idempotent) ----------------------
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    env_file: ../.env
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-aips}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-aips_dev_password}
+      MINIO_BUCKET: ${MINIO_BUCKET:-aips}
+    # Create the bucket, keep it private, and seed a `models/` prefix for
+    # ONNX weights. `mc mb -p` and the marker upload are both idempotent.
+    entrypoint: >
+      /bin/sh -c '
+      set -e;
+      mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD";
+      mc mb -p "local/$$MINIO_BUCKET" || true;
+      mc anonymous set none "local/$$MINIO_BUCKET" || true;
+      echo "ai-ps model weights live under this prefix" | mc pipe "local/$$MINIO_BUCKET/models/.keep";
+      echo "minio-init: bucket $$MINIO_BUCKET ready with models/ prefix";
+      '
+    restart: "no"
+
+  # --- API: Fastify — auth, job intake, routing, key proxy, WS relay ------
+  api:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      # Bind inside the container; host port comes from API_PORT below.
+      HOST: 0.0.0.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    ports:
+      - "${API_HOST_PORT:-8090}:${API_PORT:-8080}"
+    # Entry comes from api/Dockerfile CMD (tsx src/server.ts, WORKDIR /repo/api).
+    # Do NOT override here — there is no compiled dist/index.js in Phase 0.
+
+  # --- Worker: Python Celery — provider executors + image pipelines -------
+  worker:
+    build:
+      # workers/ is self-contained (its own pyproject + contracts mirror), so the
+      # build context is the workers dir, not the monorepo root.
+      context: ../workers
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: ../.env
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    # One container runs BOTH the intake bridge (BRPOP aips:jobs:incoming ->
+    # Celery dispatch) AND the Celery worker (queues fast,gen,heavy). That is
+    # exactly what workers/Dockerfile's CMD (./start.sh) does — so we must NOT
+    # override the command here, otherwise the bridge never runs and queued
+    # jobs are never dispatched.

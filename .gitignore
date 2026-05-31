@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Env / secrets
+.env
+.env.local
+*.local
+
+# Data / volumes
+infra/data/
+*.log
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# ML weights (downloaded at runtime, cached in browser)
+*.onnx
+web/public/models/
