@@ -1,12 +1,24 @@
 /**
  * Layers panel — reads the engine snapshot, mutates only through engine
- * methods. Lists layers top->bottom, supports select / visibility / opacity /
- * reorder / delete.
+ * methods. Renders the layer TREE (groups + nesting) top -> bottom: a group row
+ * is followed by its children (also top -> bottom), indented by depth. Supports
+ * select / visibility / opacity / blend / mask / reorder / delete, plus
+ * group / ungroup, clip-to-layer-below, and a layer-styles (fx) editor.
+ *
+ * The snapshot is a flat, depth-first list (Document.snapshot): each row carries
+ * `depth`, `parentId`, `isGroup`, `collapsed?` and an `effects` summary. Children
+ * of a COLLAPSED group are still present in the list (deeper depth) — we hide
+ * them here using a running "collapsed depth" gate.
  */
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { useEngineSnapshot, actions } from "../state/useEngine";
-import { BLEND_MODE_LABELS, type BlendMode } from "../model/Document";
+import {
+  BLEND_MODE_LABELS,
+  type BlendMode,
+  type LayerSnapshot,
+} from "../model/Document";
 import { ADJUSTMENTS } from "../engine/adjustments";
+import { LayerStylesPanel } from "./layerstyles";
 
 /** Small half-filled circle marking a non-destructive adjustment layer. */
 function AdjustmentIcon() {
@@ -36,11 +48,52 @@ function EyeIcon({ open }: { open: boolean }) {
   );
 }
 
+function ChevronIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      className={`transition-transform ${open ? "" : "-rotate-90"}`}
+    >
+      <path d="M6 9l6 6 6-6" />
+    </svg>
+  );
+}
+
+function FolderIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6Z" />
+    </svg>
+  );
+}
+
 export function LayersPanel() {
   const snap = useEngineSnapshot();
   const active = snap.layers.find((l) => l.id === snap.activeLayerId) ?? null;
   // Opacity value captured at drag-start so the whole drag is one undo step.
   const opacityDragStart = useRef<number | null>(null);
+  // Which layer's styles editor is open (modal overlay), if any.
+  const [stylesFor, setStylesFor] = useState<string | null>(null);
+
+  // Hide descendants of collapsed groups: when a collapsed group at depth D is
+  // emitted, skip every following row at depth > D until depth returns to <= D.
+  const visible: LayerSnapshot[] = [];
+  let hideBelowDepth = Infinity;
+  for (const l of snap.layers) {
+    if (l.depth > hideBelowDepth) continue; // inside a collapsed subtree
+    hideBelowDepth = Infinity; // we are back out of any collapsed subtree
+    visible.push(l);
+    if (l.isGroup && l.collapsed) hideBelowDepth = l.depth;
+  }
+
+  const stylesLayer = stylesFor
+    ? snap.layers.find((l) => l.id === stylesFor) ?? null
+    : null;
 
   return (
     <div className="flex h-full flex-col">
@@ -51,126 +104,24 @@ export function LayersPanel() {
             No layers yet. Open an image or generate one.
           </p>
         )}
-        {snap.layers.map((l) => {
-          const selected = l.id === snap.activeLayerId;
-          const isAdjustment = l.kind === "adjustment";
-          const typeLabel =
-            isAdjustment && l.adjustmentType
-              ? ADJUSTMENTS[l.adjustmentType].label
-              : null;
-          return (
-            <div
-              key={l.id}
-              onClick={() => actions.select(l.id)}
-              className={`flex cursor-pointer flex-col gap-1 border-b border-edge/60 px-3 py-2 transition-colors ${
-                selected ? "bg-accent/15" : "hover:bg-panelraised"
-              }`}
-            >
-              <div className="flex items-center gap-2">
-                <button
-                  className="text-muted hover:text-ink"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    actions.toggleVisible(l.id, !l.visible);
-                  }}
-                  title={l.visible ? "Hide" : "Show"}
-                >
-                  <EyeIcon open={l.visible} />
-                </button>
-                {isAdjustment && (
-                  <span
-                    className="shrink-0 text-accent"
-                    title="Adjustment layer"
-                  >
-                    <AdjustmentIcon />
-                  </span>
-                )}
-                <span className="flex-1 truncate text-sm">{l.name}</span>
-                {isAdjustment && l.clipping && (
-                  <span
-                    className="shrink-0 text-muted"
-                    title="Clipped to the layer below"
-                  >
-                    ↳
-                  </span>
-                )}
-                {l.hasMask && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      actions.toggleMaskEnabled(l.id, !l.maskEnabled);
-                    }}
-                    title={l.maskEnabled ? "Disable mask" : "Enable mask"}
-                    className={`rounded px-1 text-[9px] font-semibold uppercase tracking-wide ${
-                      l.maskEnabled
-                        ? "bg-accent/30 text-ink"
-                        : "bg-edge text-muted line-through"
-                    }`}
-                  >
-                    mask
-                  </button>
-                )}
-                <span className="text-[10px] uppercase tracking-wide text-muted">
-                  {isAdjustment ? typeLabel : `${l.width}×${l.height}`}
-                </span>
-              </div>
-
-              {/* Blend mode + opacity */}
-              <div className="flex items-center gap-2 pl-6">
-                <select
-                  value={l.blendMode}
-                  onClick={(e) => e.stopPropagation()}
-                  onChange={(e) =>
-                    actions.setBlendMode(l.id, e.target.value as BlendMode)
-                  }
-                  className="min-w-0 flex-1 rounded border border-edge bg-panelraised px-1.5 py-0.5 text-[11px] outline-none focus:border-accent"
-                >
-                  {BLEND_MODE_LABELS.map((b) => (
-                    <option key={b.mode} value={b.mode}>
-                      {b.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex items-center gap-2 pl-6">
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.01}
-                  value={l.opacity}
-                  onClick={(e) => e.stopPropagation()}
-                  onPointerDown={() => {
-                    opacityDragStart.current = l.opacity;
-                  }}
-                  onChange={(e) =>
-                    actions.setOpacity(l.id, Number(e.target.value))
-                  }
-                  onPointerUp={(e) => {
-                    const from = opacityDragStart.current ?? l.opacity;
-                    opacityDragStart.current = null;
-                    actions.commitOpacity(
-                      l.id,
-                      from,
-                      Number((e.target as HTMLInputElement).value),
-                    );
-                  }}
-                />
-                <span className="w-9 text-right text-[11px] tabular-nums text-muted">
-                  {Math.round(l.opacity * 100)}%
-                </span>
-              </div>
-            </div>
-          );
-        })}
+        {visible.map((l) => (
+          <LayerRow
+            key={l.id}
+            layer={l}
+            selected={l.id === snap.activeLayerId}
+            opacityDragStart={opacityDragStart}
+            onOpenStyles={() => setStylesFor(l.id)}
+          />
+        ))}
       </div>
+
       {/* Layer actions */}
-      <div className="flex items-center gap-1.5 border-t border-edge p-2">
+      <div className="flex flex-wrap items-center gap-1.5 border-t border-edge p-2">
         <button
           className="btn"
           disabled={!snap.activeLayerId}
           onClick={() => snap.activeLayerId && actions.reorder(snap.activeLayerId, 1)}
-          title="Move up"
+          title="Move up (within its group)"
         >
           ↑
         </button>
@@ -178,10 +129,41 @@ export function LayersPanel() {
           className="btn"
           disabled={!snap.activeLayerId}
           onClick={() => snap.activeLayerId && actions.reorder(snap.activeLayerId, -1)}
-          title="Move down"
+          title="Move down (within its group)"
         >
           ↓
         </button>
+
+        {/* Group / ungroup. Multi-select doesn't exist yet, so "Group" wraps the
+            active layer; if the active layer IS a group, the button ungroups it. */}
+        {active && active.isGroup ? (
+          <button
+            className="btn"
+            onClick={() => actions.ungroup(active.id)}
+            title="Ungroup"
+          >
+            Ungroup
+          </button>
+        ) : (
+          <button
+            className="btn"
+            onClick={() => {
+              if (active) actions.groupLayers([active.id]);
+              else actions.addGroup();
+            }}
+            title={active ? "Group the active layer" : "New empty group"}
+          >
+            Group
+          </button>
+        )}
+        <button
+          className="btn"
+          onClick={() => actions.addGroup()}
+          title="New empty group"
+        >
+          + Group
+        </button>
+
         {active && !active.hasMask && (
           <button
             className="btn"
@@ -210,6 +192,208 @@ export function LayersPanel() {
           Delete
         </button>
       </div>
+
+      {stylesLayer && (
+        <LayerStylesPanel
+          layerId={stylesLayer.id}
+          layerName={stylesLayer.name}
+          onClose={() => setStylesFor(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/** True for layers that support clipping + layer styles (raster / text). */
+function isPixelKind(l: LayerSnapshot): boolean {
+  return l.kind === "raster" || l.kind === "text";
+}
+
+/** True if any effect in the summary is active. */
+function hasEffects(l: LayerSnapshot): boolean {
+  const e = l.effects;
+  return !!(
+    e &&
+    (e.dropShadow || e.innerShadow || e.stroke || e.outerGlow || e.colorOverlay)
+  );
+}
+
+function LayerRow({
+  layer: l,
+  selected,
+  opacityDragStart,
+  onOpenStyles,
+}: {
+  layer: LayerSnapshot;
+  selected: boolean;
+  opacityDragStart: React.MutableRefObject<number | null>;
+  onOpenStyles: () => void;
+}) {
+  const isAdjustment = l.kind === "adjustment";
+  const isGroup = l.isGroup;
+  const pixel = isPixelKind(l);
+  const clippable = isAdjustment || pixel;
+  const typeLabel =
+    isAdjustment && l.adjustmentType ? ADJUSTMENTS[l.adjustmentType].label : null;
+  // Indent by nesting depth; clipped layers get an extra nudge so they read as
+  // attached to the layer below them.
+  const indentPx = 12 + l.depth * 14 + (l.clipping ? 10 : 0);
+
+  return (
+    <div
+      onClick={() => actions.select(l.id)}
+      style={{ paddingLeft: indentPx }}
+      className={`flex cursor-pointer flex-col gap-1 border-b border-edge/60 py-2 pr-3 transition-colors ${
+        selected ? "bg-accent/15" : "hover:bg-panelraised"
+      }`}
+    >
+      <div className="flex items-center gap-1.5">
+        {isGroup ? (
+          <button
+            className="text-muted hover:text-ink"
+            onClick={(e) => {
+              e.stopPropagation();
+              actions.setGroupCollapsed(l.id, !l.collapsed);
+            }}
+            title={l.collapsed ? "Expand group" : "Collapse group"}
+          >
+            <ChevronIcon open={!l.collapsed} />
+          </button>
+        ) : (
+          <span className="inline-block w-3" />
+        )}
+        <button
+          className="text-muted hover:text-ink"
+          onClick={(e) => {
+            e.stopPropagation();
+            actions.toggleVisible(l.id, !l.visible);
+          }}
+          title={l.visible ? "Hide" : "Show"}
+        >
+          <EyeIcon open={l.visible} />
+        </button>
+        {isGroup && (
+          <span className="shrink-0 text-muted" title="Group">
+            <FolderIcon />
+          </span>
+        )}
+        {isAdjustment && (
+          <span className="shrink-0 text-accent" title="Adjustment layer">
+            <AdjustmentIcon />
+          </span>
+        )}
+        {l.clipping && (
+          <span
+            className="shrink-0 text-muted"
+            title="Clipped to the layer below"
+          >
+            ⌐
+          </span>
+        )}
+        <span className="flex-1 truncate text-sm">{l.name}</span>
+
+        {pixel && hasEffects(l) && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenStyles();
+            }}
+            title="Layer styles active — edit"
+            className="rounded bg-accent/30 px-1 text-[9px] font-semibold uppercase tracking-wide text-ink"
+          >
+            fx
+          </button>
+        )}
+        {l.hasMask && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              actions.toggleMaskEnabled(l.id, !l.maskEnabled);
+            }}
+            title={l.maskEnabled ? "Disable mask" : "Enable mask"}
+            className={`rounded px-1 text-[9px] font-semibold uppercase tracking-wide ${
+              l.maskEnabled
+                ? "bg-accent/30 text-ink"
+                : "bg-edge text-muted line-through"
+            }`}
+          >
+            mask
+          </button>
+        )}
+        <span className="text-[10px] uppercase tracking-wide text-muted">
+          {isGroup ? "group" : isAdjustment ? typeLabel : `${l.width}×${l.height}`}
+        </span>
+      </div>
+
+      {/* Blend mode (all layer kinds carry one). */}
+      <div className="flex items-center gap-2 pl-[18px]">
+        <select
+          value={l.blendMode}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => actions.setBlendMode(l.id, e.target.value as BlendMode)}
+          className="min-w-0 flex-1 rounded border border-edge bg-panelraised px-1.5 py-0.5 text-[11px] outline-none focus:border-accent"
+        >
+          {BLEND_MODE_LABELS.map((b) => (
+            <option key={b.mode} value={b.mode}>
+              {b.label}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* Opacity. */}
+      <div className="flex items-center gap-2 pl-[18px]">
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={l.opacity}
+          onClick={(e) => e.stopPropagation()}
+          onPointerDown={() => {
+            opacityDragStart.current = l.opacity;
+          }}
+          onChange={(e) => actions.setOpacity(l.id, Number(e.target.value))}
+          onPointerUp={(e) => {
+            const from = opacityDragStart.current ?? l.opacity;
+            opacityDragStart.current = null;
+            actions.commitOpacity(l.id, from, Number((e.target as HTMLInputElement).value));
+          }}
+        />
+        <span className="w-9 text-right text-[11px] tabular-nums text-muted">
+          {Math.round(l.opacity * 100)}%
+        </span>
+      </div>
+
+      {/* Per-layer style controls: clip-to-below + fx editor (pixel layers). */}
+      {clippable && (
+        <div
+          className="flex items-center gap-3 pl-[18px]"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <label
+            className="flex cursor-pointer items-center gap-1 text-[10px] text-muted"
+            title="Clip this layer to the alpha of the layer directly below"
+          >
+            <input
+              type="checkbox"
+              checked={!!l.clipping}
+              onChange={(e) => actions.setClipping(l.id, e.target.checked)}
+              className="accent-accent"
+            />
+            Clip
+          </label>
+          {pixel && (
+            <button
+              onClick={onOpenStyles}
+              className="rounded border border-edge bg-panelraised px-1.5 py-0.5 text-[10px] text-muted hover:text-ink"
+              title="Edit layer styles (fx)"
+            >
+              fx…
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

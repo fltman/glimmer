@@ -91,14 +91,18 @@ uniform sampler2D u_tex;        // source layer (sRGB-decoding or RGBA8), straig
 uniform sampler2D u_backdrop;   // current accumulator (linear, PREMULTIPLIED)
 uniform sampler2D u_mask;       // layer mask, R channel 0..1 (layer-local uv)
 uniform sampler2D u_selection;  // document selection mask, R channel 0..1
+uniform sampler2D u_clip;       // clip base alpha (layer below), RGBA (clip uv)
 
 uniform float u_opacity;        // 0..1 layer opacity
 uniform bool  u_srgbSource;     // decode sRGB in-shader (RGBA8 fallback path)
+uniform bool  u_premulSource;   // source is premultiplied LINEAR (group result) — unpremul, no sRGB decode
 uniform bool  u_useMask;        // sample u_mask
 uniform bool  u_useSelection;   // sample u_selection (mask painting / region edits)
+uniform bool  u_useClip;        // clip this layer to the alpha of the layer below
 uniform int   u_blendMode;      // see BLEND_MODE_INDEX
 uniform vec2  u_backdropSize;   // accumulator size in px (for gl_FragCoord lookup)
 uniform mat3  u_uvToSel;        // maps layer quad uv [0,1] -> selection uv [0,1]
+uniform mat3  u_uvToClip;       // maps layer quad uv [0,1] -> clip-base uv [0,1]
 
 vec3 srgbToLinear(vec3 c) {
   return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
@@ -186,7 +190,12 @@ vec3 blendNonSeparable(int mode, vec3 cb, vec3 cs) {
 
 void main() {
   vec4 src = texture(u_tex, v_uv);
-  if (u_srgbSource) src.rgb = srgbToLinear(src.rgb);
+  if (u_premulSource) {
+    // Group result: premultiplied linear -> straight linear (no sRGB decode).
+    src.rgb = src.a > 1e-5 ? src.rgb / src.a : vec3(0.0);
+  } else if (u_srgbSource) {
+    src.rgb = srgbToLinear(src.rgb);
+  }
   // src arrives straight-alpha; keep straight color (Cs) for the blend math.
   vec3 cs = src.rgb;
 
@@ -196,6 +205,10 @@ void main() {
   if (u_useSelection) {
     vec3 sUv = u_uvToSel * vec3(v_uv, 1.0);
     as *= texture(u_selection, sUv.xy).r;
+  }
+  if (u_useClip) {
+    vec3 cUv = u_uvToClip * vec3(v_uv, 1.0);
+    as *= texture(u_clip, cUv.xy).a; // clip to the alpha of the layer below
   }
 
   // Backdrop (premultiplied linear) — recover straight color + alpha.
@@ -796,5 +809,179 @@ void main() {
   }
   outLin = clamp(outLin, 0.0, 1.0);
   fragColor = vec4(linearToSrgb(outLin), base.a);
+}
+`;
+
+// ──────────────────────────────────────────────────────────────
+// Layer styles / effects
+//
+// Effects are derived from a layer's ALPHA. The engine first extracts the
+// layer's alpha into a single-channel (R8) buffer at the LAYER's footprint
+// (EFFECT_ALPHA_FRAG, with optional choke for drop-shadow spread), separably
+// blurs it (BLUR_FRAG) for shadow / glow, then composites the tinted result as a
+// premultiplied-linear quad over the backdrop (EFFECT_FILL_FRAG). Stroke is
+// computed from the un-blurred alpha by sampling a ring kernel
+// (EFFECT_STROKE_FRAG). All colors are straight sRGB uniforms, decoded to
+// linear in-shader; outputs are PREMULTIPLIED LINEAR (drawn with blend
+// ONE, ONE_MINUS_SRC_ALPHA into the accumulator).
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Composite a premultiplied-linear effect quad OVER the current accumulator in
+ * the fragment shader (blend DISABLED), so it does not depend on hardware
+ * blending into the float (RGBA16F) draw buffer — which is silently dropped on
+ * drivers lacking EXT_float_blend (notably Chrome/ANGLE on macOS), the reason
+ * layer effects rendered nothing.
+ *
+ * `u_src` is the effect's premultiplied-linear color (sampled by the quad's uv);
+ * `u_backdrop` is the accumulator we are writing into, sampled by screen
+ * position so fragments outside the effect quad still pass the backdrop through.
+ * Output = src + backdrop * (1 - src.a)  (premultiplied source-over).
+ */
+export const EFFECT_OVER_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_src;        // effect quad, premultiplied linear (quad uv)
+uniform sampler2D u_backdrop;   // current accumulator, premultiplied linear
+uniform vec2 u_backdropSize;    // accumulator size in px (for gl_FragCoord lookup)
+void main() {
+  vec4 src = texture(u_src, v_uv);
+  vec4 bp = texture(u_backdrop, gl_FragCoord.xy / u_backdropSize);
+  fragColor = src + bp * (1.0 - src.a);
+}
+`;
+
+/**
+ * Extract a layer texture's alpha into R. `u_choke` (0..1) thresholds the alpha
+ * to thicken (spread) the shape before blurring (drop-shadow spread / glow).
+ */
+export const EFFECT_ALPHA_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_tex;   // layer texture (alpha is straight in either encoding)
+uniform float u_choke;     // 0..1 — push alpha toward 1 below the threshold
+void main() {
+  float a = texture(u_tex, v_uv).a;
+  if (u_choke > 0.0) {
+    // Remap so values above (1-choke) snap to 1 — a cheap spread.
+    a = smoothstep(0.0, max(1e-3, 1.0 - u_choke), a);
+  }
+  fragColor = vec4(a, 0.0, 0.0, 1.0);
+}
+`;
+
+/**
+ * Composite a tinted alpha buffer (R) as a premultiplied-linear colored quad.
+ * Used for drop shadow, outer glow and color overlay. `u_shapeMul` optionally
+ * multiplies coverage by a second alpha buffer (the layer's own un-blurred
+ * alpha) so color overlay is clipped to the shape; pass u_useShape=false for
+ * shadow / glow (which extend beyond the shape).
+ *
+ * Output is premultiplied linear: rgb = colorLinear * cov, a = cov.
+ */
+export const EFFECT_FILL_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_cov;     // coverage alpha (R) — blurred for shadow/glow
+uniform sampler2D u_shape;   // layer alpha (R) for clipping color overlay
+uniform bool u_useShape;
+uniform vec3 u_color;        // straight sRGB
+uniform float u_opacity;     // 0..1 master
+vec3 srgbToLinear(vec3 c){return mix(c/12.92, pow((c+0.055)/1.055, vec3(2.4)), step(0.04045,c));}
+void main() {
+  float cov = texture(u_cov, v_uv).r * u_opacity;
+  if (u_useShape) cov *= texture(u_shape, v_uv).r;
+  vec3 lin = srgbToLinear(u_color);
+  fragColor = vec4(lin * cov, cov);
+}
+`;
+
+/**
+ * Stroke from a layer's alpha. Samples a ring kernel of radius u_radius texels
+ * and builds a band of width u_width around the alpha edge. `u_position`:
+ *   0 outside  — band lies where alpha is ~0 but a neighbour within width is ~1
+ *   1 inside   — band lies where alpha is ~1 but a neighbour within width is ~0
+ *   2 center   — half outside / half inside
+ * Output is premultiplied linear tinted by u_color * u_opacity.
+ */
+export const EFFECT_STROKE_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_shape;   // layer alpha (R)
+uniform vec2 u_texel;        // 1/footprint px
+uniform float u_width;       // stroke width in texels
+uniform int u_position;      // 0 outside, 1 inside, 2 center
+uniform vec3 u_color;        // straight sRGB
+uniform float u_opacity;
+vec3 srgbToLinear(vec3 c){return mix(c/12.92, pow((c+0.055)/1.055, vec3(2.4)), step(0.04045,c));}
+void main() {
+  float a = texture(u_shape, v_uv).r;
+  // Radius to search depends on position.
+  float outR = (u_position == 1) ? 0.0 : u_width;
+  float inR  = (u_position == 0) ? 0.0 : u_width;
+  if (u_position == 2) { outR = u_width * 0.5; inR = u_width * 0.5; }
+  int R = int(ceil(max(outR, inR)));
+  float maxN = a;
+  float minN = a;
+  for (int dy = -32; dy <= 32; dy++) {
+    if (dy < -R || dy > R) continue;
+    for (int dx = -32; dx <= 32; dx++) {
+      if (dx < -R || dx > R) continue;
+      float d = length(vec2(float(dx), float(dy)));
+      vec2 uv = v_uv + u_texel * vec2(float(dx), float(dy));
+      float s = texture(u_shape, clamp(uv, vec2(0.0), vec2(1.0))).r;
+      if (d <= outR) maxN = max(maxN, s);
+      if (d <= inR)  minN = min(minN, s);
+    }
+  }
+  // Outside band: currently transparent, but an opaque pixel is within outR.
+  float outsideBand = (1.0 - a) * maxN;
+  // Inside band: currently opaque, but a transparent pixel is within inR.
+  float insideBand = a * (1.0 - minN);
+  float band = 0.0;
+  if (u_position == 0) band = outsideBand;
+  else if (u_position == 1) band = insideBand;
+  else band = max(outsideBand, insideBand);
+  float cov = clamp(band, 0.0, 1.0) * u_opacity;
+  vec3 lin = srgbToLinear(u_color);
+  fragColor = vec4(lin * cov, cov);
+}
+`;
+
+/**
+ * Inner shadow: a shadow contained WITHIN the layer's alpha. Takes the layer's
+ * alpha (u_shape) and a blurred INVERTED+offset alpha (u_cov), multiplies them
+ * so it only shows over opaque pixels. Output premultiplied linear.
+ */
+export const EFFECT_INNER_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_cov;     // blurred INVERTED alpha, offset (R)
+uniform sampler2D u_shape;   // layer alpha (R)
+uniform vec3 u_color;        // straight sRGB
+uniform float u_opacity;
+vec3 srgbToLinear(vec3 c){return mix(c/12.92, pow((c+0.055)/1.055, vec3(2.4)), step(0.04045,c));}
+void main() {
+  float cov = texture(u_cov, v_uv).r * texture(u_shape, v_uv).r * u_opacity;
+  vec3 lin = srgbToLinear(u_color);
+  fragColor = vec4(lin * cov, cov);
+}
+`;
+
+/** Invert a single-channel alpha buffer with an offset sample (for inner shadow). */
+export const EFFECT_INVERT_OFFSET_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_src;     // alpha (R)
+uniform vec2 u_offset;       // uv offset (so the inner shadow casts from a direction)
+void main() {
+  float a = texture(u_src, clamp(v_uv - u_offset, vec2(0.0), vec2(1.0))).r;
+  fragColor = vec4(1.0 - a, 0.0, 0.0, 1.0);
 }
 `;

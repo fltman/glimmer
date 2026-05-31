@@ -29,6 +29,13 @@ import {
   ANTS_FRAG,
   STROKE_APPLY_FRAG,
   MASK_PAINT_FRAG,
+  BLUR_FRAG,
+  EFFECT_ALPHA_FRAG,
+  EFFECT_FILL_FRAG,
+  EFFECT_STROKE_FRAG,
+  EFFECT_INNER_FRAG,
+  EFFECT_INVERT_OFFSET_FRAG,
+  EFFECT_OVER_FRAG,
 } from "./gl/shaders";
 import {
   Document,
@@ -36,6 +43,8 @@ import {
   isAdjustmentLayer,
   isPixelLayer,
   isTextLayer,
+  isGroupLayer,
+  hasActiveEffects,
   type DocumentSnapshot,
   type LayerId,
   type LayerNode,
@@ -45,8 +54,11 @@ import {
   type AdjustmentParams,
   type TextLayer,
   type PixelLayer,
+  type GroupLayer,
   type TextLayerSnapshot,
   type TextLayerPatch,
+  type LayerEffects,
+  type LayerEffectType,
 } from "../model/Document";
 import * as m3 from "./math/mat3";
 import { Selection } from "./Selection";
@@ -153,9 +165,23 @@ export class EditorEngine {
   /** Plain RGBA blit (backdrop copy between ping-pong accumulators). */
   private copyProgram: WebGLProgram | null = null;
 
+  // ── layer-effect programs (lazily compiled in initGL) ──
+  private effectAlphaProgram: WebGLProgram | null = null;
+  private effectFillProgram: WebGLProgram | null = null;
+  private effectStrokeProgram: WebGLProgram | null = null;
+  private effectInnerProgram: WebGLProgram | null = null;
+  private effectInvertOffsetProgram: WebGLProgram | null = null;
+  /** Premultiplied source-over of an effect quad, composited in-shader (no
+   *  hardware blend into the float accumulator — see EFFECT_OVER_FRAG). */
+  private effectOverProgram: WebGLProgram | null = null;
+  private blurProgram: WebGLProgram | null = null;
+
   /** Ping-pong accumulators for backdrop-reading blend modes. */
   private accumA: FramebufferHandle | null = null;
   private accumB: FramebufferHandle | null = null;
+  /** Full-screen scratch holding a backdrop snapshot while an effect quad is
+   *  composited OVER it in-shader (can't read+write the same FBO). */
+  private effectScratch: FramebufferHandle | null = null;
 
   private selection: Selection | null = null;
   private brush: BrushEngine | null = null;
@@ -326,6 +352,16 @@ export class EditorEngine {
       QUAD_VERT,
       MASK_PAINT_FRAG,
     );
+    this.effectAlphaProgram = this.renderer.compileProgram(QUAD_VERT, EFFECT_ALPHA_FRAG);
+    this.effectFillProgram = this.renderer.compileProgram(QUAD_VERT, EFFECT_FILL_FRAG);
+    this.effectStrokeProgram = this.renderer.compileProgram(QUAD_VERT, EFFECT_STROKE_FRAG);
+    this.effectInnerProgram = this.renderer.compileProgram(QUAD_VERT, EFFECT_INNER_FRAG);
+    this.effectInvertOffsetProgram = this.renderer.compileProgram(
+      QUAD_VERT,
+      EFFECT_INVERT_OFFSET_FRAG,
+    );
+    this.effectOverProgram = this.renderer.compileProgram(QUAD_VERT, EFFECT_OVER_FRAG);
+    this.blurProgram = this.renderer.compileProgram(QUAD_VERT, BLUR_FRAG);
     this.copyProgram = this.renderer.compileProgram(
       QUAD_VERT,
       /* glsl */ `#version 300 es
@@ -410,10 +446,10 @@ void main() { fragColor = texture(u_src, v_uv); }`,
   ): { x: number; y: number; width: number; height: number } | null {
     const l = this.doc.getLayer(id);
     if (!l) return null;
-    // Adjustment layers cover the whole document; pixel layers (raster + text)
-    // return their own footprint so the AI flow exports the right ROI. Text
-    // layers must be rasterized first so width/height are populated.
-    if (isAdjustmentLayer(l)) {
+    // Adjustment + group layers cover the whole document; pixel layers (raster +
+    // text) return their own footprint so the AI flow exports the right ROI.
+    // Text layers must be rasterized first so width/height are populated.
+    if (!isPixelLayer(l)) {
       return { x: 0, y: 0, width: this.doc.width, height: this.doc.height };
     }
     if (l.kind === "text") this.ensureTextRasterized(l);
@@ -690,6 +726,14 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     this._gradProg = null;
     this._histProg = null;
     this._previewProg = null;
+    this.effectAlphaProgram = null;
+    this.effectFillProgram = null;
+    this.effectStrokeProgram = null;
+    this.effectInnerProgram = null;
+    this.effectInvertOffsetProgram = null;
+    this.effectOverProgram = null;
+    this.effectScratch = null;
+    this.blurProgram = null;
     this.accumA = null;
     this.accumB = null;
     this.selection?.dispose();
@@ -865,8 +909,8 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     const clipTex = layer.clipping ? this.resolveClipTexture(layer.id) : null;
     gl.uniform1i(loc("u_useClip"), clipTex ? 1 : 0);
     if (clipTex) {
-      const cl = this.doc.getLayer(clipTex.layerId)!;
-      const m = this.viewportUvToLayerUv(bw, bh, cl as RasterLayer);
+      const cl = this.doc.getLayer(clipTex.layerId)! as PixelLayer;
+      const m = this.viewportUvToLayerUv(bw, bh, cl);
       gl.uniformMatrix3fv(loc("u_uvToClip"), false, m);
       gl.uniform1i(loc("u_clip"), 3);
       gl.activeTexture(gl.TEXTURE3);
@@ -891,24 +935,53 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     void pixToClip;
   }
 
-  /** The raster layer directly below `adjId` in stack order, as a texture. */
+  /**
+   * The clip BASE for a clipped layer: the first PIXEL layer (raster or text)
+   * directly below it within the SAME sibling list (group children or root),
+   * skipping intervening adjustment layers. Returns its texture + id, or null.
+   */
   private resolveClipTexture(
-    adjId: LayerId,
+    clippedId: LayerId,
   ): { tex: TextureHandle; layerId: LayerId } | null {
-    const order = this.doc.orderBottomToTop();
-    const idx = order.indexOf(adjId);
+    const node = this.doc.getLayer(clippedId);
+    if (!node) return null;
+    const parentId = (node as { parentId?: LayerId | null }).parentId ?? null;
+    const siblings = parentId ? this.doc.childrenOf(parentId) : this.doc.orderBottomToTop();
+    const idx = siblings.indexOf(clippedId);
     for (let i = idx - 1; i >= 0; i--) {
-      const below = this.doc.getLayer(order[i]!);
-      if (below && below.kind === "raster") {
+      const below = this.doc.getLayer(siblings[i]!);
+      if (!below) continue;
+      if (isPixelLayer(below)) {
         const tex = this.resolveTexture(below.id);
         if (tex) return { tex, layerId: below.id };
         return null;
       }
-      // Stop at the first non-adjustment layer below; if it's an adjustment,
-      // keep walking down to find a raster to clip against.
-      if (below && below.kind !== "adjustment") break;
+      // Skip adjustment layers; stop at a group (can't clip across a group).
+      if (below.kind === "adjustment") continue;
+      break;
     }
     return null;
+  }
+
+  /**
+   * Affine mapping one pixel layer's quad uv [0,1] -> another pixel layer's quad
+   * uv [0,1], both placed in DOC space. Used when clipping layer A to the alpha
+   * of the layer B directly below it: a fragment at A-uv corresponds to doc px
+   * (A.x + uvx*A.w, A.y + uvy*A.h); express that as B-uv. Ignores the live
+   * transform (clip base uses its static footprint), which matches Photoshop's
+   * "clip to the layer below" semantics for the common case.
+   */
+  private layerUvToLayerUv(a: PixelLayer, b: PixelLayer): Float32Array {
+    const aw = a.width || 1;
+    const ah = a.height || 1;
+    const bw = b.width || 1;
+    const bh = b.height || 1;
+    const sx = aw / bw;
+    const sy = ah / bh;
+    const tx = (a.x - b.x) / bw;
+    const ty = (a.y - b.y) / bh;
+    // column-major affine: [sx,0,0, 0,sy,0, tx,ty,1]
+    return new Float32Array([sx, 0, 0, 0, sy, 0, tx, ty, 1]);
   }
 
   /**
@@ -939,8 +1012,8 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     return new Float32Array([ax, 0, 0, 0, ayNeg, 0, tx, ty, 1]);
   }
 
-  /** Viewport-uv -> a specific raster layer's local uv (for clipping). */
-  private viewportUvToLayerUv(bw: number, bh: number, layer: RasterLayer): Float32Array {
+  /** Viewport-uv -> a specific pixel layer's local uv (for clipping). */
+  private viewportUvToLayerUv(bw: number, bh: number, layer: PixelLayer): Float32Array {
     // Same flip rationale as viewportUvToDocUv; offset by the layer origin.
     const s = this.view.scale;
     const lw = layer.width;
@@ -1025,117 +1098,27 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
 
-    gl.useProgram(this.blendProgram);
-    const P = this.blendProgram;
-    const uTransform = gl.getUniformLocation(P, "u_transform");
-    const uOpacity = gl.getUniformLocation(P, "u_opacity");
-    const uTex = gl.getUniformLocation(P, "u_tex");
-    const uBackdrop = gl.getUniformLocation(P, "u_backdrop");
-    const uMask = gl.getUniformLocation(P, "u_mask");
-    const uSel = gl.getUniformLocation(P, "u_selection");
-    const uSrgb = gl.getUniformLocation(P, "u_srgbSource");
-    const uUseMask = gl.getUniformLocation(P, "u_useMask");
-    const uUseSel = gl.getUniformLocation(P, "u_useSelection");
-    const uMode = gl.getUniformLocation(P, "u_blendMode");
-    const uBackSize = gl.getUniformLocation(P, "u_backdropSize");
-    const uUvToSel = gl.getUniformLocation(P, "u_uvToSel");
-    gl.uniform1i(uTex, 0);
-    gl.uniform1i(uBackdrop, 1);
-    gl.uniform1i(uMask, 2);
-    gl.uniform1i(uSel, 3);
-
     const pixToClip = m3.pixelToClip(bw, bh);
     const view = m3.multiply(
       m3.translation(this.view.tx, this.view.ty),
       m3.scaling(this.view.scale, this.view.scale),
     );
     const activeId = this.doc.getActiveLayerId();
-    const order = this.doc.orderBottomToTop();
 
-    for (const id of order) {
-      const layer = this.doc.getLayer(id);
-      if (!layer || !layer.visible || layer.opacity <= 0) continue;
-
-      // Adjustment layers: fullscreen pass over the current accumulator.
-      if (isAdjustmentLayer(layer)) {
-        this.renderAdjustmentLayer(layer, read, write, bw, bh, view, pixToClip);
-        const swp = read;
-        read = write;
-        write = swp;
-        // Re-bind the blend program for the next raster layer iteration.
-        gl.useProgram(P);
-        gl.uniform1i(uTex, 0);
-        gl.uniform1i(uBackdrop, 1);
-        gl.uniform1i(uMask, 2);
-        gl.uniform1i(uSel, 3);
-        continue;
-      }
-
-      const tex = this.resolveLayerCompositeTexture(id);
-      if (!tex) continue;
-
-      // toDocPx maps the unit quad to the layer's doc-space footprint, with the
-      // live free-transform folded in for the layer under an active session.
-      const toDocPx = this.layerModelMatrix(layer);
-      const transform = m3.multiply(pixToClip, m3.multiply(view, toDocPx));
-
-      // The blend shader reads the backdrop and writes the FULL composited
-      // pixel (no fixed-function blending), but it only runs for fragments
-      // inside the layer quad. So first COPY the backdrop into `write` (preserve
-      // everything outside the quad), then draw the layer quad on top.
-      gl.bindFramebuffer(gl.FRAMEBUFFER, write.fbo);
-      gl.viewport(0, 0, bw, bh);
-      gl.disable(gl.BLEND);
-      this.blitBackdrop(read);
-
-      // Restore blend program state for the quad pass.
-      gl.useProgram(P);
-      gl.uniform1i(uTex, 0);
-      gl.uniform1i(uBackdrop, 1);
-      gl.uniform1i(uMask, 2);
-      gl.uniform1i(uSel, 3);
-      gl.uniformMatrix3fv(uTransform, false, transform);
-      gl.uniform1f(uOpacity, layer.opacity);
-      gl.uniform1i(uSrgb, tex.srgb ? 0 : 1);
-      gl.uniform1i(uMode, BLEND_MODE_INDEX[layer.blendMode]);
-      gl.uniform2f(uBackSize, bw, bh);
-
-      // Layer mask.
-      const maskTex = layer.mask?.enabled ? this.resolveMaskTexture(layer) : null;
-      gl.uniform1i(uUseMask, maskTex ? 1 : 0);
-      if (maskTex) {
-        gl.activeTexture(gl.TEXTURE2);
-        gl.bindTexture(gl.TEXTURE_2D, maskTex.tex);
-      }
-      gl.uniform1i(uUseSel, 0); // selection does not gate compositing visibility
-
-      // Bind backdrop (read accumulator) and source.
-      gl.activeTexture(gl.TEXTURE1);
-      gl.bindTexture(gl.TEXTURE_2D, read.color.tex);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, tex.tex);
-      r.drawQuad();
-
-      // Live brush preview: composite the wet stroke over THIS layer in place
-      // before it becomes the backdrop, so the preview blends correctly.
-      if (
-        this.brush &&
-        this.brush.isActive &&
-        this.gesture.kind === "paint" &&
-        this.gesture.layerId === id &&
-        !this.gesture.onMask
-      ) {
-        // Overlays the wet stroke onto the just-written layer pixel. The next
-        // loop iteration re-selects the blend program via blitBackdrop().
-        this.compositeBrushPreview(write, layer);
-      }
-      void uUvToSel;
-      void uUseSel;
-
-      const t = read;
-      read = write;
-      write = t;
-    }
+    // Composite the document tree (groups recurse into isolated buffers) into
+    // the ping-pong accumulators; `read` ends up holding the final composite.
+    const res = this.compositeList(
+      this.doc.orderBottomToTop(),
+      read,
+      write,
+      bw,
+      bh,
+      view,
+      pixToClip,
+      /*allowBrushPreview*/ true,
+    );
+    read = res.read;
+    write = res.write;
 
     // Present pass.
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1162,6 +1145,622 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     this.renderAnts(bw, bh, pixToClip, view);
     // Live marquee preview outline (rect/ellipse drag).
     this.renderLiveMarquee();
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  TREE COMPOSITOR (groups + clipping + effects)
+  // ════════════════════════════════════════════════════════
+  /**
+   * Composite an ordered (bottom -> top) list of layer ids into a ping-pong
+   * pair of accumulators. The caller seeds `read` (typically cleared to
+   * transparent); this folds every layer in, swapping read/write per layer, and
+   * returns the (possibly swapped) pair where `read` holds the final composite.
+   *
+   * Groups recurse: a group's children composite into a FRESH isolated pair of
+   * accumulators (same buffer size), and the result is blended into the parent
+   * as a single premultiplied-linear quad with the group's opacity/blend/mask.
+   *
+   * `view`/`pixToClip` carry the viewport (render) or identity (export) mapping;
+   * children use the same mapping as the parent so placement stays consistent.
+   */
+  private compositeList(
+    ids: readonly LayerId[],
+    read: FramebufferHandle,
+    write: FramebufferHandle,
+    bw: number,
+    bh: number,
+    view: Float32Array,
+    pixToClip: Float32Array,
+    allowBrushPreview: boolean,
+  ): { read: FramebufferHandle; write: FramebufferHandle } {
+    const r = this.renderer;
+    if (!r) return { read, write };
+
+    for (const id of ids) {
+      const layer = this.doc.getLayer(id);
+      if (!layer || !layer.visible || layer.opacity <= 0) continue;
+
+      // Adjustment layers: fullscreen pass over the current accumulator.
+      if (isAdjustmentLayer(layer)) {
+        this.renderAdjustmentLayer(layer, read, write, bw, bh, view, pixToClip);
+        const swp = read; read = write; write = swp;
+        continue;
+      }
+
+      // Group layers: composite children in isolation, then blend the result.
+      if (isGroupLayer(layer)) {
+        this.renderGroupLayer(layer, read, write, bw, bh, view, pixToClip);
+        const swp = read; read = write; write = swp;
+        continue;
+      }
+
+      // Pixel layers (raster / text), with optional layer effects + clipping.
+      const tex = this.resolveLayerCompositeTexture(id);
+      if (!tex) continue;
+      const gl = r.gl;
+
+      const fx = (layer as PixelLayer).effects;
+      const hasFx = hasActiveEffects(fx);
+      // BELOW-the-layer effects (drop shadow, outer glow) must live in the
+      // BACKDROP the layer composites over — otherwise the layer-quad pass (blend
+      // disabled, full-replace) overwrites the shadow with the un-shadowed
+      // backdrop everywhere the layer is transparent inside its bounding box (a
+      // text/shape drop shadow would be clipped to the quad rect). Draw them into
+      // `read` first, then blit read->write so the shadow is carried through.
+      if (hasFx) this.renderLayerEffectsBelow(layer as PixelLayer, tex, read, bw, bh, view, pixToClip);
+
+      // Copy the (now shadow-bearing) backdrop into `write` so fragments outside
+      // the layer quad are preserved, then draw the layer + on-top effects.
+      gl.bindFramebuffer(gl.FRAMEBUFFER, write.fbo);
+      gl.viewport(0, 0, bw, bh);
+      gl.disable(gl.BLEND);
+      this.blitBackdrop(read);
+
+      this.drawPixelLayerQuad(layer as PixelLayer, tex, read, write, bw, bh, view, pixToClip);
+      if (hasFx) this.renderLayerEffectsAbove(layer as PixelLayer, tex, write, bw, bh, view, pixToClip);
+
+      // Live brush preview: composite the wet stroke over THIS layer in place.
+      if (
+        allowBrushPreview &&
+        this.brush &&
+        this.brush.isActive &&
+        this.gesture.kind === "paint" &&
+        this.gesture.layerId === id &&
+        !this.gesture.onMask
+      ) {
+        this.compositeBrushPreview(write, layer as PixelLayer);
+      }
+
+      const swp = read; read = write; write = swp;
+    }
+    return { read, write };
+  }
+
+  /**
+   * Draw a single pixel layer's quad into `write` (which already holds a copy of
+   * the backdrop `read`). Uses the full blend shader, honouring the layer's
+   * mask, blend mode, opacity and clipping-to-the-layer-below.
+   */
+  private drawPixelLayerQuad(
+    layer: PixelLayer,
+    tex: TextureHandle,
+    read: FramebufferHandle,
+    write: FramebufferHandle,
+    bw: number,
+    bh: number,
+    view: Float32Array,
+    pixToClip: Float32Array,
+  ): void {
+    const r = this.renderer;
+    const P = this.blendProgram;
+    if (!r || !P) return;
+    const gl = r.gl;
+    const toDocPx = this.layerModelMatrix(layer);
+    const transform = m3.multiply(pixToClip, m3.multiply(view, toDocPx));
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, write.fbo);
+    gl.viewport(0, 0, bw, bh);
+    gl.disable(gl.BLEND);
+    gl.useProgram(P);
+    gl.uniform1i(gl.getUniformLocation(P, "u_tex"), 0);
+    gl.uniform1i(gl.getUniformLocation(P, "u_backdrop"), 1);
+    gl.uniform1i(gl.getUniformLocation(P, "u_mask"), 2);
+    gl.uniform1i(gl.getUniformLocation(P, "u_selection"), 3);
+    gl.uniform1i(gl.getUniformLocation(P, "u_clip"), 5);
+    gl.uniformMatrix3fv(gl.getUniformLocation(P, "u_transform"), false, transform);
+    gl.uniform1f(gl.getUniformLocation(P, "u_opacity"), layer.opacity);
+    gl.uniform1i(gl.getUniformLocation(P, "u_srgbSource"), tex.srgb ? 0 : 1);
+    gl.uniform1i(gl.getUniformLocation(P, "u_premulSource"), 0);
+    gl.uniform1i(gl.getUniformLocation(P, "u_blendMode"), BLEND_MODE_INDEX[layer.blendMode]);
+    gl.uniform2f(gl.getUniformLocation(P, "u_backdropSize"), bw, bh);
+    gl.uniform1i(gl.getUniformLocation(P, "u_useSelection"), 0);
+
+    const maskTex = layer.mask?.enabled ? this.resolveMaskTexture(layer) : null;
+    gl.uniform1i(gl.getUniformLocation(P, "u_useMask"), maskTex ? 1 : 0);
+    if (maskTex) {
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, maskTex.tex);
+    }
+
+    // Clipping: clip this layer to the alpha of the layer directly below it.
+    const clip = layer.clipping ? this.resolveClipTexture(layer.id) : null;
+    gl.uniform1i(gl.getUniformLocation(P, "u_useClip"), clip ? 1 : 0);
+    if (clip) {
+      const cl = this.doc.getLayer(clip.layerId) as PixelLayer;
+      gl.uniformMatrix3fv(
+        gl.getUniformLocation(P, "u_uvToClip"),
+        false,
+        this.layerUvToLayerUv(layer, cl),
+      );
+      gl.activeTexture(gl.TEXTURE5);
+      gl.bindTexture(gl.TEXTURE_2D, clip.tex.tex);
+    }
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, read.color.tex);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex.tex);
+    r.drawQuad();
+  }
+
+  /**
+   * Composite a group's children into an isolated buffer, then blend that buffer
+   * into the parent `write` (which holds a copy of `read`) with the group's
+   * opacity / blend mode / mask. Premultiplied-linear group result.
+   */
+  private renderGroupLayer(
+    group: GroupLayer,
+    read: FramebufferHandle,
+    write: FramebufferHandle,
+    bw: number,
+    bh: number,
+    view: Float32Array,
+    pixToClip: Float32Array,
+  ): void {
+    const r = this.renderer;
+    const P = this.blendProgram;
+    if (!r || !P) return;
+    const gl = r.gl;
+
+    // Isolated accumulators for the children (transparent backdrop).
+    let gread = r.createColorTarget(bw, bh);
+    let gwrite = r.createColorTarget(bw, bh);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, gread.fbo);
+    gl.viewport(0, 0, bw, bh);
+    gl.disable(gl.BLEND);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    const res = this.compositeList(
+      group.childrenIds,
+      gread,
+      gwrite,
+      bw,
+      bh,
+      view,
+      pixToClip,
+      /*allowBrushPreview*/ true,
+    );
+    gread = res.read;
+    gwrite = res.write;
+
+    // Backdrop copy already done by the caller into `write`. Blend the group
+    // result (premultiplied linear) as a fullscreen quad with the group's
+    // blend/opacity/mask. Identity quad placement (the group buffer is already
+    // in viewport space).
+    gl.bindFramebuffer(gl.FRAMEBUFFER, write.fbo);
+    gl.viewport(0, 0, bw, bh);
+    gl.disable(gl.BLEND);
+    gl.useProgram(P);
+    gl.uniform1i(gl.getUniformLocation(P, "u_tex"), 0);
+    gl.uniform1i(gl.getUniformLocation(P, "u_backdrop"), 1);
+    gl.uniform1i(gl.getUniformLocation(P, "u_mask"), 2);
+    gl.uniform1i(gl.getUniformLocation(P, "u_selection"), 3);
+    gl.uniformMatrix3fv(
+      gl.getUniformLocation(P, "u_transform"),
+      false,
+      new Float32Array([2, 0, 0, 0, 2, 0, -1, -1, 1]),
+    );
+    gl.uniform1f(gl.getUniformLocation(P, "u_opacity"), group.opacity);
+    gl.uniform1i(gl.getUniformLocation(P, "u_srgbSource"), 0);
+    gl.uniform1i(gl.getUniformLocation(P, "u_premulSource"), 1);
+    gl.uniform1i(gl.getUniformLocation(P, "u_blendMode"), BLEND_MODE_INDEX[group.blendMode]);
+    gl.uniform2f(gl.getUniformLocation(P, "u_backdropSize"), bw, bh);
+    gl.uniform1i(gl.getUniformLocation(P, "u_useMask"), 0);
+    gl.uniform1i(gl.getUniformLocation(P, "u_useClip"), 0);
+
+    // Group mask: a full-document R8 mask. The blend shader's u_mask samples by
+    // v_uv (layer-local), but our quad is fullscreen so v_uv == viewport uv,
+    // which is NOT doc uv under a non-identity view. The selection path samples
+    // u_selection with a uv->docUv matrix (u_uvToSel) — structurally identical
+    // to a full-document mask — so reuse it to apply the group mask correctly.
+    const maskTex = group.mask?.enabled ? this.resolveMaskTexture(group) : null;
+    gl.uniform1i(gl.getUniformLocation(P, "u_useSelection"), maskTex ? 1 : 0);
+    if (maskTex) {
+      gl.uniformMatrix3fv(
+        gl.getUniformLocation(P, "u_uvToSel"),
+        false,
+        this.viewportUvToDocUv(bw, bh, group.mask!.width, group.mask!.height),
+      );
+      gl.activeTexture(gl.TEXTURE3);
+      gl.bindTexture(gl.TEXTURE_2D, maskTex.tex);
+    }
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, read.color.tex);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, gread.color.tex);
+    r.drawQuad();
+
+    r.deleteFramebuffer(gread);
+    r.deleteFramebuffer(gwrite);
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  LAYER STYLES / EFFECTS (rendered around the layer quad)
+  // ════════════════════════════════════════════════════════
+  /**
+   * Build a single-channel (R8) alpha buffer for a layer's shape, padded by
+   * `pad` doc px on every side so blurred shadows/glows can extend beyond the
+   * footprint. Returns the buffer + the doc-space rect it covers. `choke` (0..1)
+   * thickens the alpha (drop-shadow spread). Caller deletes the FBO.
+   */
+  private buildLayerAlpha(
+    layer: PixelLayer,
+    tex: TextureHandle,
+    pad: number,
+    choke: number,
+  ): { fb: FramebufferHandle; rect: Rect } | null {
+    const r = this.renderer;
+    const prog = this.effectAlphaProgram;
+    if (!r || !prog) return null;
+    const gl = r.gl;
+    const rect: Rect = {
+      x: layer.x - pad,
+      y: layer.y - pad,
+      width: Math.max(1, Math.round(layer.width + pad * 2)),
+      height: Math.max(1, Math.round(layer.height + pad * 2)),
+    };
+    const fb = r.createR8Target(rect.width, rect.height);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb.fbo);
+    gl.viewport(0, 0, rect.width, rect.height);
+    gl.disable(gl.BLEND);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(prog);
+    // Place the layer's footprint quad inside the padded rect (no Y flip; the
+    // alpha buffer is sampled with the same uv it's written with by later passes).
+    const pixToRect = new Float32Array([2 / rect.width, 0, 0, 0, 2 / rect.height, 0, -1, -1, 1]);
+    const toRectPx = m3.multiply(
+      m3.translation(layer.x - rect.x, layer.y - rect.y),
+      m3.scaling(layer.width, layer.height),
+    );
+    gl.uniformMatrix3fv(gl.getUniformLocation(prog, "u_transform"), false, m3.multiply(pixToRect, toRectPx));
+    gl.uniform1f(gl.getUniformLocation(prog, "u_choke"), choke);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_tex"), 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex.tex);
+    r.drawQuad();
+    return { fb, rect };
+  }
+
+  /** Separable Gaussian blur of an R8 buffer in place (ping-pong). Returns the result FBO. */
+  private blurR8(src: FramebufferHandle, radiusPx: number): FramebufferHandle {
+    const r = this.renderer;
+    const prog = this.blurProgram;
+    if (!r || !prog || radiusPx < 0.5) return src;
+    const gl = r.gl;
+    const w = src.width;
+    const h = src.height;
+    const radius = Math.min(32, Math.max(1, Math.round(radiusPx)));
+    const sigma = Math.max(0.5, radiusPx / 2);
+    const tmp = r.createR8Target(w, h);
+    const out = r.createR8Target(w, h);
+    const pass = (dst: FramebufferHandle, srcTex: TextureHandle, dirX: number, dirY: number) => {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
+      gl.viewport(0, 0, w, h);
+      gl.disable(gl.BLEND);
+      gl.useProgram(prog);
+      gl.uniformMatrix3fv(
+        gl.getUniformLocation(prog, "u_transform"),
+        false,
+        new Float32Array([2, 0, 0, 0, 2, 0, -1, -1, 1]),
+      );
+      gl.uniform1i(gl.getUniformLocation(prog, "u_src"), 0);
+      gl.uniform2f(gl.getUniformLocation(prog, "u_dir"), dirX, dirY);
+      gl.uniform1i(gl.getUniformLocation(prog, "u_radius"), radius);
+      gl.uniform1f(gl.getUniformLocation(prog, "u_sigma"), sigma);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, srcTex.tex);
+      r.drawQuad();
+    };
+    pass(tmp, src.color, 1 / w, 0);
+    pass(out, tmp.color, 0, 1 / h);
+    r.deleteFramebuffer(tmp);
+    return out;
+  }
+
+  /**
+   * Composite a premultiplied-linear effect FBO (covering doc rect `rect`) OVER
+   * the viewport `write`, mapping the rect into the viewport via the view
+   * transform. `offset` shifts the quad by doc px (drop-shadow distance).
+   *
+   * The "over" is done IN-SHADER (blend DISABLED), not via fixed-function
+   * blending: hardware blending into the float (RGBA16F) accumulator is silently
+   * dropped on drivers without EXT_float_blend (e.g. Chrome/ANGLE on macOS),
+   * which is why effects rendered nothing. We snapshot the current backdrop into
+   * a scratch buffer, then the over-shader samples it (a buffer can't be both the
+   * read source and the draw target) and writes `src + backdrop*(1-src.a)`.
+   */
+  private compositeEffectQuad(
+    effect: FramebufferHandle,
+    rect: Rect,
+    write: FramebufferHandle,
+    pixToClip: Float32Array,
+    view: Float32Array,
+    offset: { x: number; y: number },
+    over: boolean,
+  ): void {
+    const r = this.renderer;
+    const prog = this.effectOverProgram;
+    if (!r || !prog) return;
+    const gl = r.gl;
+
+    // Snapshot the current backdrop so the over-shader can read it while drawing
+    // into `write` (reusing a same-size scratch FBO across calls).
+    const scratch = this.ensureEffectScratch(write.width, write.height);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, scratch.fbo);
+    gl.viewport(0, 0, scratch.width, scratch.height);
+    gl.disable(gl.BLEND);
+    this.blitBackdrop(write);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, write.fbo);
+    gl.viewport(0, 0, write.width, write.height);
+    gl.disable(gl.BLEND);
+    gl.useProgram(prog);
+    const toDocPx = m3.multiply(
+      m3.translation(rect.x + offset.x, rect.y + offset.y),
+      m3.scaling(rect.width, rect.height),
+    );
+    const transform = m3.multiply(pixToClip, m3.multiply(view, toDocPx));
+    gl.uniformMatrix3fv(gl.getUniformLocation(prog, "u_transform"), false, transform);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_src"), 0);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_backdrop"), 1);
+    gl.uniform2f(gl.getUniformLocation(prog, "u_backdropSize"), write.width, write.height);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, scratch.color.tex);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, effect.color.tex);
+    r.drawQuad();
+    void over;
+  }
+
+  /** Lazily (re)allocate the full-screen scratch backdrop snapshot buffer. */
+  private ensureEffectScratch(w: number, h: number): FramebufferHandle {
+    const r = this.renderer!;
+    if (this.effectScratch && this.effectScratch.width === w && this.effectScratch.height === h) {
+      return this.effectScratch;
+    }
+    if (this.effectScratch) r.deleteFramebuffer(this.effectScratch);
+    this.effectScratch = r.createColorTarget(w, h);
+    return this.effectScratch;
+  }
+
+  /** Run EFFECT_FILL_FRAG into a padded RGBA color FBO (premultiplied linear). */
+  private buildEffectFill(
+    rect: Rect,
+    cov: FramebufferHandle,
+    shape: FramebufferHandle | null,
+    color: { r: number; g: number; b: number },
+    opacity: number,
+  ): FramebufferHandle | null {
+    const r = this.renderer;
+    const prog = this.effectFillProgram;
+    if (!r || !prog) return null;
+    const gl = r.gl;
+    const out = r.createColorTarget(rect.width, rect.height);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, out.fbo);
+    gl.viewport(0, 0, rect.width, rect.height);
+    gl.disable(gl.BLEND);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(prog);
+    gl.uniformMatrix3fv(
+      gl.getUniformLocation(prog, "u_transform"),
+      false,
+      new Float32Array([2, 0, 0, 0, 2, 0, -1, -1, 1]),
+    );
+    gl.uniform1i(gl.getUniformLocation(prog, "u_cov"), 0);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_shape"), 1);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_useShape"), shape ? 1 : 0);
+    gl.uniform3f(gl.getUniformLocation(prog, "u_color"), color.r, color.g, color.b);
+    gl.uniform1f(gl.getUniformLocation(prog, "u_opacity"), opacity);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, cov.color.tex);
+    if (shape) {
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, shape.color.tex);
+    }
+    r.drawQuad();
+    return out;
+  }
+
+  /**
+   * Render the BELOW-the-layer effects (drop shadow, outer glow) into `write`,
+   * before the layer quad is drawn. All derive from the layer's alpha.
+   */
+  private renderLayerEffectsBelow(
+    layer: PixelLayer,
+    tex: TextureHandle,
+    write: FramebufferHandle,
+    _bw: number,
+    _bh: number,
+    view: Float32Array,
+    pixToClip: Float32Array,
+  ): void {
+    const r = this.renderer;
+    const fx = layer.effects;
+    if (!r || !fx) return;
+
+    // Drop shadow.
+    const ds = fx.dropShadow;
+    if (ds?.enabled) {
+      const pad = Math.ceil(ds.size + Math.abs(ds.distance) + 2);
+      const alpha = this.buildLayerAlpha(layer, tex, pad, ds.spread ?? 0);
+      if (alpha) {
+        const blurred = this.blurR8(alpha.fb, ds.size);
+        const fill = this.buildEffectFill(alpha.rect, blurred, null, ds.color, ds.opacity);
+        if (fill) {
+          const rad = (ds.angle * Math.PI) / 180;
+          const off = { x: Math.cos(rad) * ds.distance, y: -Math.sin(rad) * ds.distance };
+          this.compositeEffectQuad(fill, alpha.rect, write, pixToClip, view, off, false);
+          r.deleteFramebuffer(fill);
+        }
+        if (blurred !== alpha.fb) r.deleteFramebuffer(blurred);
+        r.deleteFramebuffer(alpha.fb);
+      }
+    }
+
+    // Outer glow.
+    const og = fx.outerGlow;
+    if (og?.enabled) {
+      const pad = Math.ceil(og.size + 2);
+      const alpha = this.buildLayerAlpha(layer, tex, pad, 0);
+      if (alpha) {
+        const blurred = this.blurR8(alpha.fb, og.size);
+        const fill = this.buildEffectFill(alpha.rect, blurred, null, og.color, og.opacity);
+        if (fill) {
+          this.compositeEffectQuad(fill, alpha.rect, write, pixToClip, view, { x: 0, y: 0 }, false);
+          r.deleteFramebuffer(fill);
+        }
+        if (blurred !== alpha.fb) r.deleteFramebuffer(blurred);
+        r.deleteFramebuffer(alpha.fb);
+      }
+    }
+  }
+
+  /**
+   * Render the ON-TOP-of-the-layer effects (inner shadow, color overlay,
+   * stroke), after the layer quad has been drawn into `write`.
+   */
+  private renderLayerEffectsAbove(
+    layer: PixelLayer,
+    tex: TextureHandle,
+    write: FramebufferHandle,
+    _bw: number,
+    _bh: number,
+    view: Float32Array,
+    pixToClip: Float32Array,
+  ): void {
+    const r = this.renderer;
+    const fx = layer.effects;
+    if (!r || !fx) return;
+    const gl = r.gl;
+
+    // Inner shadow (contained within the layer's alpha).
+    const is = fx.innerShadow;
+    if (is?.enabled && this.effectInnerProgram && this.effectInvertOffsetProgram) {
+      const pad = Math.ceil(is.size + Math.abs(is.distance) + 2);
+      const alpha = this.buildLayerAlpha(layer, tex, pad, 0);
+      if (alpha) {
+        // Invert + offset the alpha, blur, then multiply by the shape.
+        const inv = r.createR8Target(alpha.rect.width, alpha.rect.height);
+        const rad = (is.angle * Math.PI) / 180;
+        const offU = { x: (Math.cos(rad) * is.distance) / alpha.rect.width, y: (-Math.sin(rad) * is.distance) / alpha.rect.height };
+        gl.bindFramebuffer(gl.FRAMEBUFFER, inv.fbo);
+        gl.viewport(0, 0, alpha.rect.width, alpha.rect.height);
+        gl.disable(gl.BLEND);
+        gl.useProgram(this.effectInvertOffsetProgram);
+        gl.uniformMatrix3fv(
+          gl.getUniformLocation(this.effectInvertOffsetProgram, "u_transform"),
+          false,
+          new Float32Array([2, 0, 0, 0, 2, 0, -1, -1, 1]),
+        );
+        gl.uniform1i(gl.getUniformLocation(this.effectInvertOffsetProgram, "u_src"), 0);
+        gl.uniform2f(gl.getUniformLocation(this.effectInvertOffsetProgram, "u_offset"), offU.x, offU.y);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, alpha.fb.color.tex);
+        r.drawQuad();
+        const blurred = this.blurR8(inv, is.size);
+        // Inner fill = blurredInverted * shape, tinted.
+        const out = r.createColorTarget(alpha.rect.width, alpha.rect.height);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, out.fbo);
+        gl.viewport(0, 0, alpha.rect.width, alpha.rect.height);
+        gl.disable(gl.BLEND);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.useProgram(this.effectInnerProgram);
+        gl.uniformMatrix3fv(
+          gl.getUniformLocation(this.effectInnerProgram, "u_transform"),
+          false,
+          new Float32Array([2, 0, 0, 0, 2, 0, -1, -1, 1]),
+        );
+        gl.uniform1i(gl.getUniformLocation(this.effectInnerProgram, "u_cov"), 0);
+        gl.uniform1i(gl.getUniformLocation(this.effectInnerProgram, "u_shape"), 1);
+        gl.uniform3f(gl.getUniformLocation(this.effectInnerProgram, "u_color"), is.color.r, is.color.g, is.color.b);
+        gl.uniform1f(gl.getUniformLocation(this.effectInnerProgram, "u_opacity"), is.opacity);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, blurred.color.tex);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, alpha.fb.color.tex);
+        r.drawQuad();
+        this.compositeEffectQuad(out, alpha.rect, write, pixToClip, view, { x: 0, y: 0 }, true);
+        r.deleteFramebuffer(out);
+        if (blurred !== inv) r.deleteFramebuffer(blurred);
+        r.deleteFramebuffer(inv);
+        r.deleteFramebuffer(alpha.fb);
+      }
+    }
+
+    // Color overlay (clipped to the shape alpha).
+    const co = fx.colorOverlay;
+    if (co?.enabled) {
+      const alpha = this.buildLayerAlpha(layer, tex, 0, 0);
+      if (alpha) {
+        const fill = this.buildEffectFill(alpha.rect, alpha.fb, alpha.fb, co.color, co.opacity);
+        if (fill) {
+          this.compositeEffectQuad(fill, alpha.rect, write, pixToClip, view, { x: 0, y: 0 }, true);
+          r.deleteFramebuffer(fill);
+        }
+        r.deleteFramebuffer(alpha.fb);
+      }
+    }
+
+    // Stroke (outside / inside / center band around the alpha edge).
+    const st = fx.stroke;
+    if (st?.enabled && st.width > 0 && this.effectStrokeProgram) {
+      const pad = Math.ceil(st.width + 2);
+      const alpha = this.buildLayerAlpha(layer, tex, pad, 0);
+      if (alpha) {
+        const out = r.createColorTarget(alpha.rect.width, alpha.rect.height);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, out.fbo);
+        gl.viewport(0, 0, alpha.rect.width, alpha.rect.height);
+        gl.disable(gl.BLEND);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.useProgram(this.effectStrokeProgram);
+        gl.uniformMatrix3fv(
+          gl.getUniformLocation(this.effectStrokeProgram, "u_transform"),
+          false,
+          new Float32Array([2, 0, 0, 0, 2, 0, -1, -1, 1]),
+        );
+        gl.uniform1i(gl.getUniformLocation(this.effectStrokeProgram, "u_shape"), 0);
+        gl.uniform2f(gl.getUniformLocation(this.effectStrokeProgram, "u_texel"), 1 / alpha.rect.width, 1 / alpha.rect.height);
+        gl.uniform1f(gl.getUniformLocation(this.effectStrokeProgram, "u_width"), st.width);
+        gl.uniform1i(
+          gl.getUniformLocation(this.effectStrokeProgram, "u_position"),
+          st.position === "outside" ? 0 : st.position === "inside" ? 1 : 2,
+        );
+        gl.uniform3f(gl.getUniformLocation(this.effectStrokeProgram, "u_color"), st.color.r, st.color.g, st.color.b);
+        gl.uniform1f(gl.getUniformLocation(this.effectStrokeProgram, "u_opacity"), st.color.a ?? 1);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, alpha.fb.color.tex);
+        r.drawQuad();
+        this.compositeEffectQuad(out, alpha.rect, write, pixToClip, view, { x: 0, y: 0 }, true);
+        r.deleteFramebuffer(out);
+        r.deleteFramebuffer(alpha.fb);
+      }
+    }
   }
 
   /**
@@ -1568,9 +2167,9 @@ void main() {
         const doc = this.screenToDoc(cl.x, cl.y);
         const layer = this.doc.getLayer(g.layerId);
         if (!layer) break;
-        // Adjustment-mask painting is full-doc (origin 0,0); pixel layers use x/y.
-        const lx0 = layer.kind === "adjustment" ? 0 : layer.x;
-        const ly0 = layer.kind === "adjustment" ? 0 : layer.y;
+        // Adjustment/group-mask painting is full-doc (origin 0,0); pixel layers use x/y.
+        const lx0 = isPixelLayer(layer) ? layer.x : 0;
+        const ly0 = isPixelLayer(layer) ? layer.y : 0;
         const lx = doc.x - lx0;
         const ly = doc.y - ly0;
         this.brush?.stampTo(lx, ly, ce.pressure);
@@ -2727,9 +3326,18 @@ void main(){
 
   /** Toggle clipping an adjustment to the layer directly below (one undo step). */
   setAdjustmentClipping(id: LayerId, clipping: boolean): void {
+    this.setClipping(id, clipping);
+  }
+
+  /**
+   * Toggle clipping a layer (adjustment OR pixel layer) to the alpha of the
+   * layer directly below it within the same group. One undo step.
+   */
+  setClipping(id: LayerId, clipping: boolean): void {
     const layer = this.doc.getLayer(id);
-    if (!layer || layer.kind !== "adjustment") return;
-    const prev = !!layer.clipping;
+    if (!layer) return;
+    if (layer.kind !== "adjustment" && layer.kind !== "raster" && layer.kind !== "text") return;
+    const prev = !!(layer as AdjustmentLayer | PixelLayer).clipping;
     this.doc.setClipping(id, clipping);
     if (prev === clipping) return;
     this.history.push(
@@ -2740,6 +3348,184 @@ void main(){
       ),
     );
     this.markDirty();
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  LAYER GROUPS
+  // ════════════════════════════════════════════════════════
+  /** Create a new empty group at the top of the document (one undo step). */
+  addGroup(name?: string): LayerId {
+    const id = this.doc.addGroup(name);
+    const node = this.doc.getLayer(id)!;
+    const after = this.doc.captureStructure();
+    this.history.push({
+      label: "New Group",
+      bytes: 0,
+      undo: () => this.doc.remove(id),
+      redo: () => {
+        this.doc.reinsertNode(node);
+        this.doc.restoreStructure(after);
+      },
+    });
+    this.markDirty();
+    return id;
+  }
+
+  /**
+   * Wrap the given layers in a new group (one undo step). Returns the new group
+   * id, or null if nothing groupable was supplied.
+   */
+  groupLayers(ids: LayerId[], name?: string): LayerId | null {
+    const before = this.doc.captureStructure();
+    const groupId = this.doc.groupLayers(ids, name);
+    if (groupId === null) return null;
+    const groupNode = this.doc.getLayer(groupId)!;
+    const after = this.doc.captureStructure();
+    const prevActive = this.doc.getActiveLayerId();
+    this.history.push({
+      label: "Group Layers",
+      bytes: 0,
+      undo: () => {
+        // Drop the group node + relink everything to the pre-group structure.
+        this.doc.restoreStructure(before);
+        this.doc.remove(groupId);
+        this.doc.setActive(prevActive);
+      },
+      redo: () => {
+        this.doc.reinsertNode(groupNode);
+        this.doc.restoreStructure(after);
+        this.doc.setActive(groupId);
+      },
+    });
+    this.markDirty();
+    return groupId;
+  }
+
+  /** Dissolve a group, splicing its children back into place (one undo step). */
+  ungroup(groupId: LayerId): void {
+    const group = this.doc.getLayer(groupId);
+    if (!group || group.kind !== "group") return;
+    const groupNode = group;
+    const before = this.doc.captureStructure();
+    this.doc.ungroup(groupId);
+    const after = this.doc.captureStructure();
+    this.history.push({
+      label: "Ungroup",
+      bytes: 0,
+      undo: () => {
+        this.doc.reinsertNode(groupNode);
+        this.doc.restoreStructure(before);
+      },
+      redo: () => {
+        this.doc.restoreStructure(after);
+        this.doc.remove(groupId);
+      },
+    });
+    this.markDirty();
+  }
+
+  /** Move a layer into a group at a child index (one undo step). */
+  moveLayerIntoGroup(id: LayerId, groupId: LayerId, index = -1): void {
+    const before = this.doc.captureStructure();
+    this.doc.moveLayerIntoGroup(id, groupId, index);
+    const after = this.doc.captureStructure();
+    this.history.push(
+      paramCommand(
+        "Move into group",
+        () => this.doc.restoreStructure(after),
+        () => this.doc.restoreStructure(before),
+      ),
+    );
+    this.markDirty();
+  }
+
+  /** Move a layer to the document root at an index (pull out of a group). */
+  moveLayerToRoot(id: LayerId, index = -1): void {
+    const before = this.doc.captureStructure();
+    this.doc.moveLayerToRoot(id, index);
+    const after = this.doc.captureStructure();
+    this.history.push(
+      paramCommand(
+        "Move to root",
+        () => this.doc.restoreStructure(after),
+        () => this.doc.restoreStructure(before),
+      ),
+    );
+    this.markDirty();
+  }
+
+  /** Collapse / expand a group's children rows in the UI (no undo step). */
+  setGroupCollapsed(id: LayerId, collapsed: boolean): void {
+    this.doc.setCollapsed(id, collapsed);
+    this.markDirty();
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  LAYER STYLES / EFFECTS
+  // ════════════════════════════════════════════════════════
+  /**
+   * Live-update one layer effect (merge a patch into the named effect). No
+   * per-tick undo — the caller records a single step via commitLayerEffects with
+   * the pre-edit effects bag. No-op for non-pixel layers.
+   */
+  updateLayerEffect(
+    id: LayerId,
+    type: LayerEffectType,
+    patch: Record<string, unknown>,
+  ): void {
+    const layer = this.doc.getLayer(id);
+    if (!layer || !isPixelLayer(layer)) return;
+    const fx: LayerEffects = layer.effects ? structuredClone(layer.effects) : {};
+    const cur = (fx[type] ?? {}) as Record<string, unknown>;
+    (fx as Record<string, unknown>)[type] = { ...DEFAULT_EFFECTS[type], ...cur, ...patch };
+    this.doc.setEffects(id, fx);
+    this.textures.delete(id); // effect derives from alpha; texture is unchanged but markDirty re-renders
+    this.markDirty();
+  }
+
+  /** Replace a layer's whole effects bag live (no undo). */
+  setLayerEffects(id: LayerId, effects: LayerEffects | undefined): void {
+    const layer = this.doc.getLayer(id);
+    if (!layer || !isPixelLayer(layer)) return;
+    this.doc.setEffects(id, effects ? structuredClone(effects) : undefined);
+    this.markDirty();
+  }
+
+  /** Record one undo step for an effects edit (prev/next full bags). */
+  commitLayerEffects(
+    id: LayerId,
+    prev: LayerEffects | undefined,
+    next: LayerEffects | undefined,
+  ): void {
+    const before = prev ? structuredClone(prev) : undefined;
+    const after = next ? structuredClone(next) : undefined;
+    this.doc.setEffects(id, after ? structuredClone(after) : undefined);
+    this.history.push(
+      paramCommand(
+        "Layer Style",
+        () => this.doc.setEffects(id, after ? structuredClone(after) : undefined),
+        () => this.doc.setEffects(id, before ? structuredClone(before) : undefined),
+      ),
+    );
+    this.markDirty();
+  }
+
+  /** Snapshot a copy of a layer's current effects (for undo bookkeeping). */
+  getLayerEffects(id: LayerId): LayerEffects | undefined {
+    return this.doc.getEffects(id);
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  HISTORY LIST (for a History panel)
+  // ════════════════════════════════════════════════════════
+  /** Ordered history entries (oldest -> newest) + the current position. */
+  getHistory(): { entries: { label: string; index: number }[]; currentIndex: number } {
+    return { entries: this.history.getEntries(), currentIndex: this.history.currentIndex() };
+  }
+  /** Undo/redo until the history cursor lands on `index` (see History.jumpTo). */
+  historyJumpTo(index: number): void {
+    this.history.jumpTo(index);
+    this.refreshAfterHistory();
   }
 
   // ── histogram ───────────────────────────────────────────
@@ -3005,54 +3791,27 @@ void main(){
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
 
-    const P = this.blendProgram;
     const pixToClip = m3.pixelToClip(w, h);
     const view = m3.identity();
-    // Stash + override the live view so adjustment uv->doc math uses identity.
+    // Stash + override the live view so adjustment/group uv->doc math uses
+    // identity (doc-resolution export, no pan/zoom).
     const savedView = this.view;
     this.view = { scale: 1, tx: 0, ty: 0 };
 
-    for (const id of this.doc.orderBottomToTop()) {
-      const layer = this.doc.getLayer(id);
-      if (!layer || !layer.visible || layer.opacity <= 0) continue;
-      if (isAdjustmentLayer(layer)) {
-        this.renderAdjustmentLayer(layer, read, write, w, h, view, pixToClip);
-        const swp = read; read = write; write = swp;
-        continue;
-      }
-      const tex = this.resolveTexture(id);
-      if (!tex) continue;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, write.fbo);
-      gl.viewport(0, 0, w, h);
-      gl.disable(gl.BLEND);
-      this.blitBackdrop(read);
-
-      gl.useProgram(P);
-      const toDocPx = m3.multiply(m3.translation(layer.x, layer.y), m3.scaling(layer.width, layer.height));
-      const transform = m3.multiply(pixToClip, toDocPx);
-      gl.uniform1i(gl.getUniformLocation(P, "u_tex"), 0);
-      gl.uniform1i(gl.getUniformLocation(P, "u_backdrop"), 1);
-      gl.uniform1i(gl.getUniformLocation(P, "u_mask"), 2);
-      gl.uniform1i(gl.getUniformLocation(P, "u_selection"), 3);
-      gl.uniformMatrix3fv(gl.getUniformLocation(P, "u_transform"), false, transform);
-      gl.uniform1f(gl.getUniformLocation(P, "u_opacity"), layer.opacity);
-      gl.uniform1i(gl.getUniformLocation(P, "u_srgbSource"), tex.srgb ? 0 : 1);
-      gl.uniform1i(gl.getUniformLocation(P, "u_blendMode"), BLEND_MODE_INDEX[layer.blendMode]);
-      gl.uniform2f(gl.getUniformLocation(P, "u_backdropSize"), w, h);
-      const maskTex = layer.mask?.enabled ? this.resolveMaskTexture(layer) : null;
-      gl.uniform1i(gl.getUniformLocation(P, "u_useMask"), maskTex ? 1 : 0);
-      if (maskTex) {
-        gl.activeTexture(gl.TEXTURE2);
-        gl.bindTexture(gl.TEXTURE_2D, maskTex.tex);
-      }
-      gl.uniform1i(gl.getUniformLocation(P, "u_useSelection"), 0);
-      gl.activeTexture(gl.TEXTURE1);
-      gl.bindTexture(gl.TEXTURE_2D, read.color.tex);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, tex.tex);
-      r.drawQuad();
-      const swp = read; read = write; write = swp;
-    }
+    // Same tree fold as the viewport render(), minus the brush preview, so the
+    // export includes groups, clipping and layer effects.
+    const res = this.compositeList(
+      this.doc.orderBottomToTop(),
+      read,
+      write,
+      w,
+      h,
+      view,
+      pixToClip,
+      /*allowBrushPreview*/ false,
+    );
+    read = res.read;
+    write = res.write;
     this.view = savedView;
     this.markDirty();
 
@@ -4056,6 +4815,47 @@ void main(){
   resolveTexturePublic(id: LayerId): TextureHandle | null {
     return this.resolveTexture(id);
   }
+
+  // ════════════════════════════════════════════════════════
+  //  PROJECT SAVE / LOAD (.aips)
+  // ════════════════════════════════════════════════════════
+  /** Serialize the whole project (layers/groups/effects/pixels) to an .aips Blob. */
+  async saveProject(): Promise<Blob> {
+    const { serializeDocument } = await import("./serialize");
+    return serializeDocument(this);
+  }
+
+  /** Load a project from an .aips File/Blob/JSON, replacing the current document. */
+  async loadProject(input: Blob | File | string): Promise<void> {
+    const { deserializeDocument } = await import("./serialize");
+    await deserializeDocument(this, input);
+  }
+
+  /**
+   * After deserializeDocument rebuilds the Document: drop all GPU caches (so
+   * textures / masks / LUTs re-resolve from the new sources), reset the text
+   * rasterization cache, resize the selection to the new doc, clear history, and
+   * re-render + re-snapshot.
+   */
+  reloadAfterDeserialize(): void {
+    const r = this.renderer;
+    this.textures.clear();
+    this.maskTextures.clear();
+    if (r) for (const e of this.adjustmentLUTs.values()) r.deleteTexture(e.tex);
+    this.adjustmentLUTs.clear();
+    this.textRasterVersion.clear();
+    this.filterPreview = null;
+    this.transformSession = null;
+    this.cropSession = null;
+    this.textEditing = null;
+    this.selection?.resize(this.doc.width, this.doc.height);
+    this.selection?.clear();
+    this.history.clear();
+    this.snapshotCache = this.doc.snapshot();
+    this.fitToScreen();
+    this.markDirty();
+    this.emit();
+  }
 }
 
 // ── module-level helpers ──────────────────────────────────
@@ -4124,6 +4924,48 @@ function pointInQuad(
   }
   return true;
 }
+
+/**
+ * Sensible defaults per layer-effect type, used when updateLayerEffect creates
+ * an effect from a partial patch. Colors are straight sRGB 0..1.
+ */
+const DEFAULT_EFFECTS: Record<LayerEffectType, Record<string, unknown>> = {
+  dropShadow: {
+    enabled: true,
+    color: { r: 0, g: 0, b: 0, a: 1 },
+    opacity: 0.5,
+    angle: 135,
+    distance: 8,
+    size: 8,
+    spread: 0,
+  },
+  innerShadow: {
+    enabled: true,
+    color: { r: 0, g: 0, b: 0, a: 1 },
+    opacity: 0.5,
+    angle: 135,
+    distance: 6,
+    size: 6,
+  },
+  stroke: {
+    enabled: true,
+    color: { r: 0, g: 0, b: 0, a: 1 },
+    width: 3,
+    position: "outside",
+  },
+  outerGlow: {
+    enabled: true,
+    color: { r: 1, g: 1, b: 0.6, a: 1 },
+    opacity: 0.6,
+    size: 12,
+  },
+  colorOverlay: {
+    enabled: true,
+    color: { r: 1, g: 0, b: 0, a: 1 },
+    opacity: 1,
+    blendMode: "normal",
+  },
+};
 
 /** Undo labels per retouch mode. */
 const RETOUCH_LABELS: Record<RetouchMode, string> = {

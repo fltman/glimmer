@@ -13,6 +13,7 @@ import { TextEditOverlay } from "./ui/text/TextEditOverlay";
 import { LayersPanel } from "./ui/LayersPanel";
 import { AIPanel } from "./ai/AIPanel";
 import { AdjustmentsPanel } from "./ui/adjustments/AdjustmentsPanel";
+import { HistoryPanel } from "./ui/history/HistoryPanel";
 import { engine, useEngineSnapshot } from "./state/useEngine";
 import { toolStore, type ToolId } from "./state/tools";
 
@@ -55,7 +56,7 @@ function useToolShortcuts() {
   }, []);
 }
 
-type SidebarTab = "ai" | "adjust";
+type SidebarTab = "ai" | "adjust" | "history";
 
 export default function App() {
   useToolShortcuts();
@@ -85,7 +86,7 @@ export default function App() {
           <TextEditOverlay />
         </main>
         <aside className="flex w-80 flex-col border-l border-edge bg-panel">
-          {/* Tabbed top section: AI tools / Adjustments. */}
+          {/* Tabbed top section: AI tools / Adjustments / History. */}
           <div className="flex shrink-0 border-b border-edge">
             <TabButton active={tab === "ai"} onClick={() => setTab("ai")}>
               AI
@@ -93,9 +94,18 @@ export default function App() {
             <TabButton active={tab === "adjust"} onClick={() => setTab("adjust")}>
               Adjust
             </TabButton>
+            <TabButton active={tab === "history"} onClick={() => setTab("history")}>
+              History
+            </TabButton>
           </div>
           <div className="min-h-0 flex-[3] overflow-hidden">
-            {tab === "ai" ? <AIPanel /> : <AdjustmentsPanel />}
+            {tab === "ai" ? (
+              <AIPanel />
+            ) : tab === "adjust" ? (
+              <AdjustmentsPanel />
+            ) : (
+              <HistoryPanel />
+            )}
           </div>
           <div className="min-h-0 flex-[2] overflow-hidden border-t border-edge">
             <LayersPanel />

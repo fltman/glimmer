@@ -15,7 +15,10 @@ import type {
   AdjustmentParams,
   TextLayerSnapshot,
   TextLayerPatch,
+  LayerEffects,
+  LayerEffectType,
 } from "../model/Document";
+import { exportImage, type ExportOptions } from "../engine/export";
 import {
   toolStore,
   type RGBAColor,
@@ -58,6 +61,33 @@ function historyCacheFor(next: { canUndo: boolean; canRedo: boolean }) {
     _historyCache = next;
   }
   return _historyCache;
+}
+
+/** Reactive history list (for a History panel): entries + current cursor. */
+export function useHistoryEntries(): {
+  entries: { label: string; index: number }[];
+  currentIndex: number;
+} {
+  return useSyncExternalStore(
+    (cb) => engine.subscribe(cb),
+    () => historyEntriesCache(),
+    () => historyEntriesCache(),
+  );
+}
+let _historyEntriesCache: { entries: { label: string; index: number }[]; currentIndex: number } = {
+  entries: [],
+  currentIndex: 0,
+};
+function historyEntriesCache() {
+  const h = engine.getHistory();
+  const prev = _historyEntriesCache;
+  // Cheap structural equality so useSyncExternalStore sees a stable ref.
+  const same =
+    prev.currentIndex === h.currentIndex &&
+    prev.entries.length === h.entries.length &&
+    prev.entries.every((e, i) => e.label === h.entries[i]?.label);
+  if (!same) _historyEntriesCache = h;
+  return _historyEntriesCache;
 }
 
 /** Reactive "is there a non-empty selection?" (drives inpaint enablement). */
@@ -241,6 +271,77 @@ export const actions = {
   },
   setAdjustmentClipping(id: string, clipping: boolean) {
     engine.setAdjustmentClipping(id, clipping);
+  },
+  /** Clip a layer (adjustment OR raster/text) to the layer directly below. */
+  setClipping(id: string, clipping: boolean) {
+    engine.setClipping(id, clipping);
+  },
+
+  // ── groups ──
+  /** Create a new empty group at the top of the document. */
+  addGroup(name?: string) {
+    return engine.addGroup(name);
+  },
+  /** Wrap the given layers in a new group. Returns the group id (or null). */
+  groupLayers(ids: string[], name?: string) {
+    return engine.groupLayers(ids, name);
+  },
+  /** Dissolve a group, splicing its children back in place. */
+  ungroup(groupId: string) {
+    engine.ungroup(groupId);
+  },
+  /** Move a layer into a group at a child index (-1 = top). */
+  moveLayerIntoGroup(id: string, groupId: string, index = -1) {
+    engine.moveLayerIntoGroup(id, groupId, index);
+  },
+  /** Move a layer to the document root at an index (pull out of a group). */
+  moveLayerToRoot(id: string, index = -1) {
+    engine.moveLayerToRoot(id, index);
+  },
+  /** Collapse / expand a group's children rows (UI only). */
+  setGroupCollapsed(id: string, collapsed: boolean) {
+    engine.setGroupCollapsed(id, collapsed);
+  },
+
+  // ── layer styles / effects ──
+  /** Live-update one named effect on a layer (no per-tick undo). */
+  updateLayerEffect(id: string, type: LayerEffectType, patch: Record<string, unknown>) {
+    engine.updateLayerEffect(id, type, patch);
+  },
+  /** Replace a layer's whole effects bag live (no undo). */
+  setLayerEffects(id: string, effects: LayerEffects | undefined) {
+    engine.setLayerEffects(id, effects);
+  },
+  /** Commit an effects edit as one undo step (prev/next full bags). */
+  commitLayerEffects(id: string, prev: LayerEffects | undefined, next: LayerEffects | undefined) {
+    engine.commitLayerEffects(id, prev, next);
+  },
+  /** Snapshot a copy of a layer's current effects (for undo bookkeeping). */
+  getLayerEffects(id: string) {
+    return engine.getLayerEffects(id);
+  },
+
+  // ── history list (History panel) ──
+  getHistory() {
+    return engine.getHistory();
+  },
+  /** Undo/redo to a specific history position (number of applied commands). */
+  historyJumpTo(index: number) {
+    engine.historyJumpTo(index);
+  },
+
+  // ── project save / load + image export ──
+  /** Serialize the project to an .aips Blob. */
+  saveProject() {
+    return engine.saveProject();
+  },
+  /** Load a project from an .aips File/Blob/JSON (replaces the document). */
+  loadProject(input: Blob | File | string) {
+    return engine.loadProject(input);
+  },
+  /** Flatten + encode the document to an image Blob (png/jpeg/webp). */
+  exportImage(opts: ExportOptions) {
+    return exportImage(engine, opts);
   },
 
   // ── histogram ──
