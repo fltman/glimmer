@@ -93,6 +93,8 @@ export function HarmonizeSection() {
 
   async function onRun() {
     if (!activeId || !canRun) return;
+    // Pin the result to the doc active at job start (the user may switch tabs).
+    const targetDocId = engine.getActiveDocumentId();
     const geo = engine.getLayerGeometry(activeId);
     if (!geo) return;
     // The subject's footprint in document space — both buffers are sized to
@@ -135,10 +137,14 @@ export function HarmonizeSection() {
     await job.run(req, {
       onArtifact: async (blob, art) => {
         const name = art.placement?.suggestedLayerName ?? "Harmonized";
-        const id = await engine.loadImageLayer(blob, name);
         // Drop the harmonized subject back where it came from (above the source).
         const place = art.placement?.roi ?? roi;
-        engine.setLayerPosition(id, place.x, place.y);
+        if (targetDocId) {
+          await engine.placeImageOnDocument(targetDocId, blob, name, place);
+        } else {
+          const id = await engine.loadImageLayer(blob, name);
+          engine.setLayerPosition(id, place.x, place.y);
+        }
       },
     });
   }

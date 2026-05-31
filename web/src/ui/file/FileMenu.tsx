@@ -15,15 +15,20 @@
  * exportImage); the menu never touches pixels.
  */
 import { useEffect, useRef, useState } from "react";
-import { engine, actions, useEngineSnapshot } from "../../state/useEngine";
+import { actions, useEngineSnapshot } from "../../state/useEngine";
 import { ExportDialog } from "./ExportDialog";
+import { NewDocumentDialog } from "../NewDocumentDialog";
 
 export function FileMenu() {
   const snap = useEngineSnapshot();
   const [menuOpen, setMenuOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [newOpen, setNewOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const openInputRef = useRef<HTMLInputElement | null>(null);
+  /** Open Project as a NEW document (a new tab). */
+  const openNewInputRef = useRef<HTMLInputElement | null>(null);
+  /** Open Project replacing the CURRENT document (legacy single-doc behaviour). */
+  const openReplaceInputRef = useRef<HTMLInputElement | null>(null);
 
   const hasLayers = snap.layers.length > 0;
 
@@ -48,24 +53,9 @@ export function FileMenu() {
 
   function onNew() {
     setMenuOpen(false);
-    if (
-      hasLayers &&
-      !window.confirm("Start a new document? Unsaved changes will be lost.")
-    ) {
-      return;
-    }
-    // Clear via the engine's deserialize-reset path: load an empty project.
-    void engine.loadProject(
-      JSON.stringify({
-        magic: "aips",
-        version: 1,
-        width: snap.width,
-        height: snap.height,
-        activeLayerId: null,
-        rootOrder: [],
-        nodes: [],
-      }),
-    );
+    // Opens a NEW tab (multi-document) via the New Document dialog — no longer
+    // clears/replaces the current document.
+    setNewOpen(true);
   }
 
   async function onSave() {
@@ -79,7 +69,19 @@ export function FileMenu() {
     URL.revokeObjectURL(url);
   }
 
-  async function onOpenFile(e: React.ChangeEvent<HTMLInputElement>) {
+  /** Open Project… → open the .aips as a NEW document (a new tab). */
+  async function onOpenFileAsNew(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    await actions.openAipsAsDocument(file, file.name.replace(/\.[^.]+$/, ""));
+  }
+
+  /**
+   * Open Project (Replace)… → load the .aips INTO the current document tab,
+   * preserving the original single-document open/replace behaviour.
+   */
+  async function onOpenFileReplace(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
@@ -113,10 +115,23 @@ export function FileMenu() {
       </button>
 
       {menuOpen && (
-        <div className="absolute left-0 top-full z-40 mt-1 w-48 overflow-hidden rounded-md border border-edge bg-panelraised py-1 shadow-2xl">
-          <MenuItem onClick={onNew}>New</MenuItem>
-          <MenuItem onClick={() => openInputRef.current?.click()}>
+        <div className="absolute left-0 top-full z-40 mt-1 w-56 overflow-hidden rounded-md border border-edge bg-panelraised py-1 shadow-2xl">
+          <MenuItem onClick={onNew}>New Document…</MenuItem>
+          <MenuItem
+            onClick={() => {
+              setMenuOpen(false);
+              openNewInputRef.current?.click();
+            }}
+          >
             Open Project…
+          </MenuItem>
+          <MenuItem
+            onClick={() => {
+              setMenuOpen(false);
+              openReplaceInputRef.current?.click();
+            }}
+          >
+            Open Project (Replace)…
           </MenuItem>
           <div className="my-1 h-px bg-edge" />
           <MenuItem onClick={onSave}>Save Project</MenuItem>
@@ -126,14 +141,24 @@ export function FileMenu() {
         </div>
       )}
 
-      {/* Hidden file input for Open Project. */}
+      {/* Hidden file input — Open Project as a NEW document (a new tab). */}
       <input
-        ref={openInputRef}
+        ref={openNewInputRef}
         type="file"
         accept=".aips,application/json"
         className="hidden"
-        onChange={onOpenFile}
+        onChange={onOpenFileAsNew}
       />
+      {/* Hidden file input — Open Project replacing the current document. */}
+      <input
+        ref={openReplaceInputRef}
+        type="file"
+        accept=".aips,application/json"
+        className="hidden"
+        onChange={onOpenFileReplace}
+      />
+
+      {newOpen && <NewDocumentDialog onClose={() => setNewOpen(false)} />}
 
       {exportOpen && (
         <ExportDialog

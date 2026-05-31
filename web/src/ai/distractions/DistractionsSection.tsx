@@ -174,6 +174,8 @@ export function DistractionsSection() {
   async function removeRegion(region: DistractionRegion): Promise<boolean> {
     const rasterId = engine.getActiveRasterLayerId() ?? engine.getTopRasterLayerId();
     if (!rasterId) throw new Error("Removal needs a raster (pixel) layer.");
+    // Pin the result to the doc active at job start (the user may switch tabs).
+    const targetDocId = engine.getActiveDocumentId();
 
     // Seed the selection from the box, then read the engine's tight bounds back
     // (so the ROI matches what the marquee actually covers).
@@ -210,9 +212,13 @@ export function DistractionsSection() {
       onArtifact: async (blob, art) => {
         const name =
           art.placement?.suggestedLayerName ?? `Removed: ${region.label}`;
-        const id = await engine.loadImageLayer(blob, name);
         const place = art.placement?.roi ?? roi;
-        engine.setLayerPosition(id, place.x, place.y);
+        if (targetDocId) {
+          await engine.placeImageOnDocument(targetDocId, blob, name, place);
+        } else {
+          const id = await engine.loadImageLayer(blob, name);
+          engine.setLayerPosition(id, place.x, place.y);
+        }
         placed = true;
       },
     });

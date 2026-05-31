@@ -47,6 +47,8 @@ export function ExpandSection() {
 
   async function onRun() {
     if (!activeId || !canRun) return;
+    // Pin the result to the doc active at job start (the user may switch tabs).
+    const targetDocId = engine.getActiveDocumentId();
     const geo = engine.getLayerGeometry(activeId);
     if (!geo) return;
     const imageBlob = await engine.exportLayerRegionPNG(activeId, geo);
@@ -68,7 +70,6 @@ export function ExpandSection() {
     await job.run(req, {
       onArtifact: async (blob, art) => {
         const name = art.placement?.suggestedLayerName ?? "Expanded";
-        const id = await engine.loadImageLayer(blob, name);
         // placement.roi uses the expanded origin (negative offsets from the
         // source). Fall back to the source minus the requested left/top margin.
         const place =
@@ -78,7 +79,12 @@ export function ExpandSection() {
             width: geo.width + margins.left + margins.right,
             height: geo.height + margins.top + margins.bottom,
           };
-        engine.setLayerPosition(id, place.x, place.y);
+        if (targetDocId) {
+          await engine.placeImageOnDocument(targetDocId, blob, name, place);
+        } else {
+          const id = await engine.loadImageLayer(blob, name);
+          engine.setLayerPosition(id, place.x, place.y);
+        }
       },
     });
   }

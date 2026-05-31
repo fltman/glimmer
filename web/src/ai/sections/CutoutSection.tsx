@@ -55,6 +55,10 @@ export function CutoutSection() {
   async function onRun() {
     if (!activeId || !canRun) return;
     const id = activeId;
+    // Pin the result to the doc + source geometry active at job start, so a tab
+    // switch mid-job lands the cutout on the right doc at the right origin.
+    const targetDocId = engine.getActiveDocumentId();
+    const sourceGeo = engine.getLayerGeometry(id);
 
     let imageBlob: Blob;
     try {
@@ -81,10 +85,13 @@ export function CutoutSection() {
       // Server fallback path: place the returned cutout/mask artifact.
       onArtifact: async (blob, art) => {
         const name = art.placement?.suggestedLayerName ?? "Cutout";
-        const newId = await engine.loadImageLayer(blob, name);
-        const geo = engine.getLayerGeometry(id);
-        const place = art.placement?.roi ?? geo;
-        if (place) engine.setLayerPosition(newId, place.x, place.y);
+        const place = art.placement?.roi ?? sourceGeo ?? undefined;
+        if (targetDocId)
+          await engine.placeImageOnDocument(targetDocId, blob, name, place ?? undefined);
+        else {
+          const newId = await engine.loadImageLayer(blob, name);
+          if (place) engine.setLayerPosition(newId, place.x, place.y);
+        }
       },
       // Client-preferred path: run RMBG locally on the active layer's pixels.
       onClientDirective: async () => {
@@ -95,9 +102,17 @@ export function CutoutSection() {
           const { cutout } = await removeBackgroundClient(localBlob, (p) => {
             job.setExternalProgress(p.progress ?? 0, p.stage);
           });
-          const geo = engine.getLayerGeometry(id);
-          const newId = await engine.loadImageLayer(cutout, "Cutout");
-          if (geo) engine.setLayerPosition(newId, geo.x, geo.y);
+          if (targetDocId)
+            await engine.placeImageOnDocument(
+              targetDocId,
+              cutout,
+              "Cutout",
+              sourceGeo ?? undefined,
+            );
+          else {
+            const newId = await engine.loadImageLayer(cutout, "Cutout");
+            if (sourceGeo) engine.setLayerPosition(newId, sourceGeo.x, sourceGeo.y);
+          }
           job.finishExternal();
         } catch (e) {
           job.failExternal(e instanceof Error ? e.message : String(e));

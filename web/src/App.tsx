@@ -9,6 +9,7 @@ import { Toolbar } from "./ui/Toolbar";
 import { ToolRail } from "./ui/ToolRail";
 import { ToolOptions } from "./ui/ToolOptions";
 import { CanvasHost } from "./ui/CanvasHost";
+import { DocumentTabs } from "./ui/DocumentTabs";
 import { TextEditOverlay } from "./ui/text/TextEditOverlay";
 import { LiquifyPanel } from "./ui/liquify";
 import { LayersPanel } from "./ui/LayersPanel";
@@ -201,16 +202,23 @@ export default function App() {
       <ToolOptions />
       <div className="flex min-h-0 flex-1">
         <ToolRail />
-        {/* Relative wrapper so the type-tool <textarea> overlay (positioned in
-            CSS px from the engine's view transform) aligns with the canvas,
-            which fills this element edge-to-edge. */}
-        <main className="relative min-w-0 flex-1">
-          <CanvasHost />
-          <TextEditOverlay />
-          {/* Floating Liquify controls; render only while a warp session is
-              active (the panel itself returns null otherwise). */}
-          <LiquifyPanel />
-        </main>
+        {/* Center column: the document tab strip sits ABOVE the canvas. The tab
+            bar lives OUTSIDE <main> so it never shifts the canvas origin (which
+            the type-tool overlay is positioned against) and so switching tabs
+            never remounts <CanvasHost/> / the single GL canvas. */}
+        <div className="flex min-w-0 flex-1 flex-col">
+          <DocumentTabs />
+          {/* Relative wrapper so the type-tool <textarea> overlay (positioned in
+              CSS px from the engine's view transform) aligns with the canvas,
+              which fills this element edge-to-edge. */}
+          <main className="relative min-h-0 min-w-0 flex-1">
+            <CanvasHost />
+            <TextEditOverlay />
+            {/* Floating Liquify controls; render only while a warp session is
+                active (the panel itself returns null otherwise). */}
+            <LiquifyPanel />
+          </main>
+        </div>
         <aside className="flex w-80 flex-col border-l border-edge bg-panel">
           {/* Tabbed top section: AI / Adjust / History / Paths / Swatches. */}
           <div className="flex shrink-0 border-b border-edge">

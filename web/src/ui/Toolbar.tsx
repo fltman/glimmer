@@ -170,7 +170,10 @@ function EditMenu() {
 export function Toolbar() {
   const snap = useEngineSnapshot();
   const history = useHistoryState();
+  /** Open image as a NEW document (a new tab). */
   const fileRef = useRef<HTMLInputElement | null>(null);
+  /** Place an image INTO the current document (legacy single-doc behaviour). */
+  const placeRef = useRef<HTMLInputElement | null>(null);
   const [zoom, setZoom] = useState(100);
 
   // Poll the engine zoom for the live readout (cheap; engine owns the value).
@@ -182,7 +185,16 @@ export function Toolbar() {
     return () => clearInterval(id);
   }, []);
 
+  /** Open image as a NEW document (a new tab). */
   async function onOpen(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    await actions.openImageAsDocument(file, file.name.replace(/\.[^.]+$/, ""));
+    e.target.value = "";
+  }
+
+  /** Place an image as a new layer INTO the current document (single-doc path). */
+  async function onPlace(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
     await engine.loadImageLayer(file, file.name.replace(/\.[^.]+$/, ""));
@@ -208,7 +220,11 @@ export function Toolbar() {
         <span className="text-sm font-semibold tracking-tight">ai-ps</span>
       </div>
 
-      <button className="btn" onClick={() => fileRef.current?.click()}>
+      <button
+        className="btn"
+        onClick={() => fileRef.current?.click()}
+        title="Open an image as a new document (a new tab)"
+      >
         Open image
       </button>
       <input
@@ -217,6 +233,22 @@ export function Toolbar() {
         accept="image/*"
         className="hidden"
         onChange={onOpen}
+      />
+
+      <button
+        className="btn"
+        onClick={() => placeRef.current?.click()}
+        disabled={!hasLayers}
+        title="Place an image as a new layer in the current document"
+      >
+        Place
+      </button>
+      <input
+        ref={placeRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={onPlace}
       />
 
       <button className="btn" onClick={() => actions.fit()} disabled={!hasLayers}>

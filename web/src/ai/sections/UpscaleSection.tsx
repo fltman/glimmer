@@ -23,6 +23,8 @@ export function UpscaleSection() {
 
   async function onUpscale(scale: 2 | 4) {
     if (!activeId || job.busy) return;
+    // Pin the result to the doc active at job start (the user may switch tabs).
+    const targetDocId = engine.getActiveDocumentId();
     const g = engine.getLayerGeometry(activeId);
     if (!g) return;
     setPending(scale);
@@ -45,9 +47,12 @@ export function UpscaleSection() {
     await job.run(req, {
       onArtifact: async (blob, art) => {
         const name = art.placement?.suggestedLayerName ?? `Upscaled ${scale}×`;
-        const id = await engine.loadImageLayer(blob, name);
         // Keep the upscaled layer anchored at the source origin.
-        engine.setLayerPosition(id, g.x, g.y);
+        if (targetDocId) await engine.placeImageOnDocument(targetDocId, blob, name, g);
+        else {
+          const id = await engine.loadImageLayer(blob, name);
+          engine.setLayerPosition(id, g.x, g.y);
+        }
       },
     });
   }

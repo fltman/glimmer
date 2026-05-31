@@ -87,6 +87,8 @@ export function EditSection() {
 
   async function onRun() {
     if (!activeId || !canRun) return;
+    // Pin the result to the doc active at job start (the user may switch tabs).
+    const targetDocId = engine.getActiveDocumentId();
     const roi = engine.getSelectionMaskBounds();
     if (!roi) return;
 
@@ -132,10 +134,13 @@ export function EditSection() {
             : referenceImage
               ? "Reference fill"
               : "Generative fill");
-        const id = await engine.loadImageLayer(blob, name);
-        // Place the result back at the source ROI (loadImageLayer adds at 0,0).
+        // Place the result back at the source ROI (default add is at 0,0).
         const place = art.placement?.roi ?? roi;
-        engine.setLayerPosition(id, place.x, place.y);
+        if (targetDocId) await engine.placeImageOnDocument(targetDocId, blob, name, place);
+        else {
+          const id = await engine.loadImageLayer(blob, name);
+          engine.setLayerPosition(id, place.x, place.y);
+        }
       },
     });
   }

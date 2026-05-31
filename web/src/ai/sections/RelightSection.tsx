@@ -79,6 +79,8 @@ export function RelightSection() {
 
   async function onRun() {
     if (!canRun) return;
+    // Pin the result to the doc active at job start (the user may switch tabs).
+    const targetDocId = engine.getActiveDocumentId();
 
     // Prefer the active raster layer's region so the relight is anchored to its
     // footprint; otherwise relight the whole-document composite at (0,0).
@@ -126,14 +128,18 @@ export function RelightSection() {
         const name =
           art.placement?.suggestedLayerName ??
           `Relit (${DIRECTION_LABEL[direction].toLowerCase()})`;
-        const id = await engine.loadImageLayer(blob, name);
         // Anchor a layer-sourced relight back at the source origin; the backend
         // may also report a placement roi (whole image) we honor first.
-        const place = art.placement?.roi;
-        if (place) {
-          engine.setLayerPosition(id, place.x, place.y);
-        } else if (sourcedFromLayer) {
-          engine.setLayerPosition(id, originX, originY);
+        const place = art.placement?.roi
+          ? { x: art.placement.roi.x, y: art.placement.roi.y }
+          : sourcedFromLayer
+            ? { x: originX, y: originY }
+            : undefined;
+        if (targetDocId) {
+          await engine.placeImageOnDocument(targetDocId, blob, name, place);
+        } else {
+          const id = await engine.loadImageLayer(blob, name);
+          if (place) engine.setLayerPosition(id, place.x, place.y);
         }
       },
     });

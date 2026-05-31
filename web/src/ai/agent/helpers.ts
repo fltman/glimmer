@@ -39,8 +39,16 @@ export interface JobProgressHandlers {
   onJobProgress?: (progress: number, stage: string) => void;
 }
 
-/** Adapt the singleton engine + actions to the executor's narrow interface. */
+/**
+ * Adapt the singleton engine + actions to the executor's narrow interface.
+ *
+ * Multi-document safety: `targetDocId` is captured ONCE per plan run (when this
+ * adapter is built), so every layer the plan places lands on the doc that was
+ * active when the plan started — even if the user switches tabs while async AI
+ * steps run. If that doc is closed mid-plan, placements drop safely.
+ */
 function buildExecutorEngine(): ExecutorEngine {
+  const targetDocId = engine.getActiveDocumentId();
   return {
     addAdjustmentLayer: (type, params) =>
       // actions.addAdjustmentLayer returns the new layer id.
@@ -65,8 +73,20 @@ function buildExecutorEngine(): ExecutorEngine {
     exportLayerRegionPNG: (layerId, roi) => engine.exportLayerRegionPNG(layerId, roi),
     exportSelectionMaskPNG: (roi) => engine.exportSelectionMaskPNG(roi),
 
-    loadImageLayer: (src, name) => engine.loadImageLayer(src, name),
-    setLayerPosition: (id, x, y) => engine.setLayerPosition(id, x, y),
+    loadImageLayer: async (src, name) => {
+      if (targetDocId) {
+        const id = await engine.placeImageOnDocument(targetDocId, src, name);
+        // null means the target doc was closed mid-plan — return a sentinel that
+        // setLayerPosition will safely ignore (no such layer in the active doc).
+        return id ?? "";
+      }
+      return engine.loadImageLayer(src, name);
+    },
+    setLayerPosition: (id, x, y) => {
+      if (!id) return; // dropped placement (target doc closed)
+      if (targetDocId) engine.setLayerPositionForDocument(targetDocId, id, x, y);
+      else engine.setLayerPosition(id, x, y);
+    },
   };
 }
 
@@ -206,8 +226,9 @@ function withClientRmbg(baseRunJob: RunJob, progress: JobProgressHandlers): RunJ
     if (req.capability !== "remove_background") {
       return baseRunJob(req, opts);
     }
-    // The active raster layer at submit time is the cutout source.
+    // The active raster layer + doc at submit time are the cutout source/target.
     const id = engine.getActiveRasterLayerId();
+    const targetDocId = engine.getActiveDocumentId();
     return baseRunJob(req, {
       onArtifact: opts.onArtifact,
       onClientDirective: async () => {
@@ -219,8 +240,12 @@ function withClientRmbg(baseRunJob: RunJob, progress: JobProgressHandlers): RunJ
         const { cutout } = await removeBackgroundClient(sourceBlob, (p) => {
           progress.onJobProgress?.(p.progress ?? 0, p.stage);
         });
-        const newId = await engine.loadImageLayer(cutout, "Cutout");
-        engine.setLayerPosition(newId, geo.x, geo.y);
+        if (targetDocId) {
+          await engine.placeImageOnDocument(targetDocId, cutout, "Cutout", geo);
+        } else {
+          const newId = await engine.loadImageLayer(cutout, "Cutout");
+          engine.setLayerPosition(newId, geo.x, geo.y);
+        }
       },
     });
   };

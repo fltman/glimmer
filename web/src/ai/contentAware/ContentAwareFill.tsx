@@ -88,6 +88,8 @@ export function ContentAwareFillModal({ onClose }: { onClose: () => void }) {
   async function onRun() {
     const layerId = engine.getActiveRasterLayerId();
     if (!layerId || !engine.hasSelection()) return;
+    // Pin the result to the doc active at job start (the user may switch tabs).
+    const targetDocId = engine.getActiveDocumentId();
     const roi = engine.getSelectionMaskBounds();
     if (!roi) return;
     setRan(true);
@@ -126,10 +128,14 @@ export function ContentAwareFillModal({ onClose }: { onClose: () => void }) {
     await job.run(req, {
       onArtifact: async (blob, art) => {
         const name = art.placement?.suggestedLayerName ?? "Content-Aware Fill";
-        const newId = await engine.loadImageLayer(blob, name);
-        // Place the result back at the source ROI (loadImageLayer adds at 0,0).
+        // Place the result back at the source ROI (default add is at 0,0).
         const place = art.placement?.roi ?? roi;
-        engine.setLayerPosition(newId, place.x, place.y);
+        if (targetDocId) {
+          await engine.placeImageOnDocument(targetDocId, blob, name, place);
+        } else {
+          const newId = await engine.loadImageLayer(blob, name);
+          engine.setLayerPosition(newId, place.x, place.y);
+        }
       },
     });
   }

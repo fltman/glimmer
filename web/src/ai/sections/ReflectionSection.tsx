@@ -74,6 +74,8 @@ export function ReflectionSection() {
 
   async function onRun() {
     if (!canRun) return;
+    // Pin the result to the doc active at job start (the user may switch tabs).
+    const targetDocId = engine.getActiveDocumentId();
 
     // Prefer the active raster layer's region so the cleanup is anchored to its
     // footprint; otherwise process the whole-document composite at (0,0).
@@ -124,15 +126,19 @@ export function ReflectionSection() {
     await job.run(req, {
       onArtifact: async (blob, art) => {
         const name = art.placement?.suggestedLayerName ?? "Reflections removed";
-        const id = await engine.loadImageLayer(blob, name);
         // Honor an artifact placement roi first (the backend reports where the
         // cleaned pixels belong — the confined ROI, or whole-image origin);
         // otherwise anchor a layer-sourced result back at its origin.
-        const place = art.placement?.roi;
-        if (place) {
-          engine.setLayerPosition(id, place.x, place.y);
-        } else if (fromLayer) {
-          engine.setLayerPosition(id, originX, originY);
+        const place = art.placement?.roi
+          ? { x: art.placement.roi.x, y: art.placement.roi.y }
+          : fromLayer
+            ? { x: originX, y: originY }
+            : undefined;
+        if (targetDocId) {
+          await engine.placeImageOnDocument(targetDocId, blob, name, place);
+        } else {
+          const id = await engine.loadImageLayer(blob, name);
+          if (place) engine.setLayerPosition(id, place.x, place.y);
         }
       },
     });

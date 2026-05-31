@@ -22,6 +22,9 @@ export function GenerateSection() {
 
   async function onGenerate() {
     if (!prompt.trim() || job.busy) return;
+    // Pin the result to the doc that is active NOW; the user may switch tabs
+    // while the async job runs (placeImageOnDocument drops it if that doc closes).
+    const targetDocId = engine.getActiveDocumentId();
     const size = SIZES[sizeIdx]!;
     const inputs = { prompt: prompt.trim(), width: size.w, height: size.h };
     const key = await idempotencyKey({ capability: "text_to_image", inputs });
@@ -36,7 +39,8 @@ export function GenerateSection() {
         const name =
           art.placement?.suggestedLayerName ??
           (prompt.slice(0, 40).trim() || "AI image");
-        await engine.loadImageLayer(blob, name);
+        if (targetDocId) await engine.placeImageOnDocument(targetDocId, blob, name);
+        else await engine.loadImageLayer(blob, name);
       },
     });
   }

@@ -121,6 +121,12 @@ import {
   estimateDepth,
   type DepthProgress,
 } from "../ai/clientProviders/depthClient";
+import type {
+  DocumentSession,
+  DocumentListEntry,
+  DocumentsSnapshot,
+} from "./DocumentSession";
+export type { DocumentListEntry, DocumentsSnapshot } from "./DocumentSession";
 
 type Listener = () => void;
 
@@ -240,8 +246,14 @@ const IDENTITY_TRANSFORM: TransformState = {
 export class EditorEngine {
   private canvas: HTMLCanvasElement | null = null;
   private renderer: WebGL2Renderer | null = null;
-  readonly doc = new Document();
-  readonly history = new History();
+  /**
+   * The ACTIVE document's model. In multi-document mode this is re-pointed at
+   * the active session's Document on switch (it is never reassigned outside
+   * `switchDocument` + bootstrap). UI panels + serialize.ts read it directly.
+   */
+  doc = new Document();
+  /** The ACTIVE document's undo/redo history (re-pointed on switch). */
+  history = new History();
 
   /** Full blend shader (viewport). */
   private blendProgram: WebGLProgram | null = null;
@@ -360,8 +372,11 @@ export class EditorEngine {
   /** SAM candidate tint-overlay program, compiled in initGL. */
   private maskTintProgram: WebGLProgram | null = null;
 
-  /** Vector-path store (pen tool). CPU-only geometry; never touches GL. */
-  readonly paths = new PathStore();
+  /**
+   * The ACTIVE document's vector-path store (pen tool). CPU-only geometry;
+   * never touches GL. Re-pointed at the active session's PathStore on switch.
+   */
+  paths = new PathStore();
 
   /** GPU textures resolved lazily from the Document's CPU sources. */
   private textures = new Map<LayerId, TextureHandle>();
@@ -491,14 +506,71 @@ export class EditorEngine {
   /** Live shape drag (doc px) for the overlay preview, or null. */
   private liveShape: { kind: ShapeKind; from: { x: number; y: number }; to: { x: number; y: number } } | null = null;
 
+  // ── multi-document sessions ─────────────────────────────
+  /**
+   * All open documents. The active session's `doc`/`history`/`paths` ARE the
+   * engine's `this.doc`/`this.history`/`this.paths` (re-pointed on switch); the
+   * rest of each session's per-doc state is captured/restored onto the engine's
+   * own fields. There is always ≥1 session (the n=1 case is the single-doc
+   * path, byte-identical to the original engine).
+   */
+  private sessions: DocumentSession[] = [];
+  private activeSessionId: string | null = null;
+  private sessionSeq = 0;
+  /** Separate subscribable for the tab bar (emits only on list/active change). */
+  private docListListeners = new Set<Listener>();
+  /** Cached documents snapshot (recomputed only on doc-list change). */
+  private docsSnapshotCache: DocumentsSnapshot = { documents: [], activeDocId: null };
+  /** Unsubscribe handles for the active session's doc/history change listeners. */
+  private _docUnsub: (() => void) | null = null;
+  private _historyUnsub: (() => void) | null = null;
+
+  // Bound model-change handlers (rebound to the active doc/history on switch).
+  private onDocChanged = (): void => {
+    this.snapshotCache = this.doc.snapshot();
+    this.markDirty();
+    this.emit();
+  };
+  private onHistoryChanged = (): void => {
+    this.emit();
+  };
+
   constructor() {
     this.snapshotCache = this.doc.snapshot();
-    this.doc.onChange(() => {
-      this.snapshotCache = this.doc.snapshot();
-      this.markDirty();
-      this.emit();
-    });
-    this.history.onChange(() => this.emit());
+    // Wire the active doc/history change listeners (stored so switchDocument can
+    // detach + reattach when the model fields are re-pointed).
+    this._docUnsub = this.doc.onChange(this.onDocChanged);
+    this._historyUnsub = this.history.onChange(this.onHistoryChanged);
+    // Bootstrap session 0 wrapping the already-constructed doc/history/paths so
+    // the single-document path is literally "the only session".
+    const id = this.nextSessionId();
+    this.sessions = [
+      {
+        id,
+        title: "Untitled",
+        doc: this.doc,
+        history: this.history,
+        paths: this.paths,
+        view: { ...this.view },
+        channelVis: { ...this.channelVis },
+        guides: this.guides,
+        guideSeq: this.guideSeq,
+        grid: { ...this.grid },
+        rulersVisible: this.rulersVisible,
+        snapEnabled: this.snapEnabled,
+        selectionBuffer: null,
+        textRasterVersion: this.textRasterVersion,
+        flatTextPos: this.flatTextPos,
+        fitted: false,
+      },
+    ];
+    this.activeSessionId = id;
+    this.refreshDocsSnapshot();
+  }
+
+  private nextSessionId(): string {
+    this.sessionSeq += 1;
+    return `doc_${this.sessionSeq}`;
   }
 
   // ── lifecycle ───────────────────────────────────────────
@@ -612,6 +684,322 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     this.dirty = true;
   }
 
+  // ════════════════════════════════════════════════════════
+  //  MULTI-DOCUMENT SESSIONS
+  // ════════════════════════════════════════════════════════
+  //
+  // The engine owns ONE canvas + GL context + Renderer + the shared shader
+  // programs, viewport accumulators, Brush/Retouch/Liquify engines, and the
+  // single Selection object. Each open document is a DocumentSession bundling
+  // the CPU-authoritative model (doc/history/paths) + per-doc view/channels/
+  // guides/grid + the selection bytes + CPU text caches. Switching re-points
+  // `this.doc`/`this.history`/`this.paths` and restores the rest; the SHARED GL
+  // objects are never swapped. Textures re-resolve lazily from the retained CPU
+  // sources on the next render (the same proven path as context-loss recovery).
+
+  /** Subscribe to document-list / active-document changes (tab bar). */
+  subscribeDocList(cb: Listener): () => void {
+    this.docListListeners.add(cb);
+    return () => this.docListListeners.delete(cb);
+  }
+  /** The current documents snapshot (referentially stable between changes). */
+  getDocList(): DocumentsSnapshot {
+    return this.docsSnapshotCache;
+  }
+  /** The active document/session id (null only before bootstrap). */
+  getActiveDocumentId(): string | null {
+    return this.activeSessionId;
+  }
+  /** Flat list of open documents for the tab bar. */
+  listDocuments(): DocumentListEntry[] {
+    return this.docsSnapshotCache.documents;
+  }
+
+  private emitDocList(): void {
+    this.refreshDocsSnapshot();
+    for (const cb of this.docListListeners) cb();
+  }
+
+  /** Recompute the cached documents snapshot from the live session list. */
+  private refreshDocsSnapshot(): void {
+    this.docsSnapshotCache = {
+      documents: this.sessions.map((s) => ({
+        id: s.id,
+        name: s.title,
+        width: s.doc.width,
+        height: s.doc.height,
+        active: s.id === this.activeSessionId,
+      })),
+      activeDocId: this.activeSessionId,
+    };
+  }
+
+  private activeSession(): DocumentSession | null {
+    return this.sessions.find((s) => s.id === this.activeSessionId) ?? null;
+  }
+
+  /**
+   * Create a new blank document of the given size, switch to it, and return its
+   * session id. The view fits to screen on first content/show.
+   */
+  newDocument(opts: { width: number; height: number; title?: string }): string {
+    const w = Math.max(1, Math.round(opts.width));
+    const h = Math.max(1, Math.round(opts.height));
+    const id = this.nextSessionId();
+    const session: DocumentSession = {
+      id,
+      title: opts.title ?? "Untitled",
+      doc: new Document(w, h),
+      history: new History(),
+      paths: new PathStore(),
+      view: { scale: 1, tx: 0, ty: 0, rot: 0 },
+      channelVis: { r: true, g: true, b: true, a: true },
+      guides: [],
+      guideSeq: 0,
+      grid: { visible: false, size: 64, subdivisions: 4 },
+      rulersVisible: false,
+      snapEnabled: true,
+      selectionBuffer: null,
+      textRasterVersion: new Map(),
+      flatTextPos: new Map(),
+      fitted: false,
+    };
+    this.sessions.push(session);
+    this.switchDocument(id, { fitOnEnter: true });
+    return id;
+  }
+
+  /**
+   * Open an image as a NEW document (sized to the image), returning the session
+   * id. Reuses the existing single-doc image path verbatim — it just runs
+   * against a freshly-created active session.
+   */
+  async openImageAsDocument(
+    src: Blob | ImageBitmap | ImageData,
+    title?: string,
+  ): Promise<string> {
+    const id = this.newDocument({ width: 1, height: 1, title: title ?? "Untitled" });
+    // loadImageLayer grows the (1x1) doc to the image, adds the raster layer,
+    // and fits to screen since it is the first layer.
+    await this.loadImageLayer(src, title);
+    // The doc grew to the image size — refresh the tab's width/height.
+    this.emitDocList();
+    return id;
+  }
+
+  /**
+   * Open an .aips project as a NEW document, returning the session id. Creates a
+   * blank active session, then runs the existing deserialize path (which rebuilds
+   * `this.doc` in place + calls reloadAfterDeserialize) against it.
+   */
+  async openAipsAsDocument(input: Blob | File | string, title?: string): Promise<string> {
+    const id = this.newDocument({ width: 1, height: 1, title: title ?? "Untitled" });
+    await this.loadProject(input);
+    // The doc was resized to the project's dimensions — refresh the tab.
+    this.emitDocList();
+    return id;
+  }
+
+  /**
+   * Force-resolve any transient GL editing sessions on the OUTGOING document
+   * before a switch. Each holds a layerId of the outgoing doc + temp GL FBOs, so
+   * carrying them across a switch is high-risk; committing/cancelling (the
+   * existing methods, all no-ops when inactive) is safe.
+   */
+  private quiesceActiveDoc(): void {
+    this.cancelTransform();
+    this.cancelCrop();
+    this.endEditText();
+    this.cancelFilter();
+    this.cancelLiquify();
+    this.samCancel();
+    this.cancelLensBlur();
+    this.gesture = { kind: "none" };
+    this.liveGradient = null;
+    this.liveMarquee = null;
+    this.liveShape = null;
+    this.liquifyLast = null;
+  }
+
+  /** Capture the engine's per-doc state into the given (outgoing) session. */
+  private captureSession(s: DocumentSession): void {
+    s.view = { ...this.view };
+    s.channelVis = { ...this.channelVis };
+    s.guides = this.guides;
+    s.guideSeq = this.guideSeq;
+    s.grid = { ...this.grid };
+    s.rulersVisible = this.rulersVisible;
+    s.snapEnabled = this.snapEnabled;
+    s.textRasterVersion = this.textRasterVersion;
+    s.flatTextPos = this.flatTextPos;
+    // Selection → bytes (doc-sized R8, top-down). The Selection FBOs are doc-
+    // sized GL resources tied to the shared context; carry only the bytes.
+    const sel = this.selection;
+    const r = this.renderer;
+    if (sel && r && !sel.isEmpty() && sel.framebuffer) {
+      const { width, height } = sel.size;
+      s.selectionBuffer = r.readR8(sel.framebuffer, 0, 0, width, height);
+    } else {
+      s.selectionBuffer = null;
+    }
+  }
+
+  /**
+   * Delete the active document's resident GL textures / mask / LUT / depth caches
+   * and per-doc preview FBOs (they are keyed by the OUTGOING doc's layer ids).
+   * Mirrors the deletes in handleContextLost but WITHOUT touching the shared
+   * programs / renderer / accumulators / Selection. Must DELETE (not Map.clear)
+   * so closing/switching many docs never leaks GPU memory.
+   */
+  private disposeActiveDocGpu(): void {
+    const r = this.renderer;
+    if (!r) {
+      this.textures.clear();
+      this.maskTextures.clear();
+      this.adjustmentLUTs.clear();
+      this.depthTextures.clear();
+      return;
+    }
+    for (const t of this.textures.values()) r.deleteTexture(t);
+    this.textures.clear();
+    for (const e of this.maskTextures.values()) r.deleteTexture(e.tex);
+    this.maskTextures.clear();
+    for (const e of this.adjustmentLUTs.values()) r.deleteTexture(e.tex);
+    this.adjustmentLUTs.clear();
+    for (const e of this.depthTextures.values()) r.deleteTexture(e.tex);
+    this.depthTextures.clear();
+    if (this.samCandidateTex) {
+      r.deleteTexture(this.samCandidateTex);
+      this.samCandidateTex = null;
+      this.samCandidateTexKey = -1;
+    }
+    if (this.liquifyPreviewFb) {
+      r.deleteFramebuffer(this.liquifyPreviewFb);
+      this.liquifyPreviewFb = null;
+    }
+    if (this.lensBlurPreviewFb) {
+      r.deleteFramebuffer(this.lensBlurPreviewFb);
+      this.lensBlurPreviewFb = null;
+    }
+  }
+
+  /**
+   * Switch the active document to `id`. Quiesces transient sessions, captures
+   * the outgoing per-doc state, disposes its resident GPU, re-points the model
+   * fields + rebinds change listeners, restores the incoming per-doc state +
+   * selection, and re-renders. The canvas/context/renderer are untouched.
+   */
+  switchDocument(id: string, opts?: { fitOnEnter?: boolean }): void {
+    if (id === this.activeSessionId && !opts?.fitOnEnter) return;
+    const next = this.sessions.find((s) => s.id === id);
+    if (!next) return;
+
+    const outgoing = this.activeSession();
+    if (outgoing && outgoing.id !== id) {
+      // A. quiesce transient GL sessions on the outgoing doc.
+      this.quiesceActiveDoc();
+      // B. capture outgoing per-doc state (incl. selection bytes).
+      this.captureSession(outgoing);
+      // C. release the outgoing doc's resident GPU textures (no leaks).
+      this.disposeActiveDocGpu();
+    }
+
+    // D. re-point the model fields + rebind change listeners.
+    this._docUnsub?.();
+    this._historyUnsub?.();
+    this.doc = next.doc;
+    this.history = next.history;
+    this.paths = next.paths;
+    this._docUnsub = this.doc.onChange(this.onDocChanged);
+    this._historyUnsub = this.history.onChange(this.onHistoryChanged);
+    this.view = { ...next.view };
+    this.channelVis = { ...next.channelVis };
+    this.guides = next.guides;
+    this.guideSeq = next.guideSeq;
+    this.grid = { ...next.grid };
+    this.rulersVisible = next.rulersVisible;
+    this.snapEnabled = next.snapEnabled;
+    this.textRasterVersion = next.textRasterVersion;
+    this.flatTextPos = next.flatTextPos;
+    this.activeSessionId = id;
+
+    // E. re-establish the incoming doc's selection (shared object, re-seeded).
+    if (this.selection) {
+      this.selection.resize(this.doc.width, this.doc.height);
+      if (next.selectionBuffer) this.selection.setFromBuffer(next.selectionBuffer);
+      else this.selection.clear();
+    }
+
+    // F. refresh snapshot + render. Textures re-resolve lazily on next render.
+    this.snapshotCache = this.doc.snapshot();
+    if (opts?.fitOnEnter && !next.fitted && this.canvas) {
+      next.fitted = true;
+      this.fitToScreen(); // emits + marks dirty + sets this.view
+    } else {
+      this.markDirty();
+      this.emit();
+    }
+    this.emitDocList();
+  }
+
+  /**
+   * Close a document. If it is the active doc and others remain, switch to a
+   * neighbor first (which disposes the now-old active GPU), then splice. Closing
+   * a non-active doc just drops its CPU model (its GPU was freed when it was last
+   * switched away). Closing the LAST doc replaces it with a fresh blank one so
+   * the "always ≥1 session" invariant (and the never-remounted canvas) holds.
+   */
+  closeDocument(id: string): void {
+    const idx = this.sessions.findIndex((s) => s.id === id);
+    if (idx < 0) return;
+
+    if (this.sessions.length === 1) {
+      // Last document: replace with a fresh blank doc (never zero sessions).
+      const replacement: DocumentSession = {
+        id: this.nextSessionId(),
+        title: "Untitled",
+        doc: new Document(),
+        history: new History(),
+        paths: new PathStore(),
+        view: { scale: 1, tx: 0, ty: 0, rot: 0 },
+        channelVis: { r: true, g: true, b: true, a: true },
+        guides: [],
+        guideSeq: 0,
+        grid: { visible: false, size: 64, subdivisions: 4 },
+        rulersVisible: false,
+        snapEnabled: true,
+        selectionBuffer: null,
+        textRasterVersion: new Map(),
+        flatTextPos: new Map(),
+        fitted: false,
+      };
+      this.sessions.push(replacement);
+      this.switchDocument(replacement.id, { fitOnEnter: true });
+      this.sessions.splice(this.sessions.findIndex((s) => s.id === id), 1);
+      this.emitDocList();
+      return;
+    }
+
+    if (id === this.activeSessionId) {
+      // Switch to a neighbor first so disposeActiveDocGpu frees this doc's GPU.
+      const neighbor = this.sessions[idx + 1] ?? this.sessions[idx - 1];
+      if (neighbor) this.switchDocument(neighbor.id, { fitOnEnter: false });
+    }
+    // The closed (now non-active) doc holds no resident GPU; just drop the CPU
+    // model + history + paths (GC'd) and detach the closed session's history
+    // listener is not needed since only the active session's listeners are wired.
+    this.sessions.splice(this.sessions.findIndex((s) => s.id === id), 1);
+    this.emitDocList();
+  }
+
+  /** Rename a document tab (e.g. after Save As). */
+  setDocumentTitle(id: string, title: string): void {
+    const s = this.sessions.find((x) => x.id === id);
+    if (!s || s.title === title) return;
+    s.title = title;
+    this.emitDocList();
+  }
+
   // ── image loading ───────────────────────────────────────
   async loadImageLayer(
     src: Blob | ImageBitmap | ImageData,
@@ -653,6 +1041,92 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     if (!this.doc.getLayer(id)) return;
     this.doc.setPosition(id, x, y);
     this.markDirty();
+  }
+
+  /**
+   * Place an image as a NEW raster layer onto a SPECIFIC document/session,
+   * identified by the session id captured when an async AI job was STARTED.
+   *
+   * Multi-document safety: AI jobs are async, so the user can switch tabs while a
+   * job is in flight. Naively calling `loadImageLayer` in the job's completion
+   * callback would drop the result onto whatever doc is active THEN — corrupting
+   * an unrelated document. This routes the result to the doc that was active when
+   * the job started:
+   *   - if that doc is STILL the active doc → the normal path (full render +
+   *     selection resize + view fit on first layer);
+   *   - if it is a DIFFERENT still-open doc → the layer is added to that session's
+   *     model + history directly, WITHOUT disturbing the active doc's render,
+   *     selection, or view (only its tab's dimensions refresh);
+   *   - if the target doc was CLOSED → the result is dropped safely (returns null).
+   *
+   * `pos` (optional) places the new layer at an absolute doc position (the AI flow
+   * uses it to drop an inpaint result back at its source ROI).
+   */
+  async placeImageOnDocument(
+    docId: string,
+    src: Blob | ImageBitmap | ImageData,
+    name?: string,
+    pos?: { x: number; y: number },
+  ): Promise<LayerId | null> {
+    // Decode FIRST (no model mutation while awaiting).
+    let bitmap: ImageBitmap | ImageData;
+    if (src instanceof Blob) {
+      bitmap = await createImageBitmap(src, {
+        premultiplyAlpha: "none",
+        colorSpaceConversion: "none",
+      });
+    } else {
+      bitmap = src;
+    }
+
+    // Re-check AFTER the await: the target doc may have been closed, or the user
+    // may have switched away.
+    const target = this.sessions.find((s) => s.id === docId);
+    if (!target) {
+      // The doc was closed mid-job — drop the result safely.
+      if (bitmap instanceof ImageBitmap) bitmap.close?.();
+      return null;
+    }
+
+    if (docId === this.activeSessionId) {
+      // Still active: the normal path (renders, resizes selection, fits first).
+      const id = this.doc.addRasterLayer(bitmap, name);
+      if (this.doc.orderBottomToTop().length === 1) this.fitToScreen();
+      this.selection?.resize(this.doc.width, this.doc.height);
+      this.history.push(
+        paramCommand("Add layer", () => {}, () => this.doc.remove(id)),
+      );
+      if (pos) this.doc.setPosition(id, pos.x, pos.y);
+      this.markDirty();
+      return id;
+    }
+
+    // A DIFFERENT, still-open doc. Mutate ITS model + history directly. Do NOT
+    // touch this.doc / this.selection / this.view / the render loop — the active
+    // doc must keep rendering unchanged. The target's textures resolve lazily the
+    // next time it becomes active (same proven path as a switch).
+    const id = target.doc.addRasterLayer(bitmap, name);
+    if (pos) target.doc.setPosition(id, pos.x, pos.y);
+    target.history.push(
+      paramCommand("Add layer", () => {}, () => target.doc.remove(id)),
+    );
+    // Refresh the tab strip (the background doc may have grown to the image size).
+    this.emitDocList();
+    return id;
+  }
+
+  /**
+   * Position a layer on a SPECIFIC document/session (the multi-document analogue
+   * of `setLayerPosition`). Used by the agent placement path, which splits
+   * "add layer" and "position it" across two calls. No-op (safe) if the doc was
+   * closed or the layer no longer exists. Only marks the active doc dirty when
+   * the target IS the active doc (a background doc needs no re-render).
+   */
+  setLayerPositionForDocument(docId: string, id: LayerId, x: number, y: number): void {
+    const target = this.sessions.find((s) => s.id === docId);
+    if (!target || !target.doc.getLayer(id)) return;
+    target.doc.setPosition(id, x, y);
+    if (docId === this.activeSessionId) this.markDirty();
   }
 
   /**

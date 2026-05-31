@@ -46,6 +46,8 @@ import type {
   SamUiPoint,
   LensBlurParams,
   ChannelVisibility,
+  DocumentListEntry,
+  DocumentsSnapshot,
 } from "../engine/EditorEngine";
 import type { PathDescription, FillRule } from "../engine/Paths";
 
@@ -406,8 +408,81 @@ function lensBlurStateCache(): LensBlurUiState {
   return _lensBlurCache;
 }
 
+// Re-export the documents-snapshot shape for the tab-bar UI.
+export type { DocumentListEntry, DocumentsSnapshot } from "../engine/EditorEngine";
+
+/**
+ * Reactive list of open documents + the active document id (drives the tab
+ * bar). Backed by a SEPARATE subscribable so it only re-renders when the doc
+ * list / active id changes — not on every pixel edit. The cache is a structural-
+ * equality shim mirroring the other hooks so useSyncExternalStore sees a stable
+ * ref.
+ */
+export function useDocuments(): DocumentsSnapshot {
+  return useSyncExternalStore(
+    (cb) => engine.subscribeDocList(cb),
+    () => docListCache(),
+    () => docListCache(),
+  );
+}
+let _docListCache: DocumentsSnapshot = { documents: [], activeDocId: null };
+function docListCache(): DocumentsSnapshot {
+  const next = engine.getDocList();
+  const prev = _docListCache;
+  const same =
+    prev.activeDocId === next.activeDocId &&
+    prev.documents.length === next.documents.length &&
+    prev.documents.every((d, i) => {
+      const n: DocumentListEntry | undefined = next.documents[i];
+      return (
+        !!n &&
+        d.id === n.id &&
+        d.name === n.name &&
+        d.width === n.width &&
+        d.height === n.height &&
+        d.active === n.active
+      );
+    });
+  if (!same) _docListCache = next;
+  return _docListCache;
+}
+
 // Thin action helpers so components don't reach into the engine directly.
 export const actions = {
+  // ── multi-document (tabs) ──
+  /** Create a blank document of the given size and switch to it. */
+  newDocument(opts: { width: number; height: number; title?: string }) {
+    return engine.newDocument(opts);
+  },
+  /** Open an image (Blob/ImageBitmap/ImageData) as a NEW document. */
+  openImageAsDocument(src: Blob | ImageBitmap | ImageData, title?: string) {
+    return engine.openImageAsDocument(src, title);
+  },
+  /** Open an .aips project File/Blob/JSON as a NEW document. */
+  openAipsAsDocument(input: Blob | File | string, title?: string) {
+    return engine.openAipsAsDocument(input, title);
+  },
+  /** Switch the active document to the given session id. */
+  switchDocument(id: string) {
+    engine.switchDocument(id);
+  },
+  /** Close a document tab (the last one is replaced with a fresh blank doc). */
+  closeDocument(id: string) {
+    engine.closeDocument(id);
+  },
+  /** Rename a document tab. */
+  setDocumentTitle(id: string, title: string) {
+    engine.setDocumentTitle(id, title);
+  },
+  /** The active document/session id. */
+  getActiveDocumentId() {
+    return engine.getActiveDocumentId();
+  },
+  /** Flat list of open documents. */
+  listDocuments() {
+    return engine.listDocuments();
+  },
+
   toggleVisible(id: string, visible: boolean) {
     engine.doc.setVisible(id, visible);
   },

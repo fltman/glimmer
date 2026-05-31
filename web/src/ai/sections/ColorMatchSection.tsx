@@ -100,6 +100,8 @@ export function ColorMatchSection() {
 
   async function onRun() {
     if (!canRun || !reference) return;
+    // Pin the result to the doc active at job start (the user may switch tabs).
+    const targetDocId = engine.getActiveDocumentId();
 
     // Prefer the active raster layer's region; otherwise re-grade the whole
     // composite at (0,0).
@@ -141,12 +143,16 @@ export function ColorMatchSection() {
     await job.run(req, {
       onArtifact: async (blob, art) => {
         const name = art.placement?.suggestedLayerName ?? "Color matched";
-        const id = await engine.loadImageLayer(blob, name);
-        const place = art.placement?.roi;
-        if (place) {
-          engine.setLayerPosition(id, place.x, place.y);
-        } else if (sourcedFromLayer) {
-          engine.setLayerPosition(id, originX, originY);
+        const place = art.placement?.roi
+          ? { x: art.placement.roi.x, y: art.placement.roi.y }
+          : sourcedFromLayer
+            ? { x: originX, y: originY }
+            : undefined;
+        if (targetDocId) {
+          await engine.placeImageOnDocument(targetDocId, blob, name, place);
+        } else {
+          const id = await engine.loadImageLayer(blob, name);
+          if (place) engine.setLayerPosition(id, place.x, place.y);
         }
       },
     });
