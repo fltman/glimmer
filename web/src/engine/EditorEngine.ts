@@ -36,6 +36,9 @@ import {
   EFFECT_INNER_FRAG,
   EFFECT_INVERT_OFFSET_FRAG,
   EFFECT_OVER_FRAG,
+  LENS_BLUR_FRAG,
+  DEPTH_VIEW_FRAG,
+  MASK_TINT_FRAG,
 } from "./gl/shaders";
 import {
   Document,
@@ -102,8 +105,39 @@ import {
   type FilterType,
   type FilterParams,
 } from "./filters";
+import {
+  samSetImage,
+  samSegment,
+  type SamPoint,
+  type SamProgress,
+} from "../ai/clientProviders/samClient";
+import {
+  estimateDepth,
+  type DepthProgress,
+} from "../ai/clientProviders/depthClient";
 
 type Listener = () => void;
+
+/** A SAM click point in DOC px + its polarity (engine-facing, like the UI). */
+export interface SamUiPoint {
+  x: number;
+  y: number;
+  positive: boolean;
+}
+
+/** Live AI Lens Blur parameters (all 0..1). */
+export interface LensBlurParams {
+  /** In-focus depth on the near=1 scale (the focal plane). */
+  focus: number;
+  /** Max blur radius as a fraction of a reference size (0 = off, 1 = strong). */
+  amount: number;
+  /** Highlight bokeh bloom strength. */
+  bokeh: number;
+}
+
+const DEFAULT_LENS_BLUR: LensBlurParams = { focus: 0.5, amount: 0.5, bokeh: 0.4 };
+/** Max blur radius (texels) at amount=1, scaled by the layer's larger side. */
+const LENS_BLUR_MAX_RADIUS_FRACTION = 0.06;
 
 interface ViewState {
   /** Document-space px per screen px is 1/scale; scale = zoom factor. */
@@ -237,6 +271,70 @@ export class EditorEngine {
   private liquifyPreviewFb: FramebufferHandle | null = null;
   /** Last pointer position (layer px) during a liquify drag, for the motion vector. */
   private liquifyLast: { x: number; y: number } | null = null;
+
+  // ── SAM "select anything" session ────────────────────────
+  /**
+   * Active SAM session, or null. The image embeddings are computed once (in the
+   * worker) when the session begins for a raster layer; clicks add points and
+   * re-run the cheap decoder. `candidate` is the latest mask (layer-sized R8)
+   * shown as a live tinted overlay until samCommit folds it into the selection.
+   * `imageReady` flips true once the encoder finishes; `busy` guards re-entrancy
+   * while a worker round-trip is in flight. The session is orchestrated here but
+   * the heavy ML runs in the worker (samClient), so the UI never blocks.
+   */
+  private samSession: {
+    layerId: LayerId;
+    /** Layer footprint at session start (clicks map doc→layer px through this). */
+    layerX: number;
+    layerY: number;
+    width: number;
+    height: number;
+    points: SamUiPoint[];
+    /** Latest candidate mask at LAYER resolution (R8, 0/255), or null. */
+    candidate: Uint8Array | null;
+    candidateScore: number;
+    imageReady: boolean;
+    busy: boolean;
+    /** Bumped per segment request; stale replies (older seq) are dropped. */
+    seq: number;
+    /** Worker progress for the UI status (encode/decode/model load). */
+    progress: SamProgress | null;
+    error: string | null;
+  } | null = null;
+  /** GPU R8 texture of the current SAM candidate (rebuilt when it changes). */
+  private samCandidateTex: TextureHandle | null = null;
+  private samCandidateTexKey = -1;
+
+  // ── AI Lens Blur (depth-aware bokeh) session ─────────────
+  /**
+   * Active Lens Blur session, or null. While set, the active raster layer is
+   * composited THROUGH the depth-bokeh shader (preview rendered into
+   * `lensBlurPreviewFb` each frame and substituted). `prevSource` is captured
+   * for the single undo step the commit produces. Params are driven live by the
+   * UI. Depth is computed once (cached by layer source) before the session opens.
+   */
+  private lensBlurSession: {
+    layerId: LayerId;
+    prevSource: ImageBitmap | ImageData;
+    params: LensBlurParams;
+    /** True once the depth map for this layer is uploaded + ready. */
+    depthReady: boolean;
+    progress: DepthProgress | null;
+    error: string | null;
+  } | null = null;
+  /** Layer-sized RGBA8 bokeh-preview buffer (rebuilt per frame while active). */
+  private lensBlurPreviewFb: FramebufferHandle | null = null;
+  /** Cached depth R8 textures keyed by layer id; value tracks the source ref. */
+  private depthTextures = new Map<
+    LayerId,
+    { tex: TextureHandle; source: ImageBitmap | ImageData }
+  >();
+  /** Lens-blur (depth bokeh) program, compiled in initGL. */
+  private lensBlurProgram: WebGLProgram | null = null;
+  /** Depth-map visualization program, compiled in initGL. */
+  private depthViewProgram: WebGLProgram | null = null;
+  /** SAM candidate tint-overlay program, compiled in initGL. */
+  private maskTintProgram: WebGLProgram | null = null;
 
   /** Vector-path store (pen tool). CPU-only geometry; never touches GL. */
   readonly paths = new PathStore();
@@ -434,6 +532,9 @@ export class EditorEngine {
     );
     this.effectOverProgram = this.renderer.compileProgram(QUAD_VERT, EFFECT_OVER_FRAG);
     this.blurProgram = this.renderer.compileProgram(QUAD_VERT, BLUR_FRAG);
+    this.lensBlurProgram = this.renderer.compileProgram(QUAD_VERT, LENS_BLUR_FRAG);
+    this.depthViewProgram = this.renderer.compileProgram(QUAD_VERT, DEPTH_VIEW_FRAG);
+    this.maskTintProgram = this.renderer.compileProgram(QUAD_VERT, MASK_TINT_FRAG);
     this.copyProgram = this.renderer.compileProgram(
       QUAD_VERT,
       /* glsl */ `#version 300 es
@@ -841,6 +942,18 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     this.liquifySession = null;
     this.liquifyPreviewFb = null;
     this.liquifyLast = null;
+    // SAM + Lens Blur GPU resources are lost; drop the sessions/caches. The CPU
+    // candidate mask / depth maps would need re-uploading anyway, and a live
+    // session's preview FBO is gone — close cleanly so the UI dismisses.
+    this.lensBlurProgram = null;
+    this.depthViewProgram = null;
+    this.maskTintProgram = null;
+    this.samCandidateTex = null;
+    this.samCandidateTexKey = -1;
+    this.samSession = null;
+    this.lensBlurSession = null;
+    this.lensBlurPreviewFb = null;
+    this.depthTextures.clear();
   }
   private handleContextRestored(): void {
     this.initGL();
@@ -897,6 +1010,12 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     if (this.liquify && this.liquifySession && this.liquifySession.layerId === id) {
       const warped = this.renderLiquifyPreview(id);
       if (warped) return warped;
+    }
+    // Live AI Lens Blur session: composite the layer THROUGH the depth-bokeh
+    // shader (depth ready). Falls through to the base texture while depth loads.
+    if (this.lensBlurSession && this.lensBlurSession.layerId === id && this.lensBlurSession.depthReady) {
+      const blurred = this.renderLensBlurPreview(id);
+      if (blurred) return blurred;
     }
     // Live retouch stroke: show the in-progress working copy for this layer.
     if (
@@ -1249,6 +1368,62 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     this.renderAnts(bw, bh, pixToClip, view);
     // Live marquee preview outline (rect/ellipse drag).
     this.renderLiveMarquee();
+    // Live SAM candidate mask tint (before commit), drawn over the present pass.
+    this.renderSamCandidate(bw, bh, pixToClip, view);
+  }
+
+  /**
+   * Draw the live SAM candidate mask as a translucent tint + edge band over the
+   * present pass. The candidate is layer-sized R8; it maps into the viewport via
+   * the layer footprint × view transform. Hardware alpha blend into the (RGBA8)
+   * default framebuffer is fine here (the float-FBO blend gotcha doesn't apply).
+   */
+  private renderSamCandidate(
+    bw: number,
+    bh: number,
+    pixToClip: Float32Array,
+    view: Float32Array,
+  ): void {
+    const r = this.renderer;
+    const sess = this.samSession;
+    const prog = this.maskTintProgram;
+    if (!r || !prog || !sess || !sess.candidate) return;
+    const tex = this.ensureSamCandidateTex(sess);
+    if (!tex) return;
+    const gl = r.gl;
+    gl.useProgram(prog);
+    // Layer quad → doc px (offset by layer origin) → viewport.
+    const toDocPx = m3.multiply(
+      m3.translation(sess.layerX, sess.layerY),
+      m3.scaling(sess.width, sess.height),
+    );
+    const transform = m3.multiply(pixToClip, m3.multiply(view, toDocPx));
+    gl.uniformMatrix3fv(gl.getUniformLocation(prog, "u_transform"), false, transform);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_mask"), 0);
+    gl.uniform2f(gl.getUniformLocation(prog, "u_texel"), 1 / sess.width, 1 / sess.height);
+    // A cyan tint reads well over most images.
+    gl.uniform3f(gl.getUniformLocation(prog, "u_tint"), 0.22, 0.72, 1.0);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex.tex);
+    r.drawQuad();
+    gl.disable(gl.BLEND);
+    void bw;
+    void bh;
+  }
+
+  /** Resolve (caching by candidate identity) the SAM candidate as an R8 texture. */
+  private ensureSamCandidateTex(sess: NonNullable<EditorEngine["samSession"]>): TextureHandle | null {
+    const r = this.renderer;
+    if (!r || !sess.candidate) return null;
+    if (this.samCandidateTex && this.samCandidateTexKey === sess.seq) {
+      return this.samCandidateTex;
+    }
+    if (this.samCandidateTex) r.deleteTexture(this.samCandidateTex);
+    this.samCandidateTex = r.createR8Texture(sess.candidate, sess.width, sess.height);
+    this.samCandidateTexKey = sess.seq;
+    return this.samCandidateTex;
   }
 
   // ════════════════════════════════════════════════════════
@@ -2483,6 +2658,20 @@ void main() {
       return;
     }
 
+    // SAM "select anything": plain click = positive point, Alt-click = negative
+    // point. Begins a session lazily on the active raster layer (computes the
+    // image embeddings once, in the worker). Enter/Apply commits the candidate.
+    if (tool === "sam-select") {
+      // Begin the session lazily (kicks off the one-time encode in the worker).
+      if (!this.samSession) this.samBeginOnActiveLayer();
+      // samAddPoint is a no-op until the encoder is ready, so clicks during the
+      // (brief) warm-up are ignored; once ready, each click adds a prompt point
+      // and re-runs the decoder. Alt-click = negative (exclude) point.
+      this.samAddPoint(doc.x, doc.y, !e.altKey);
+      this.gesture = { kind: "none" };
+      return;
+    }
+
     if (tool === "marquee-rect" || tool === "marquee-ellipse") {
       this.gesture = {
         kind: "marquee",
@@ -2823,6 +3012,35 @@ void main() {
       if (e.key === "Escape") {
         e.preventDefault();
         this.cancelLiquify();
+        return;
+      }
+    }
+
+    // Enter commits the SAM candidate into the selection / Esc cancels. Alt held
+    // with Enter could later mean "subtract"; keep it simple: Enter = replace.
+    if (!this.textEditing && this.samSession) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        this.samCommit("replace");
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        this.samCancel();
+        return;
+      }
+    }
+
+    // Enter commits / Esc cancels an active AI Lens Blur session.
+    if (!this.textEditing && this.lensBlurSession) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        this.commitLensBlur();
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        this.cancelLensBlur();
         return;
       }
     }
@@ -3338,6 +3556,652 @@ void main() {
     if (this.liquifyPreviewFb) r.deleteFramebuffer(this.liquifyPreviewFb);
     this.liquifyPreviewFb = r.createRGBA8Target(Math.max(1, w), Math.max(1, h));
     return this.liquifyPreviewFb;
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  SAM — CLICK TO SELECT ANYTHING (client-ML, in a worker)
+  // ════════════════════════════════════════════════════════
+  /**
+   * Begin a SAM "select anything" session on the active (or given) RASTER layer.
+   * Snapshots the layer footprint, ships the layer pixels to the SAM worker to
+   * compute the image embeddings ONCE (off the UI thread), and enters the
+   * session. Clicks (samAddPoint) then re-run the cheap decoder. Returns the
+   * layer id, or null when there's no raster layer to segment.
+   *
+   * The encode runs async in the worker; `isSamActive()` is true immediately and
+   * `getSamState().imageReady` flips once the embeddings are ready. The engine
+   * emits on every state change so the UI status updates live.
+   */
+  samBeginOnActiveLayer(layerId?: LayerId): LayerId | null {
+    const id = layerId ?? this.doc.getActiveLayerId();
+    if (!id) return null;
+    const layer = this.doc.getLayer(id);
+    if (!layer || layer.kind !== "raster") return null;
+    // A live filter/lens-blur/liquify preview would fight the candidate overlay.
+    this.cancelFilter();
+    const data = this.layerSourceToImageData(layer);
+    if (!data) return null;
+
+    this.samSession = {
+      layerId: id,
+      layerX: layer.x,
+      layerY: layer.y,
+      width: layer.width,
+      height: layer.height,
+      points: [],
+      candidate: null,
+      candidateScore: 0,
+      imageReady: false,
+      busy: true,
+      seq: 0,
+      progress: null,
+      error: null,
+    };
+    this.clearSamCandidateTex();
+    this.markDirty();
+    this.emit();
+
+    // Encode in the worker. We capture the session by identity so a stale reply
+    // (after cancel / re-begin) is ignored.
+    const session = this.samSession;
+    void samSetImage(data, (p) => {
+      if (this.samSession !== session) return;
+      session.progress = p;
+      this.emit();
+    })
+      .then(() => {
+        if (this.samSession !== session) return;
+        session.imageReady = true;
+        session.busy = false;
+        session.progress = null;
+        this.emit();
+      })
+      .catch((err: unknown) => {
+        if (this.samSession !== session) return;
+        session.busy = false;
+        session.error = err instanceof Error ? err.message : String(err);
+        this.emit();
+      });
+    return id;
+  }
+
+  isSamActive(): boolean {
+    return !!this.samSession;
+  }
+
+  /** The SAM click points so far (DOC px + polarity), copied for the UI overlay. */
+  getSamPoints(): SamUiPoint[] {
+    return this.samSession ? this.samSession.points.map((p) => ({ ...p })) : [];
+  }
+
+  /**
+   * Reactive SAM session state for the UI: readiness, busy, points, score, and
+   * worker progress / error. Returns null when no session is active.
+   */
+  getSamState(): {
+    layerId: LayerId;
+    imageReady: boolean;
+    busy: boolean;
+    pointCount: number;
+    hasCandidate: boolean;
+    score: number;
+    progress: SamProgress | null;
+    error: string | null;
+  } | null {
+    const s = this.samSession;
+    if (!s) return null;
+    return {
+      layerId: s.layerId,
+      imageReady: s.imageReady,
+      busy: s.busy,
+      pointCount: s.points.length,
+      hasCandidate: !!s.candidate,
+      score: s.candidateScore,
+      progress: s.progress,
+      error: s.error,
+    };
+  }
+
+  /**
+   * Add a SAM prompt point at document (docX,docY). `positive` (plain click)
+   * includes the object; a negative point (Alt-click) excludes it. The point is
+   * converted to layer px and the decoder is re-run in the worker; the resulting
+   * candidate updates the live tinted overlay. No-op outside an active session,
+   * or while the encoder is still warming up.
+   */
+  samAddPoint(docX: number, docY: number, positive: boolean): void {
+    const sess = this.samSession;
+    if (!sess || !sess.imageReady) return;
+    // Clamp the click to the layer footprint (SAM coords are image px).
+    const lx = docX - sess.layerX;
+    const ly = docY - sess.layerY;
+    if (lx < 0 || ly < 0 || lx >= sess.width || ly >= sess.height) return;
+    sess.points.push({ x: docX, y: docY, positive });
+    this.runSamSegment();
+    this.markDirty();
+    this.emit();
+  }
+
+  /**
+   * Drop ALL SAM prompt points + the current candidate WITHOUT re-encoding the
+   * image (the worker keeps the cached embeddings warm), so "Clear points" is
+   * instant. The session stays active and `imageReady`; the next click re-runs
+   * the cheap decoder. No-op outside an active session.
+   */
+  samClearPoints(): void {
+    const sess = this.samSession;
+    if (!sess) return;
+    // Bump seq so any in-flight decode reply for the old points is dropped.
+    sess.seq++;
+    sess.points = [];
+    sess.candidate = null;
+    sess.candidateScore = 0;
+    sess.busy = false;
+    sess.progress = null;
+    this.clearSamCandidateTex();
+    this.markDirty();
+    this.emit();
+  }
+
+  /** Remove the last SAM point and re-run (UI "undo last point"). No-op if none. */
+  samRemoveLastPoint(): void {
+    const sess = this.samSession;
+    if (!sess || !sess.points.length) return;
+    sess.points.pop();
+    if (sess.points.length === 0) {
+      sess.candidate = null;
+      sess.candidateScore = 0;
+      this.clearSamCandidateTex();
+    } else {
+      this.runSamSegment();
+    }
+    this.markDirty();
+    this.emit();
+  }
+
+  /** Re-run the SAM decoder for the current points (drops stale replies). */
+  private runSamSegment(): void {
+    const sess = this.samSession;
+    if (!sess || !sess.imageReady || sess.points.length === 0) return;
+    const seq = ++sess.seq;
+    sess.busy = true;
+    const points: SamPoint[] = sess.points.map((p) => ({
+      x: Math.round(p.x - sess.layerX),
+      y: Math.round(p.y - sess.layerY),
+      label: p.positive ? 1 : 0,
+    }));
+    void samSegment(points, null, (p) => {
+      if (this.samSession !== sess) return;
+      sess.progress = p;
+      this.emit();
+    })
+      .then((res) => {
+        // Drop if the session changed or a newer request superseded this one.
+        if (this.samSession !== sess || seq !== sess.seq) return;
+        // The worker returns a mask at the layer (image) resolution; if SAM's
+        // post-processing rounded the size, resample nearest into the layer box.
+        sess.candidate = this.fitMaskToLayer(res.mask, res.width, res.height, sess.width, sess.height);
+        sess.candidateScore = res.score;
+        sess.busy = false;
+        sess.progress = null;
+        this.clearSamCandidateTex();
+        this.markDirty();
+        this.emit();
+      })
+      .catch((err: unknown) => {
+        if (this.samSession !== sess || seq !== sess.seq) return;
+        sess.busy = false;
+        sess.error = err instanceof Error ? err.message : String(err);
+        this.emit();
+      });
+  }
+
+  /**
+   * The current SAM candidate as a LAYER-sized ImageData (white = selected,
+   * alpha = mask), for a UI overlay. Null when there's no candidate. The
+   * compositor already tints the candidate in-GL; this is the data escape hatch.
+   */
+  samPreviewMask(): ImageData | null {
+    const sess = this.samSession;
+    if (!sess || !sess.candidate) return null;
+    const { width, height, candidate } = sess;
+    const out = new Uint8ClampedArray(width * height * 4);
+    for (let i = 0, p = 0; i < width * height; i++, p += 4) {
+      const v = candidate[i] ?? 0;
+      out[p] = v;
+      out[p + 1] = v;
+      out[p + 2] = v;
+      out[p + 3] = v;
+    }
+    return new ImageData(out, width, height);
+  }
+
+  /**
+   * Commit the current SAM candidate into the document selection via the boolean
+   * `op` (default replace). The layer-sized mask is placed into a doc-sized R8
+   * buffer at the layer origin, then combined through Selection.combineFromBuffer
+   * (so the active op + the tool feather apply). Ends the session.
+   */
+  samCommit(op: SelectionOp = "replace"): void {
+    const sess = this.samSession;
+    const sel = this.selection;
+    if (!sess || !sel || !sess.candidate) {
+      this.endSamSession();
+      return;
+    }
+    const dw = this.doc.width;
+    const dh = this.doc.height;
+    const docMask = new Uint8Array(dw * dh);
+    const ox = Math.round(sess.layerX);
+    const oy = Math.round(sess.layerY);
+    for (let y = 0; y < sess.height; y++) {
+      const docY = oy + y;
+      if (docY < 0 || docY >= dh) continue;
+      const srcRow = y * sess.width;
+      const dstRow = docY * dw;
+      for (let x = 0; x < sess.width; x++) {
+        const docX = ox + x;
+        if (docX < 0 || docX >= dw) continue;
+        docMask[dstRow + docX] = sess.candidate[srcRow + x] ?? 0;
+      }
+    }
+    sel.combineFromBuffer(docMask, op, toolStore.get().feather);
+    this.endSamSession();
+    this.markDirty();
+    this.emit();
+  }
+
+  /** Discard the SAM session without committing (selection unchanged). */
+  samCancel(): void {
+    this.endSamSession();
+    this.markDirty();
+    this.emit();
+  }
+
+  private endSamSession(): void {
+    this.samSession = null;
+    this.clearSamCandidateTex();
+  }
+
+  private clearSamCandidateTex(): void {
+    if (this.samCandidateTex) this.renderer?.deleteTexture(this.samCandidateTex);
+    this.samCandidateTex = null;
+    this.samCandidateTexKey = -1;
+  }
+
+  /**
+   * Resample (nearest) a SAM mask to the layer footprint when the model's
+   * post-processed size differs from the layer dims. Identity-copies when sizes
+   * already match (the common case).
+   */
+  private fitMaskToLayer(
+    mask: Uint8Array,
+    mw: number,
+    mh: number,
+    lw: number,
+    lh: number,
+  ): Uint8Array {
+    if (mw === lw && mh === lh) {
+      const out = new Uint8Array(lw * lh);
+      out.set(mask.subarray(0, lw * lh));
+      return out;
+    }
+    const out = new Uint8Array(lw * lh);
+    for (let y = 0; y < lh; y++) {
+      const sy = Math.min(mh - 1, Math.floor((y / lh) * mh));
+      for (let x = 0; x < lw; x++) {
+        const sx = Math.min(mw - 1, Math.floor((x / lw) * mw));
+        out[y * lw + x] = mask[sy * mw + sx] ?? 0;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Convert a raster layer's CPU source (ImageBitmap | ImageData) to ImageData
+   * for the client-ML providers (SAM / depth). Uses a 2D canvas readback — these
+   * sources are display-sRGB straight-alpha, exactly what the models expect.
+   */
+  private layerSourceToImageData(layer: RasterLayer): ImageData | null {
+    const src = layer.source;
+    if (typeof ImageData !== "undefined" && src instanceof ImageData) return src;
+    const w = layer.width;
+    const h = layer.height;
+    if (w <= 0 || h <= 0) return null;
+    const cv = document.createElement("canvas");
+    cv.width = w;
+    cv.height = h;
+    const ctx = cv.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(src as ImageBitmap, 0, 0);
+    return ctx.getImageData(0, 0, w, h);
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  AI LENS BLUR — DEPTH-AWARE BOKEH (client-ML depth, in a worker)
+  // ════════════════════════════════════════════════════════
+  /**
+   * Compute (or reuse the cached) depth map for a raster layer and upload it as
+   * an R8 texture. The depth estimate runs in the depth worker (off the UI
+   * thread). Cached by layer id + source identity, so re-running it after a
+   * destructive edit recomputes. Returns the cached texture synchronously when
+   * available, else null while the worker is computing (the caller awaits via
+   * the returned promise form below). The async producer is computeDepthAsync.
+   */
+  private depthTextureFor(layerId: LayerId): TextureHandle | null {
+    const layer = this.doc.getLayer(layerId);
+    if (!layer || layer.kind !== "raster") return null;
+    const cached = this.depthTextures.get(layerId);
+    if (cached && cached.source === layer.source) return cached.tex;
+    return null;
+  }
+
+  /**
+   * Ensure a depth map exists for `layerId`, computing it in the worker if the
+   * cache is stale. Resolves once the depth R8 texture is uploaded. Public so
+   * the UI / lens-blur session can `await` it; mirrors the client-ML pattern.
+   */
+  async computeDepth(
+    layerId?: LayerId,
+    onProgress?: (p: DepthProgress) => void,
+  ): Promise<boolean> {
+    const id = layerId ?? this.doc.getActiveLayerId();
+    if (!id) return false;
+    const layer = this.doc.getLayer(id);
+    const r = this.renderer;
+    if (!layer || layer.kind !== "raster" || !r) return false;
+    const cached = this.depthTextures.get(id);
+    if (cached && cached.source === layer.source) return true;
+    const data = this.layerSourceToImageData(layer);
+    if (!data) return false;
+    const { depth, width, height } = await estimateDepth(data, onProgress);
+    // The layer may have changed while we computed; re-check before uploading.
+    const live = this.doc.getLayer(id);
+    if (!live || live.kind !== "raster") return false;
+    // depth is top-down (image rows); upload as an R8 texture (row 0 = layer top
+    // = v_uv.y 0 in the bokeh shader's fullscreen quad, matching the layer tex).
+    const tex = r.createR8Texture(depth, width, height);
+    const prev = this.depthTextures.get(id);
+    if (prev) r.deleteTexture(prev.tex);
+    this.depthTextures.set(id, { tex, source: live.source });
+    this.markDirty();
+    return true;
+  }
+
+  /**
+   * Begin an AI Lens Blur session on the active (or given) raster layer. Ensures
+   * the depth map is computed (in the worker), seeds default params, and enters
+   * the session. The live preview composites the layer through the depth-bokeh
+   * shader once depth is ready. Returns the layer id (the session opens
+   * immediately; `getLensBlurState().depthReady` flips when depth arrives), or
+   * null when there's no raster layer.
+   */
+  beginLensBlur(layerId?: LayerId): LayerId | null {
+    const id = layerId ?? this.doc.getActiveLayerId();
+    if (!id) return null;
+    const layer = this.doc.getLayer(id);
+    if (!layer || layer.kind !== "raster") return null;
+    this.cancelFilter();
+
+    this.lensBlurSession = {
+      layerId: id,
+      prevSource: layer.source,
+      params: { ...DEFAULT_LENS_BLUR },
+      depthReady: this.depthTextureFor(id) !== null,
+      progress: null,
+      error: null,
+    };
+    this.markDirty();
+    this.emit();
+
+    const session = this.lensBlurSession;
+    if (!session.depthReady) {
+      void this.computeDepth(id, (p) => {
+        if (this.lensBlurSession !== session) return;
+        session.progress = p;
+        this.emit();
+      })
+        .then((ok) => {
+          if (this.lensBlurSession !== session) return;
+          session.depthReady = ok;
+          session.progress = null;
+          if (!ok) session.error = "Depth estimation failed.";
+          this.markDirty();
+          this.emit();
+        })
+        .catch((err: unknown) => {
+          if (this.lensBlurSession !== session) return;
+          session.error = err instanceof Error ? err.message : String(err);
+          this.emit();
+        });
+    }
+    return id;
+  }
+
+  isLensBlurActive(): boolean {
+    return !!this.lensBlurSession;
+  }
+
+  /** Current Lens Blur params (copied), or defaults when no session. */
+  getLensBlurParams(): LensBlurParams {
+    return this.lensBlurSession ? { ...this.lensBlurSession.params } : { ...DEFAULT_LENS_BLUR };
+  }
+
+  /** Live-update Lens Blur params (re-renders the preview). No-op without a session. */
+  setLensBlurParams(patch: Partial<LensBlurParams>): void {
+    const sess = this.lensBlurSession;
+    if (!sess) return;
+    sess.params = {
+      focus: clamp01(patch.focus ?? sess.params.focus),
+      amount: clamp01(patch.amount ?? sess.params.amount),
+      bokeh: clamp01(patch.bokeh ?? sess.params.bokeh),
+    };
+    this.markDirty();
+    this.emit();
+  }
+
+  /**
+   * Reactive Lens Blur state for the UI panel: readiness, params, worker
+   * progress / error. Returns null when no session is active.
+   */
+  getLensBlurState(): {
+    layerId: LayerId;
+    depthReady: boolean;
+    params: LensBlurParams;
+    progress: DepthProgress | null;
+    error: string | null;
+  } | null {
+    const s = this.lensBlurSession;
+    if (!s) return null;
+    return {
+      layerId: s.layerId,
+      depthReady: s.depthReady,
+      params: { ...s.params },
+      progress: s.progress,
+      error: s.error,
+    };
+  }
+
+  /**
+   * Render the active-session layer through the depth-bokeh shader into a
+   * layer-sized RGBA8 buffer (straight-alpha display-sRGB, srgb:false — decoded
+   * in-shader downstream like the filter/liquify previews). Rebuilt each frame;
+   * returns the buffer's color texture, or null when not ready.
+   */
+  private renderLensBlurPreview(id: LayerId): TextureHandle | null {
+    const r = this.renderer;
+    const prog = this.lensBlurProgram;
+    const sess = this.lensBlurSession;
+    if (!r || !prog || !sess) return null;
+    const layer = this.doc.getLayer(id);
+    if (!layer || layer.kind !== "raster") return null;
+    const depth = this.depthTextureFor(id);
+    const tex = this.resolveTexture(id);
+    if (!depth || !tex) return null;
+    const fb = this.ensureLensBlurPreviewFb(layer.width, layer.height);
+    if (!fb) return null;
+    this.runLensBlurPass(fb, tex, depth, layer.width, layer.height, sess.params);
+    return fb.color;
+  }
+
+  /** One depth-bokeh pass: layer tex + depth → an RGBA8 target (straight sRGB). */
+  private runLensBlurPass(
+    dst: FramebufferHandle,
+    layerTex: TextureHandle,
+    depthTex: TextureHandle,
+    w: number,
+    h: number,
+    params: LensBlurParams,
+  ): void {
+    const r = this.renderer!;
+    const prog = this.lensBlurProgram!;
+    const gl = r.gl;
+    const maxRadius = params.amount * Math.max(w, h) * LENS_BLUR_MAX_RADIUS_FRACTION;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
+    gl.viewport(0, 0, w, h);
+    gl.disable(gl.BLEND);
+    gl.useProgram(prog);
+    gl.uniformMatrix3fv(
+      gl.getUniformLocation(prog, "u_transform"),
+      false,
+      new Float32Array([2, 0, 0, 0, 2, 0, -1, -1, 1]),
+    );
+    gl.uniform1i(gl.getUniformLocation(prog, "u_src"), 0);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_depth"), 1);
+    gl.uniform2f(gl.getUniformLocation(prog, "u_texel"), 1 / w, 1 / h);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_decodeSrc"), layerTex.srgb ? 1 : 0);
+    gl.uniform1f(gl.getUniformLocation(prog, "u_focus"), params.focus);
+    gl.uniform1f(gl.getUniformLocation(prog, "u_maxRadius"), maxRadius);
+    gl.uniform1f(gl.getUniformLocation(prog, "u_bokeh"), params.bokeh);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, layerTex.tex);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, depthTex.tex);
+    r.drawQuad();
+  }
+
+  private ensureLensBlurPreviewFb(w: number, h: number): FramebufferHandle | null {
+    const r = this.renderer;
+    if (!r) return null;
+    if (
+      this.lensBlurPreviewFb &&
+      this.lensBlurPreviewFb.width === w &&
+      this.lensBlurPreviewFb.height === h
+    ) {
+      return this.lensBlurPreviewFb;
+    }
+    if (this.lensBlurPreviewFb) r.deleteFramebuffer(this.lensBlurPreviewFb);
+    this.lensBlurPreviewFb = r.createRGBA8Target(Math.max(1, w), Math.max(1, h));
+    return this.lensBlurPreviewFb;
+  }
+
+  /**
+   * Commit the Lens Blur as a destructive edit: render the depth-bokeh pass into
+   * a layer-sized RGBA8 target, read it back, replaceSource — ONE undo step.
+   * No-op (just closes) when depth never finished or amount is ~0.
+   */
+  commitLensBlur(): void {
+    const r = this.renderer;
+    const sess = this.lensBlurSession;
+    if (!r || !sess) {
+      this.endLensBlurSession();
+      return;
+    }
+    const layer = this.doc.getLayer(sess.layerId);
+    const depth = this.depthTextureFor(sess.layerId);
+    const tex = this.resolveTexture(sess.layerId);
+    if (!layer || layer.kind !== "raster" || !depth || !tex || sess.params.amount <= 0) {
+      this.endLensBlurSession();
+      this.markDirty();
+      this.emit();
+      return;
+    }
+    const target = r.createRGBA8Target(layer.width, layer.height);
+    this.runLensBlurPass(target, tex, depth, layer.width, layer.height, sess.params);
+    const rawPx = r.readPixels(target, 0, 0, layer.width, layer.height);
+    r.deleteFramebuffer(target);
+
+    const newSource = rawToImageData(rawPx, layer.width, layer.height);
+    const prevSource = sess.prevSource;
+    const id = layer.id;
+    const apply = () => {
+      this.doc.replaceSource(id, newSource);
+      this.textures.delete(id);
+      // The depth map describes the SHARP layer; keep it (commit doesn't move
+      // geometry), but invalidate the cache key so a re-open recomputes against
+      // the new (blurred) source rather than reusing stale depth.
+      this.depthTextures.delete(id);
+    };
+    const revert = () => {
+      this.doc.replaceSource(id, prevSource);
+      this.textures.delete(id);
+      this.depthTextures.delete(id);
+    };
+    apply();
+    this.history.push({
+      label: "AI Lens Blur",
+      bytes: layer.width * layer.height * 4,
+      undo: revert,
+      redo: apply,
+    });
+    this.endLensBlurSession();
+    this.markDirty();
+    this.emit();
+  }
+
+  /** Discard the Lens Blur session (the layer is unchanged). */
+  cancelLensBlur(): void {
+    this.endLensBlurSession();
+    this.markDirty();
+    this.emit();
+  }
+
+  private endLensBlurSession(): void {
+    this.lensBlurSession = null;
+    if (this.lensBlurPreviewFb) {
+      this.renderer?.deleteFramebuffer(this.lensBlurPreviewFb);
+      this.lensBlurPreviewFb = null;
+    }
+  }
+
+  /**
+   * Depth map for a layer as a grayscale RGBA PNG Blob (near = bright), for a
+   * "view depth" affordance. Computes depth first if not cached. Returns null
+   * when there's no raster layer / renderer.
+   */
+  async getDepthPreview(layerId?: LayerId): Promise<Blob | null> {
+    const id = layerId ?? this.doc.getActiveLayerId();
+    const r = this.renderer;
+    if (!id || !r || !this.depthViewProgram) return null;
+    const layer = this.doc.getLayer(id);
+    if (!layer || layer.kind !== "raster") return null;
+    const ok = await this.computeDepth(id);
+    const depth = ok ? this.depthTextureFor(id) : null;
+    if (!depth) return null;
+    const gl = r.gl;
+    const w = layer.width;
+    const h = layer.height;
+    const target = r.createRGBA8Target(w, h);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+    gl.viewport(0, 0, w, h);
+    gl.disable(gl.BLEND);
+    gl.useProgram(this.depthViewProgram);
+    gl.uniformMatrix3fv(
+      gl.getUniformLocation(this.depthViewProgram, "u_transform"),
+      false,
+      new Float32Array([2, 0, 0, 0, 2, 0, -1, -1, 1]),
+    );
+    gl.uniform1i(gl.getUniformLocation(this.depthViewProgram, "u_depth"), 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, depth.tex);
+    r.drawQuad();
+    const raw = r.readPixels(target, 0, 0, w, h);
+    r.deleteFramebuffer(target);
+    // The depth texture's row 0 is image-top and the fullscreen quad samples
+    // v_uv directly (no flip), so framebuffer row 0 = top → copy straight.
+    const out = new Uint8ClampedArray(w * h * 4);
+    out.set(raw.subarray(0, w * h * 4));
+    return encodePng(out, w, h);
   }
 
   // ════════════════════════════════════════════════════════
@@ -6292,6 +7156,10 @@ function antialiasMaskEdge(mask: Uint8Array, w: number, h: number): void {
       mask[i] = Math.round((c + l + rr + u + d) / 5);
     }
   }
+}
+
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
 function linearToSrgb(c: number): number {

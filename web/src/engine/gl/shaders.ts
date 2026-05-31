@@ -1190,3 +1190,135 @@ void main() {
   }
 }
 `;
+
+/**
+ * AI Lens Blur — depth-aware BOKEH blur.
+ *
+ * A single-pass disc-scatter blur whose per-pixel radius is driven by the
+ * estimated depth map: pixels at the in-focus depth stay sharp; pixels whose
+ * normalized depth differs from `u_focus` get blurred by up to `u_maxRadius`
+ * texels (scaled by |depth - focus|). The accumulation is done in LINEAR light
+ * with a highlight boost so bright out-of-focus points bloom into round bokeh
+ * discs (the hallmark of a real lens), then re-encoded.
+ *
+ * Convention: depth texture R channel is 0..1 with NEAR = 1 (bright), FAR = 0
+ * (matching depthClient). `u_focus` 0..1 is the in-focus depth on that scale.
+ *
+ * Encoding mirrors the destructive-filter convention (F_HEADER): pass reads the
+ * layer texture (u_decodeSrc=true → SRGB8 sampler already decoded to linear, so
+ * we keep linear) or an RGBA8 display-sRGB byte texture (u_decodeSrc=false →
+ * decode here), accumulates in linear, and writes straight-alpha DISPLAY-sRGB.
+ */
+export const LENS_BLUR_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_src;     // layer / previous-pass color
+uniform sampler2D u_depth;   // R8 depth, near = 1
+uniform vec2  u_texel;       // 1/width, 1/height
+uniform bool  u_decodeSrc;   // true when u_src is an SRGB8 sampler (linear out)
+uniform float u_focus;       // in-focus depth 0..1 (near = 1)
+uniform float u_maxRadius;   // max blur radius in texels
+uniform float u_bokeh;       // highlight bloom strength 0..1
+
+vec3 srgbToLinear(vec3 c){return mix(c/12.92, pow((c+0.055)/1.055, vec3(2.4)), step(0.04045,c));}
+vec3 linearToSrgb(vec3 c){return mix(c*12.92, 1.055*pow(c, vec3(1.0/2.4))-0.055, step(0.0031308,c));}
+
+// Resolve a sampled texel to LINEAR straight-alpha rgb.
+vec4 srcLinear(vec2 uv){
+  vec4 c = texture(u_src, uv);
+  vec3 lin = u_decodeSrc ? c.rgb : srgbToLinear(c.rgb);
+  return vec4(lin, c.a);
+}
+
+void main(){
+  float centerDepth = texture(u_depth, v_uv).r;
+  // Circle of confusion: how far this pixel is from the focal plane.
+  float coc = abs(centerDepth - u_focus);
+  float radius = coc * u_maxRadius;
+
+  vec4 center = srcLinear(v_uv);
+  if (radius < 0.75) {
+    // Sharp: pass through unchanged (re-encode to display sRGB straight).
+    fragColor = vec4(linearToSrgb(center.rgb), center.a);
+    return;
+  }
+
+  // Disc scatter over a fixed sample budget on a sunflower (golden-angle)
+  // spiral — even coverage without banding. Highlights (bright linear values)
+  // are weighted up so they bloom into bokeh discs.
+  const int SAMPLES = 48;
+  const float GOLDEN = 2.39996323;
+  vec3 accum = vec3(0.0);
+  float aAccum = 0.0;
+  float wsum = 0.0;
+  for (int i = 0; i < SAMPLES; i++){
+    float fi = float(i);
+    float r = sqrt((fi + 0.5) / float(SAMPLES)) * radius;
+    float ang = fi * GOLDEN;
+    vec2 off = vec2(cos(ang), sin(ang)) * r * u_texel;
+    vec2 uv = v_uv + off;
+    vec4 s = srcLinear(uv);
+    // Depth-respecting gather: only let samples that are NOT sharply in front
+    // contribute, so a focused foreground edge doesn't bleed onto a blurred
+    // background. Samples nearer the camera than the center by a lot are
+    // down-weighted (prevents focused subject leaking outwards).
+    float sDepth = texture(u_depth, uv).r;
+    float occl = 1.0 - clamp((sDepth - centerDepth) * 4.0, 0.0, 1.0);
+    float lum = dot(s.rgb, vec3(0.2126, 0.7152, 0.0722));
+    float hl = 1.0 + u_bokeh * 6.0 * smoothstep(0.6, 1.0, lum);
+    float w = s.a * occl * hl;
+    accum += s.rgb * w;
+    aAccum += s.a * occl;
+    wsum += w;
+  }
+  vec3 outRgb = wsum > 0.0 ? accum / wsum : center.rgb;
+  float outA = float(SAMPLES) > 0.0 ? aAccum / float(SAMPLES) : center.a;
+  // Keep the original coverage near opaque centers stable.
+  outA = mix(center.a, outA, clamp(radius / max(u_maxRadius, 1.0), 0.0, 1.0));
+  fragColor = vec4(linearToSrgb(outRgb), outA);
+}
+`;
+
+/**
+ * SAM candidate overlay — samples an R8 mask (the live SAM candidate) and draws
+ * a translucent tint where the mask is set, plus a crisp 1px edge band so the
+ * candidate reads clearly over the image before it is committed. Drawn over the
+ * present pass into the (RGBA8) default framebuffer with hardware alpha blend.
+ */
+export const MASK_TINT_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_mask;   // R8 candidate (row 0 = layer/doc top)
+uniform vec2 u_texel;       // 1/maskW, 1/maskH
+uniform vec3 u_tint;        // overlay color (straight sRGB; FBO is sRGB-encoded)
+void main(){
+  float m = texture(u_mask, v_uv).r;
+  // Edge detect via 4-neighbour gradient for a brighter rim.
+  float l = texture(u_mask, v_uv + vec2(-u_texel.x, 0.0)).r;
+  float r = texture(u_mask, v_uv + vec2( u_texel.x, 0.0)).r;
+  float u = texture(u_mask, v_uv + vec2(0.0, -u_texel.y)).r;
+  float d = texture(u_mask, v_uv + vec2(0.0,  u_texel.y)).r;
+  float edge = clamp(abs(m - l) + abs(m - r) + abs(m - u) + abs(m - d), 0.0, 1.0);
+  float fill = m * 0.4;
+  float a = max(fill, edge * 0.9);
+  fragColor = vec4(u_tint, a);
+}
+`;
+
+/**
+ * Depth-map visualization blit — samples the R8 depth texture and writes it as
+ * a grayscale RGBA8 (near = bright). Used by getDepthPreview() / a "view depth"
+ * affordance. The fullscreen quad samples v_uv directly (no Y flip).
+ */
+export const DEPTH_VIEW_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_depth;
+void main(){
+  float d = texture(u_depth, v_uv).r;
+  fragColor = vec4(d, d, d, 1.0);
+}
+`;

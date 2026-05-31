@@ -35,6 +35,8 @@ export const TOOLS: ToolDef[] = [
   { id: "marquee-ellipse", glyph: "◯", label: "Ellipse marquee", key: "M", group: 1 },
   { id: "lasso", glyph: "✑", label: "Lasso", key: "L", group: 1 },
   { id: "magic-wand", glyph: "✶", label: "Magic wand", key: "W", group: 1 },
+  // AI "Select Anything" (SAM, runs in-browser). Click an object to select it.
+  { id: "sam-select", glyph: "👆", label: "Magic Select — click a subject (AI)", key: "A", group: 1 },
   { id: "crop", glyph: "⌗", label: "Crop", key: "C", group: 2 },
   { id: "transform", glyph: "⤢", label: "Free transform", key: "T", group: 2 },
   { id: "brush", glyph: "🖌", label: "Brush", key: "B", group: 3 },
@@ -93,6 +95,16 @@ function selectTool(id: ToolId): void {
   if (id === "crop") {
     actions.setActiveTool("crop");
     actions.beginCrop();
+    return;
+  }
+  if (id === "sam-select") {
+    // Selecting the AI "Magic Select" tool eagerly begins a SAM session so the
+    // model starts downloading + the image gets encoded right away (the options
+    // bar then shows the loading progress). The engine also begins lazily on the
+    // first canvas click, so re-begin is a no-op when already active; we only
+    // kick it off when there isn't already a live session.
+    actions.setActiveTool("sam-select");
+    if (!actions.isSamActive()) actions.samBeginOnActiveLayer();
     return;
   }
   toolStore.setActive(id);

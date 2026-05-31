@@ -16,6 +16,8 @@ export type ToolId =
   | "marquee-ellipse"
   | "lasso"
   | "magic-wand"
+  // ── AI client-ML selection: click-to-select-anything (SAM) ──
+  | "sam-select"
   | "hand"
   | "eyedropper"
   | "bucket"
@@ -437,6 +439,14 @@ export function isPatternStampTool(t: ToolId): boolean {
 /** True for the marquee/lasso selection tools. */
 export function isSelectionTool(t: ToolId): boolean {
   return t === "marquee-rect" || t === "marquee-ellipse" || t === "lasso";
+}
+
+/**
+ * True for the SAM "select anything" tool. The UI should render a CROSSHAIR
+ * cursor for it (the UI agent must add the entry to CanvasHost's CURSORS map).
+ */
+export function isSamSelectTool(t: ToolId): boolean {
+  return t === "sam-select";
 }
 
 /** Resolve the boolean op from keyboard modifiers on a pointerdown. */

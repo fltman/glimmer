@@ -28,6 +28,7 @@ import {
   engine,
   useEngineSnapshot,
   useGradientParams,
+  useSamState,
   useViewExtras,
 } from "../state/useEngine";
 import { ColorPicker } from "./color/ColorPicker";
@@ -614,6 +615,100 @@ function MagicWandBar() {
         </button>
         <button className="btn" onClick={() => actions.clearSelection()}>
           Deselect
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A tiny inline spinner matching the client-ML progress style — a thin accent
+ * ring that rotates. Used in the SAM option bar while the model loads / runs.
+ */
+function Spinner() {
+  return (
+    <span
+      aria-hidden
+      className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-edge border-t-accent"
+    />
+  );
+}
+
+/**
+ * SAM "Magic Select" (Select Anything) option bar. The heavy lifting runs in a
+ * Web Worker (SlimSAM via transformers.js, WebGPU → WASM); this bar is purely a
+ * reactive readout + commit/cancel controls. It reads useSamState() (active /
+ * imageReady / busy / points / candidate / status / error) and drives the engine
+ * SAM session — it never touches pixels.
+ *
+ * Flow: picking the tool begins the session (model loads + image is encoded
+ * once). Clicking the canvas adds a positive point; Alt-click subtracts. The
+ * engine renders a live tinted candidate overlay in GL, so this bar only needs
+ * to report status and offer Apply (fold the candidate into the selection),
+ * Clear points (restart the prompt without re-encoding) and Cancel.
+ */
+function SamSelectBar() {
+  const sam = useSamState();
+
+  // Status line, in priority order: error → model/encode loading → segmenting →
+  // ready-with-candidate → ready-waiting-for-a-click → cold (not begun yet).
+  let status: string;
+  if (sam.error) {
+    status = `Couldn't load the model — ${sam.error}`;
+  } else if (sam.status) {
+    // "Loading model…" / "Analyzing image…" / "Segmenting…" from the worker.
+    status = sam.status;
+  } else if (!sam.active || !sam.imageReady) {
+    status = "Preparing — pick a layer, then click the subject";
+  } else if (sam.hasCandidate) {
+    status = `Selection ready (${Math.round(sam.score * 100)}% match) · Enter to apply`;
+  } else {
+    status = "Click an object · Alt-click to subtract a region";
+  }
+
+  const loading = !sam.error && (!!sam.status || (sam.active && !sam.imageReady));
+  const hasPoints = sam.points.length > 0;
+
+  return (
+    <div className="flex items-center gap-3">
+      {/* Status + spinner while the model loads or the worker is running. */}
+      <span className="flex items-center gap-2 text-[11px]">
+        {(loading || sam.busy) && <Spinner />}
+        <span className={sam.error ? "text-amber-400" : "text-muted"}>
+          {status}
+        </span>
+      </span>
+
+      <span className="text-[11px] text-muted">
+        Click add · Alt-click subtract
+      </span>
+
+      <div className="ml-auto flex items-center gap-2">
+        <button
+          className="btn-accent"
+          // Apply needs a candidate; replace the selection with it.
+          disabled={!sam.hasCandidate}
+          title="Turn the highlighted region into the active selection"
+          onClick={() => actions.samCommit("replace")}
+        >
+          Apply
+        </button>
+        <button
+          className="btn"
+          // Drop the clicked points + candidate WITHOUT re-encoding (the worker
+          // keeps the image embeddings warm), so this is instant.
+          disabled={!hasPoints}
+          title="Discard the clicked points and start over"
+          onClick={() => actions.samClearPoints()}
+        >
+          Clear points
+        </button>
+        <button
+          className="btn"
+          title="Cancel — leave the current selection unchanged"
+          onClick={() => actions.samCancel()}
+        >
+          Cancel
         </button>
       </div>
     </div>
@@ -1353,8 +1448,9 @@ export function ToolOptions() {
       {active === "shape" && <ShapeBar />}
       {active === "pen" && <PenBar />}
 
-      {/* Magic wand + retouch brushes. */}
+      {/* Magic wand + AI Magic Select + retouch brushes. */}
       {active === "magic-wand" && <MagicWandBar />}
+      {active === "sam-select" && <SamSelectBar />}
       {active === "clone" && <CloneBar heal={false} />}
       {active === "heal" && <CloneBar heal={true} />}
       {active === "dodge" && <DodgeBurnBar burn={false} />}

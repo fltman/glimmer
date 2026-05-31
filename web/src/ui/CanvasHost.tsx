@@ -25,6 +25,7 @@ const CURSORS: Record<ToolId, string> = {
   "marquee-ellipse": "crosshair",
   lasso: "crosshair",
   "magic-wand": "crosshair",
+  "sam-select": "crosshair",
   hand: "grab",
   eyedropper: "crosshair",
   bucket: "crosshair",
@@ -92,6 +93,10 @@ function CanvasOverlay() {
   const liveGuide = engine.getLiveGuide();
   const activePath = engine.getActivePath();
   const committedPaths = engine.getPaths();
+  // SAM "Magic Select" prompt points (doc px + polarity). The engine renders the
+  // candidate mask itself as a tinted GL overlay; here we only draw the click
+  // markers so the user can see what they pointed at. Empty until a click lands.
+  const samPoints = engine.getSamPoints();
   const doc = engine.getSnapshot();
 
   return (
@@ -117,6 +122,9 @@ function CanvasOverlay() {
         {crop && <CropOverlay crop={crop} />}
         {transform && <TransformOverlay st={transform} />}
         {shape && <ShapePreview shape={shape} toScreen={toScreen} />}
+        {samPoints.length > 0 && (
+          <SamPointsOverlay points={samPoints} toScreen={toScreen} />
+        )}
       </svg>
 
       {/* Interactive layer: ruler strips (drag = new guide) + guide hit-lines. */}
@@ -361,6 +369,44 @@ function ShapePreview({
     <ellipse cx={x + w / 2} cy={y + h / 2} rx={w / 2} ry={h / 2} {...common} />
   ) : (
     <rect x={x} y={y} width={w} height={h} {...common} />
+  );
+}
+
+/**
+ * SAM "Magic Select" click markers: a green ring for positive (include) points
+ * and a red ring for negative (Alt-click → exclude) points, with a small +/−
+ * glyph. Coordinates come from the engine in doc px and are mapped to screen.
+ * The candidate selection itself is drawn by the engine as a GL tint overlay, so
+ * these markers are the only thing this React overlay contributes for SAM.
+ */
+function SamPointsOverlay({
+  points,
+  toScreen,
+}: {
+  points: ReturnType<typeof engine.getSamPoints>;
+  toScreen: ToScreen;
+}) {
+  const POS = "#22c55e"; // green (include)
+  const NEG = "#ef4444"; // red (exclude)
+  return (
+    <g>
+      {points.map((p, i) => {
+        const [sx, sy] = toScreen(p.x, p.y);
+        const color = p.positive ? POS : NEG;
+        return (
+          <g key={i}>
+            {/* Dark halo so the marker reads over any image content. */}
+            <circle cx={sx} cy={sy} r={6} fill="none" stroke="black" strokeWidth={3} strokeOpacity={0.45} />
+            <circle cx={sx} cy={sy} r={6} fill="rgba(0,0,0,0.25)" stroke={color} strokeWidth={2} />
+            {/* +/− glyph centred in the ring. */}
+            <line x1={sx - 2.6} y1={sy} x2={sx + 2.6} y2={sy} stroke="white" strokeWidth={1.4} />
+            {p.positive && (
+              <line x1={sx} y1={sy - 2.6} x2={sx} y2={sy + 2.6} stroke="white" strokeWidth={1.4} />
+            )}
+          </g>
+        );
+      })}
+    </g>
   );
 }
 

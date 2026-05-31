@@ -40,6 +40,8 @@ import type {
   TransformState,
   Guide,
   GridState,
+  SamUiPoint,
+  LensBlurParams,
 } from "../engine/EditorEngine";
 import type { PathDescription, FillRule } from "../engine/Paths";
 
@@ -225,6 +227,133 @@ function liquifyStateCache() {
     prev.brush.pressure === brush.pressure;
   if (!same) _liquifyCache = { active, mode, brush };
   return _liquifyCache;
+}
+
+/**
+ * Reactive SAM "select anything" session state for the UI: whether a session is
+ * active, encode/decode readiness + busy, click points, candidate score, and
+ * worker progress / error. The engine emits on every change.
+ */
+type SamUiState = {
+  active: boolean;
+  imageReady: boolean;
+  busy: boolean;
+  points: SamUiPoint[];
+  hasCandidate: boolean;
+  score: number;
+  /** Coarse status label for the model-loading / running phases. */
+  status: string | null;
+  error: string | null;
+};
+export function useSamState(): SamUiState {
+  return useSyncExternalStore(
+    (cb) => engine.subscribe(cb),
+    () => samStateCache(),
+    () => samStateCache(),
+  );
+}
+let _samCache: SamUiState = {
+  active: false,
+  imageReady: false,
+  busy: false,
+  points: [],
+  hasCandidate: false,
+  score: 0,
+  status: null,
+  error: null,
+};
+function samStateCache(): SamUiState {
+  const s = engine.getSamState();
+  const points = engine.getSamPoints();
+  const next: SamUiState = s
+    ? {
+        active: true,
+        imageReady: s.imageReady,
+        busy: s.busy,
+        points,
+        hasCandidate: s.hasCandidate,
+        score: s.score,
+        status: s.progress
+          ? s.progress.stage === "loading_model"
+            ? "Loading model…"
+            : s.progress.stage === "encoding"
+              ? "Analyzing image…"
+              : "Segmenting…"
+          : null,
+        error: s.error,
+      }
+    : { active: false, imageReady: false, busy: false, points: [], hasCandidate: false, score: 0, status: null, error: null };
+  const prev = _samCache;
+  const pointsSame =
+    prev.points.length === next.points.length &&
+    prev.points.every((p, i) => {
+      const n = next.points[i];
+      return n && p.x === n.x && p.y === n.y && p.positive === n.positive;
+    });
+  const same =
+    prev.active === next.active &&
+    prev.imageReady === next.imageReady &&
+    prev.busy === next.busy &&
+    prev.hasCandidate === next.hasCandidate &&
+    prev.score === next.score &&
+    prev.status === next.status &&
+    prev.error === next.error &&
+    pointsSame;
+  if (!same) _samCache = next;
+  return _samCache;
+}
+
+/**
+ * Reactive AI Lens Blur session state for the UI: active, depth readiness,
+ * live params (focus/amount/bokeh), and worker progress / error.
+ */
+type LensBlurUiState = {
+  active: boolean;
+  depthReady: boolean;
+  params: LensBlurParams;
+  status: string | null;
+  error: string | null;
+};
+export function useLensBlurState(): LensBlurUiState {
+  return useSyncExternalStore(
+    (cb) => engine.subscribe(cb),
+    () => lensBlurStateCache(),
+    () => lensBlurStateCache(),
+  );
+}
+let _lensBlurCache: LensBlurUiState = {
+  active: false,
+  depthReady: false,
+  params: { focus: 0.5, amount: 0.5, bokeh: 0.4 },
+  status: null,
+  error: null,
+};
+function lensBlurStateCache(): LensBlurUiState {
+  const s = engine.getLensBlurState();
+  const next: LensBlurUiState = s
+    ? {
+        active: true,
+        depthReady: s.depthReady,
+        params: s.params,
+        status: s.progress
+          ? s.progress.stage === "loading_model"
+            ? "Loading depth model…"
+            : "Estimating depth…"
+          : null,
+        error: s.error,
+      }
+    : { active: false, depthReady: false, params: engine.getLensBlurParams(), status: null, error: null };
+  const prev = _lensBlurCache;
+  const same =
+    prev.active === next.active &&
+    prev.depthReady === next.depthReady &&
+    prev.params.focus === next.params.focus &&
+    prev.params.amount === next.params.amount &&
+    prev.params.bokeh === next.params.bokeh &&
+    prev.status === next.status &&
+    prev.error === next.error;
+  if (!same) _lensBlurCache = next;
+  return _lensBlurCache;
 }
 
 // Thin action helpers so components don't reach into the engine directly.
@@ -682,6 +811,78 @@ export const actions = {
   /** Discard the Liquify session (the layer is unchanged). */
   cancelLiquify() {
     engine.cancelLiquify();
+  },
+
+  // ── SAM: click-to-select-anything (client-ML, worker) ──
+  /** Begin a SAM session on the active (or given) raster layer (encodes once). */
+  samBeginOnActiveLayer(layerId?: string) {
+    return engine.samBeginOnActiveLayer(layerId);
+  },
+  /** Add a SAM prompt point at a doc point (positive = include, false = exclude). */
+  samAddPoint(docX: number, docY: number, positive: boolean) {
+    engine.samAddPoint(docX, docY, positive);
+  },
+  /** Remove the last SAM prompt point and re-run the decoder. */
+  samRemoveLastPoint() {
+    engine.samRemoveLastPoint();
+  },
+  /** Drop all SAM points + candidate without re-encoding the image (instant). */
+  samClearPoints() {
+    engine.samClearPoints();
+  },
+  /** Current SAM candidate as layer-sized ImageData (alpha = mask), or null. */
+  samPreviewMask() {
+    return engine.samPreviewMask();
+  },
+  /** Commit the SAM candidate into the selection via a boolean op (default replace). */
+  samCommit(op?: SelectionOp) {
+    engine.samCommit(op);
+  },
+  /** Discard the SAM session (selection unchanged). */
+  samCancel() {
+    engine.samCancel();
+  },
+  /** Whether a SAM session is active (drives the SAM panel). */
+  isSamActive() {
+    return engine.isSamActive();
+  },
+  /** The SAM click points so far (doc px + polarity). */
+  getSamPoints() {
+    return engine.getSamPoints();
+  },
+
+  // ── AI Lens Blur (depth-aware bokeh; client-ML depth, worker) ──
+  /** Compute (or reuse cached) the depth map for the active/given raster layer. */
+  computeDepth(layerId?: string) {
+    return engine.computeDepth(layerId);
+  },
+  /** Depth map of a layer as a grayscale PNG (near = bright), for a depth view. */
+  getDepthPreview(layerId?: string) {
+    return engine.getDepthPreview(layerId);
+  },
+  /** Begin an AI Lens Blur session on the active (or given) raster layer. */
+  beginLensBlur(layerId?: string) {
+    return engine.beginLensBlur(layerId);
+  },
+  /** Whether an AI Lens Blur session is active (drives the panel). */
+  isLensBlurActive() {
+    return engine.isLensBlurActive();
+  },
+  /** Live AI Lens Blur params (focus/amount/bokeh). */
+  getLensBlurParams() {
+    return engine.getLensBlurParams();
+  },
+  /** Live-update AI Lens Blur params (re-renders the preview). */
+  setLensBlurParams(patch: Partial<LensBlurParams>) {
+    engine.setLensBlurParams(patch);
+  },
+  /** Commit the AI Lens Blur as one undo step (RGBA8 readback → replaceSource). */
+  commitLensBlur() {
+    engine.commitLensBlur();
+  },
+  /** Discard the AI Lens Blur session (the layer is unchanged). */
+  cancelLensBlur() {
+    engine.cancelLensBlur();
   },
 
   // ── pen tool / vector paths ──

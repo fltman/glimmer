@@ -95,6 +95,32 @@ export function markRmbgReady(): void {
   if (cached) cached.rmbgReady = true;
 }
 
+/**
+ * Warm-up flags for the other client-ML models. These are NOT on the shared
+ * ClientCapabilities wire type (which the server reads for routing) — they're
+ * local hints so the UI can show "model ready" badges for the SAM selector and
+ * the AI Lens Blur depth pass without a server round-trip.
+ */
+let _samReady = false;
+let _depthReady = false;
+
+/** Mark the SAM model as warmed up (after a successful samSetImage). */
+export function markSamReady(): void {
+  _samReady = true;
+}
+/** Mark the depth-estimation model as warmed up (after a successful estimate). */
+export function markDepthReady(): void {
+  _depthReady = true;
+}
+/** Whether the SAM "select anything" model has been used successfully. */
+export function isSamReady(): boolean {
+  return _samReady;
+}
+/** Whether the depth-estimation model has been used successfully. */
+export function isDepthReady(): boolean {
+  return _depthReady;
+}
+
 /** The current cached profile, or null before the first probe. */
 export function getClientCapabilities(): ClientCapabilities | null {
   return cached;

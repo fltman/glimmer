@@ -15,6 +15,7 @@ import { FiltersMenu } from "./filters";
 import { SelectMenu } from "./select";
 import { FileMenu } from "./file";
 import { LiquifyMenu } from "./liquify";
+import { LensBlurMenu } from "./lensblur";
 import {
   ContentAwareFillItem,
   ContentAwareFillModal,
@@ -228,6 +229,7 @@ export function Toolbar() {
       <ImageMenu disabled={!hasLayers} />
       <FiltersMenu />
       <LiquifyMenu />
+      <LensBlurMenu />
       <SelectMenu />
 
       <div className="mx-1 h-5 w-px bg-edge" />
