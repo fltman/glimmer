@@ -246,6 +246,12 @@ out vec4 fragColor;
 uniform sampler2D u_composite; // linear, premultiplied
 uniform vec2 u_viewport;       // drawing-buffer size in px
 uniform float u_checkSize;     // checker tile size in px
+// Channel view (Photoshop-style). u_chMask is 1.0 for each ENABLED R,G,B,A.
+// When all four are 1 the masking branch is a NO-OP (output byte-identical to
+// the original present pass). With a single solo color channel we show it as
+// grayscale; alpha-solo shows alpha as grayscale; multiple color channels show
+// only those colors. Defaults to (1,1,1,1) so unset = normal rendering.
+uniform vec4 u_chMask;
 
 vec3 linearToSrgb(vec3 c) {
   return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
@@ -269,6 +275,31 @@ void main() {
   vec4 c = texture(u_composite, v_uv);
   // Un-premultiply to recover straight color + alpha.
   vec3 rgb = c.a > 0.0001 ? c.rgb / c.a : vec3(0.0);
+  float a = c.a;
+
+  // ── channel view ──
+  // No-op when all four channels are enabled (the common case).
+  bool allOn = u_chMask.r > 0.5 && u_chMask.g > 0.5 && u_chMask.b > 0.5 && u_chMask.a > 0.5;
+  if (!allOn) {
+    float nRgb = u_chMask.r + u_chMask.g + u_chMask.b;
+    if (nRgb < 0.5) {
+      // No color channel: alpha-solo shows alpha as grayscale (opaque); if alpha
+      // is also off, nothing is shown (black, opaque).
+      float v = u_chMask.a > 0.5 ? c.a : 0.0;
+      rgb = vec3(v);
+      a = 1.0;
+    } else if (nRgb < 1.5) {
+      // Exactly one color channel: display it as grayscale (Photoshop default).
+      float v = dot(rgb, u_chMask.rgb); // picks the single enabled channel
+      rgb = vec3(v);
+      a = 1.0;
+    } else {
+      // Two or three color channels: keep only the enabled colors; alpha follows
+      // its own toggle (opaque when alpha is disabled).
+      rgb *= u_chMask.rgb;
+      a = u_chMask.a > 0.5 ? c.a : 1.0;
+    }
+  }
 
   // Checkerboard backdrop (in display space).
   vec2 px = gl_FragCoord.xy;
@@ -277,7 +308,7 @@ void main() {
   vec3 bg = mix(vec3(0.18), vec3(0.26), checker);
 
   // Composite straight color over backdrop using alpha.
-  vec3 outLinear = mix(bg, rgb, clamp(c.a, 0.0, 1.0));
+  vec3 outLinear = mix(bg, rgb, clamp(a, 0.0, 1.0));
   vec3 srgb = linearToSrgb(outLinear) + dither(px);
   fragColor = vec4(clamp(srgb, 0.0, 1.0), 1.0);
 }

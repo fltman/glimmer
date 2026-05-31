@@ -17,41 +17,103 @@ import { AdjustmentsPanel } from "./ui/adjustments/AdjustmentsPanel";
 import { HistoryPanel } from "./ui/history/HistoryPanel";
 import { PathsPanel } from "./ui/paths/PathsPanel";
 import { SwatchesPanel } from "./ui/swatches/SwatchesPanel";
-import { engine, useEngineSnapshot } from "./state/useEngine";
-import { toolStore, type ToolId } from "./state/tools";
+import { ChannelsPanel } from "./ui/channels/ChannelsPanel";
+import { engine, useEngineSnapshot, actions } from "./state/useEngine";
+import { toolStore, type ToolId, type ShapeKind } from "./state/tools";
 
-/** Single-key tool shortcuts (ignored while typing in inputs). */
+/**
+ * Single-key tool shortcuts (no modifier; ignored while typing). These map a
+ * keystroke straight to toolStore.setActive. Keys whose behaviour is more than a
+ * plain "select this tool" (M / U / T / C / O) are handled explicitly in the
+ * keydown switch below, so they are intentionally NOT in this table.
+ *
+ * NOTE: X (swap fg/bg) and D (reset colors) are deliberately absent — they are
+ * already bound in ui/color/ColorSwatches.tsx; binding them here would fire the
+ * action twice.
+ */
 const KEY_TO_TOOL: Record<string, ToolId> = {
   v: "move",
-  m: "marquee-rect",
   l: "lasso",
+  w: "magic-wand",
+  a: "sam-select",
   b: "brush",
   e: "eraser",
+  j: "heal",
+  s: "clone",
   g: "gradient",
+  k: "bucket",
+  y: "text",
   p: "pen",
   i: "eyedropper",
-  k: "bucket",
   h: "hand",
 };
 
+/** Shape primitives cycled by repeated taps of U. */
+const SHAPE_CYCLE: ShapeKind[] = ["rect", "ellipse", "line"];
+
+/** True when a keystroke should be ignored because the user is typing text. */
+function isTypingTarget(e: KeyboardEvent): boolean {
+  const el = e.target as HTMLElement | null;
+  if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) {
+    return true;
+  }
+  // Suppress shortcuts while a text layer is being edited, even if focus briefly
+  // drifts off the editor's <textarea>.
+  return engine.getActiveTextEditing() != null;
+}
+
+/**
+ * Unmodified single-key tool shortcuts. Mirrors the keys advertised by the
+ * ToolRail tooltips. The engine owns the Cmd/Ctrl combos (undo/redo/select-all/
+ * deselect) and Space-hold panning; ColorSwatches owns X/D — none are touched
+ * here.
+ */
 function useToolShortcuts() {
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      const el = e.target as HTMLElement | null;
-      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) {
-        return;
-      }
-      // Suppress single-key tool shortcuts while a text layer is being edited,
-      // even if focus briefly drifts off the editor's textarea.
-      if (engine.getActiveTextEditing()) return;
+      if (e.metaKey || e.ctrlKey) return; // engine handles Cmd/Ctrl combos
+      if (isTypingTarget(e)) return;
+      // Alt is only meaningful for Shift+O (burn) below; ignore other Alt combos
+      // so they don't shadow OS / browser behaviour.
+      if (e.altKey) return;
+
       const key = e.key.toLowerCase();
-      // Tapping M toggles between the two marquee shapes.
-      if (key === "m") {
-        const cur = toolStore.get().active;
-        toolStore.setActive(cur === "marquee-rect" ? "marquee-ellipse" : "marquee-rect");
-        return;
+
+      switch (key) {
+        // M — toggle between the two marquee shapes.
+        case "m": {
+          const cur = toolStore.get().active;
+          toolStore.setActive(cur === "marquee-rect" ? "marquee-ellipse" : "marquee-rect");
+          return;
+        }
+        // U — select the shape tool, cycling rect → ellipse → line on re-tap.
+        case "u": {
+          const ts = toolStore.get();
+          if (ts.active === "shape") {
+            const idx = SHAPE_CYCLE.indexOf(ts.shape.kind);
+            toolStore.setShapeKind(SHAPE_CYCLE[(idx + 1) % SHAPE_CYCLE.length]!);
+          } else {
+            toolStore.setActive("shape");
+          }
+          return;
+        }
+        // O — dodge; Shift+O — burn.
+        case "o":
+          toolStore.setActive(e.shiftKey ? "burn" : "dodge");
+          return;
+        // T — begin a free-transform session (also makes "transform" active).
+        case "t":
+          actions.beginTransform();
+          return;
+        // C — begin a crop session (also makes "crop" active).
+        case "c":
+          actions.beginCrop();
+          return;
       }
+
+      // Plain tool keys don't take Shift; leave Shift combos for other handlers.
+      if (e.shiftKey) return;
+
       const tool = KEY_TO_TOOL[key];
       if (tool) toolStore.setActive(tool);
     }
@@ -60,10 +122,67 @@ function useToolShortcuts() {
   }, []);
 }
 
-type SidebarTab = "ai" | "adjust" | "history" | "paths" | "swatches";
+/**
+ * Editor-wide shortcuts that aren't tool selection: brush-size nudge ([ / ]) and
+ * view zoom/fit (Cmd/Ctrl+0, Cmd/Ctrl+ +/-). Panning via Space-hold and the
+ * Cmd/Ctrl undo/redo/select/deselect combos are handled inside the engine and
+ * are not duplicated here.
+ */
+function useEditorShortcuts() {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (isTypingTarget(e)) return;
+
+      // ── View: zoom / fit (Cmd/Ctrl) ──────────────────────
+      if (e.metaKey || e.ctrlKey) {
+        // Cmd/Ctrl+0 → fit document to viewport.
+        if (e.key === "0") {
+          e.preventDefault();
+          engine.fitToScreen();
+          return;
+        }
+        // Cmd/Ctrl + "+" / "=" → zoom in; Cmd/Ctrl + "-" → zoom out. Anchor on
+        // the canvas centre (CSS px) so the centred content stays put. The "="
+        // key is accepted because "+" is Shift+"=" on most layouts.
+        if (e.key === "+" || e.key === "=") {
+          e.preventDefault();
+          const c = engine.getViewRotationPivotCss();
+          engine.zoomAt(1.25, c.x, c.y);
+          return;
+        }
+        if (e.key === "-" || e.key === "_") {
+          e.preventDefault();
+          const c = engine.getViewRotationPivotCss();
+          engine.zoomAt(1 / 1.25, c.x, c.y);
+          return;
+        }
+        return; // leave all other Cmd/Ctrl combos to the engine
+      }
+
+      if (e.altKey) return;
+
+      // ── Brush size nudge: [ smaller, ] larger ─────────────
+      // Operates on the live brush size in document px; clamped to a sane range.
+      if (e.key === "[" || e.key === "]") {
+        e.preventDefault();
+        const cur = toolStore.get().brush.size;
+        // Larger steps for larger brushes feels natural: ~10%, with a 1px floor.
+        const step = Math.max(1, Math.round(cur * 0.1));
+        const next = e.key === "]" ? cur + step : cur - step;
+        actions.setBrushParams({ size: Math.max(1, Math.min(2000, next)) });
+        return;
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+}
+
+type SidebarTab = "ai" | "adjust" | "history" | "paths" | "swatches" | "channels";
 
 export default function App() {
   useToolShortcuts();
+  useEditorShortcuts();
   const [tab, setTab] = useState<SidebarTab>("ai");
   const snap = useEngineSnapshot();
 
@@ -110,6 +229,9 @@ export default function App() {
             <TabButton active={tab === "swatches"} onClick={() => setTab("swatches")}>
               Swatch
             </TabButton>
+            <TabButton active={tab === "channels"} onClick={() => setTab("channels")}>
+              Chan
+            </TabButton>
           </div>
           <div className="min-h-0 flex-[3] overflow-hidden">
             {tab === "ai" ? (
@@ -120,6 +242,8 @@ export default function App() {
               <HistoryPanel />
             ) : tab === "paths" ? (
               <PathsPanel />
+            ) : tab === "channels" ? (
+              <ChannelsPanel />
             ) : (
               <SwatchesPanel />
             )}

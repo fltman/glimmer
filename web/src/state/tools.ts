@@ -261,6 +261,50 @@ const DEFAULT: ToolState = {
 
 type Listener = () => void;
 
+// ════════════════════════════════════════════════════════════
+//  LOCALSTORAGE PERSISTENCE (swatches / user brush presets / pattern state)
+// ════════════════════════════════════════════════════════════
+/**
+ * Tiny SSR-safe localStorage wrapper. All access is guarded so the stores work
+ * in non-browser contexts (tests/SSR) and silently fall back to in-memory
+ * defaults if storage is unavailable, full, or holds corrupt JSON.
+ */
+const LS_KEYS = {
+  swatches: "aips.swatches",
+  brushPresets: "aips.brushPresets",
+  patternState: "aips.patternState",
+} as const;
+
+function lsAvailable(): boolean {
+  try {
+    return typeof window !== "undefined" && !!window.localStorage;
+  } catch {
+    return false;
+  }
+}
+
+/** Read + JSON-parse a key, returning `undefined` on any failure. */
+function lsLoad<T>(key: string): T | undefined {
+  if (!lsAvailable()) return undefined;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw == null) return undefined;
+    return JSON.parse(raw) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+/** JSON-stringify + write a key, swallowing quota/serialization errors. */
+function lsSave(key: string, value: unknown): void {
+  if (!lsAvailable()) return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // ignore (quota exceeded, private mode, etc.)
+  }
+}
+
 class ToolStore {
   private state: ToolState = DEFAULT;
   private listeners = new Set<Listener>();
@@ -476,8 +520,32 @@ const DEFAULT_SWATCHES: RGBAColor[] = [
   { r: 0.55, g: 0.27, b: 0.86, a: 1 }, // purple
 ];
 
+/** Validate one persisted swatch shape, clamping to 0..1; null if malformed. */
+function sanitizeSwatch(v: unknown): RGBAColor | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  const num = (x: unknown): number | null =>
+    typeof x === "number" && Number.isFinite(x) ? x : null;
+  const r = num(o.r),
+    g = num(o.g),
+    b = num(o.b),
+    a = num(o.a);
+  if (r == null || g == null || b == null || a == null) return null;
+  return clampColor({ r, g, b, a });
+}
+
+/** Load persisted swatches, falling back to defaults on any error. */
+function loadSwatches(): RGBAColor[] {
+  const raw = lsLoad<unknown>(LS_KEYS.swatches);
+  if (Array.isArray(raw)) {
+    const out = raw.map(sanitizeSwatch).filter((c): c is RGBAColor => c != null);
+    if (out.length > 0) return out;
+  }
+  return DEFAULT_SWATCHES.map((c) => ({ ...c }));
+}
+
 class SwatchStore {
-  private swatches: RGBAColor[] = DEFAULT_SWATCHES.map((c) => ({ ...c }));
+  private swatches: RGBAColor[] = loadSwatches();
   private listeners = new Set<Listener>();
 
   get(): readonly RGBAColor[] {
@@ -489,6 +557,7 @@ class SwatchStore {
   }
   private set(next: RGBAColor[]): void {
     this.swatches = next;
+    lsSave(LS_KEYS.swatches, this.swatches);
     for (const cb of this.listeners) cb();
   }
 
@@ -628,10 +697,43 @@ const BUILTIN_BRUSH_PRESETS: BrushPreset[] = [
   },
 ];
 
+/**
+ * Load persisted USER brush presets (built-ins are never persisted, so they are
+ * not duplicated on reload). Returns the validated user presets plus the highest
+ * seq seen (so freshly-added presets get non-colliding ids). Malformed entries
+ * are dropped; full failure yields no user presets.
+ */
+function loadUserBrushPresets(): { presets: BrushPreset[]; seq: number } {
+  const raw = lsLoad<unknown>(LS_KEYS.brushPresets);
+  if (!Array.isArray(raw)) return { presets: [], seq: 0 };
+  const presets: BrushPreset[] = [];
+  let seq = 0;
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const o = entry as Record<string, unknown>;
+    if (typeof o.id !== "string" || typeof o.name !== "string") continue;
+    if (o.builtin) continue; // never trust a persisted built-in
+    presets.push({
+      id: o.id,
+      name: o.name,
+      params: fullBrushParams((o.params as Partial<BrushParams>) ?? {}),
+    });
+    const m = /^brush_(\d+)$/.exec(o.id);
+    if (m) seq = Math.max(seq, Number(m[1]));
+  }
+  return { presets, seq };
+}
+
 class BrushPresetStore {
-  private presets: BrushPreset[] = BUILTIN_BRUSH_PRESETS.map(clonePreset);
-  private seq = 0;
+  private presets: BrushPreset[];
+  private seq: number;
   private listeners = new Set<Listener>();
+
+  constructor() {
+    const { presets, seq } = loadUserBrushPresets();
+    this.presets = [...BUILTIN_BRUSH_PRESETS.map(clonePreset), ...presets];
+    this.seq = seq;
+  }
 
   get(): readonly BrushPreset[] {
     return this.presets;
@@ -642,6 +744,8 @@ class BrushPresetStore {
   }
   private set(next: BrushPreset[]): void {
     this.presets = next;
+    // Persist only USER presets so reloading never duplicates the built-ins.
+    lsSave(LS_KEYS.brushPresets, this.presets.filter((p) => !p.builtin));
     for (const cb of this.listeners) cb();
   }
 
@@ -842,13 +946,30 @@ export interface PatternState {
   opacity: number;
 }
 
+/** Load persisted pattern selection/scale/opacity, sanitizing against the
+ * available built-ins; falls back to defaults on any error. */
+function loadPatternState(): PatternState {
+  const def: PatternState = { selectedId: BUILTIN_PATTERNS[0]!.id, scale: 1, opacity: 1 };
+  const raw = lsLoad<unknown>(LS_KEYS.patternState);
+  if (!raw || typeof raw !== "object") return def;
+  const o = raw as Record<string, unknown>;
+  const known = BUILTIN_PATTERNS.some((p) => p.id === o.selectedId);
+  return {
+    selectedId: known ? (o.selectedId as string) : def.selectedId,
+    scale:
+      typeof o.scale === "number" && Number.isFinite(o.scale)
+        ? Math.max(0.05, Math.min(16, o.scale))
+        : def.scale,
+    opacity:
+      typeof o.opacity === "number" && Number.isFinite(o.opacity)
+        ? clamp01(o.opacity)
+        : def.opacity,
+  };
+}
+
 class PatternStore {
   private patterns: PatternDef[] = BUILTIN_PATTERNS.slice();
-  private state: PatternState = {
-    selectedId: BUILTIN_PATTERNS[0]!.id,
-    scale: 1,
-    opacity: 1,
-  };
+  private state: PatternState = loadPatternState();
   private listeners = new Set<Listener>();
 
   /** All available pattern definitions (built-ins + any future user tiles). */
@@ -873,6 +994,7 @@ class PatternStore {
     return () => this.listeners.delete(cb);
   }
   private emit(): void {
+    lsSave(LS_KEYS.patternState, this.state);
     for (const cb of this.listeners) cb();
   }
 

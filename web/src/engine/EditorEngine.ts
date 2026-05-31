@@ -142,9 +142,27 @@ const LENS_BLUR_MAX_RADIUS_FRACTION = 0.06;
 interface ViewState {
   /** Document-space px per screen px is 1/scale; scale = zoom factor. */
   scale: number;
-  /** Pan offset in drawing-buffer pixels. */
+  /** Pan offset in drawing-buffer pixels (in the UN-rotated inner frame). */
   tx: number;
   ty: number;
+  /**
+   * View rotation in radians, applied about the drawing-buffer CENTER on top of
+   * the axis-aligned translate·scale frame. 0 = no rotation (the original
+   * behaviour, byte-identical). The authoritative doc->buffer matrix is
+   *   viewMatrix = Rpivot(rot) · T(tx,ty) · S(scale)
+   * built once in viewMatrix(); every screen<->doc conversion and every GL pass
+   * goes through it (or its inverse) so rotation can never desync a tool/overlay.
+   */
+  rot: number;
+}
+
+/** Which color/alpha channels the present pass shows. */
+export type ChannelKey = "r" | "g" | "b" | "a";
+export interface ChannelVisibility {
+  r: boolean;
+  g: boolean;
+  b: boolean;
+  a: boolean;
 }
 
 /** GPU mask texture cache entry (keyed by layer id + version). */
@@ -362,7 +380,16 @@ export class EditorEngine {
     | { layerId: LayerId; type: FilterType; params: FilterParams }
     | null = null;
 
-  private view: ViewState = { scale: 1, tx: 0, ty: 0 };
+  private view: ViewState = { scale: 1, tx: 0, ty: 0, rot: 0 };
+
+  /**
+   * Per-document channel visibility for the present pass. All true = normal
+   * full-color rendering (the masking branch is a no-op so output is unchanged).
+   * A single enabled R/G/B channel displays as GRAYSCALE (Photoshop default);
+   * multiple enabled channels show only those color channels; alpha-solo shows
+   * the alpha as grayscale. See the present-pass channel uniforms.
+   */
+  private channelVis: ChannelVisibility = { r: true, g: true, b: true, a: true };
 
   // ── rulers / guides / grid / snapping ───────────────────
   /** Document guides (positions in doc px). */
@@ -631,21 +658,111 @@ void main() { fragColor = texture(u_src, v_uv); }`,
   }
 
   // ── view transform ──────────────────────────────────────
+  //
+  // AUTHORITATIVE MAPPING. There is exactly one doc->buffer matrix (viewMatrix)
+  // and its inverse; EVERY screen<->doc conversion and EVERY GL render pass goes
+  // through them. The matrix is
+  //   viewMatrix = Rpivot(rot) · T(tx,ty) · S(scale)
+  // where Rpivot rotates about the drawing-buffer center. tx/ty/scale stay the
+  // axis-aligned (un-rotated) frame, so pan/zoom/fit math is unchanged and, when
+  // rot===0, Rpivot is identity → viewMatrix === T(tx,ty)·S(scale), i.e.
+  // byte-identical to the original engine.
+
+  /** Drawing-buffer center (pivot for view rotation), in buffer px. */
+  private viewPivot(): { cx: number; cy: number } {
+    const bw = this.canvas?.width || 1;
+    const bh = this.canvas?.height || 1;
+    return { cx: bw / 2, cy: bh / 2 };
+  }
+
+  /** Rotation-about-buffer-center matrix Rpivot(rot). Identity when rot===0. */
+  private viewRotationMatrix(): Float32Array {
+    if (!this.view.rot) return m3.identity();
+    const { cx, cy } = this.viewPivot();
+    let m = m3.translation(cx, cy);
+    m = m3.multiply(m, m3.rotation(this.view.rot));
+    m = m3.multiply(m, m3.translation(-cx, -cy));
+    return m;
+  }
+
+  /** Authoritative document-px -> drawing-buffer-px matrix. */
+  private viewMatrix(): Float32Array {
+    const inner = m3.multiply(
+      m3.translation(this.view.tx, this.view.ty),
+      m3.scaling(this.view.scale, this.view.scale),
+    );
+    if (!this.view.rot) return inner; // fast path == original
+    return m3.multiply(this.viewRotationMatrix(), inner);
+  }
+
+  /** Inverse of viewMatrix (drawing-buffer-px -> document-px). */
+  private viewMatrixInverse(): Float32Array {
+    return m3.invert(this.viewMatrix());
+  }
+
+  /**
+   * Public doc->buffer matrix (mat3) for overlay callers that want exact
+   * rotation-aware mapping. Buffer px = CSS px * dpr.
+   */
+  getViewMatrix(): Float32Array {
+    return this.viewMatrix();
+  }
+  /** Public inverse (buffer-px -> doc-px) mat3. */
+  getViewMatrixInverse(): Float32Array {
+    return this.viewMatrixInverse();
+  }
+
+  /**
+   * Pan by a SCREEN-aligned delta given in drawing-buffer px. The drag vector is
+   * screen-aligned, so under rotation it must be un-rotated into the inner frame
+   * before being added to tx/ty (otherwise panning would drift sideways). When
+   * rot===0 this reduces to the original `tx += dx; ty += dy`.
+   */
   pan(dxBuffer: number, dyBuffer: number): void {
-    this.view.tx += dxBuffer;
-    this.view.ty += dyBuffer;
+    if (this.view.rot) {
+      // tx/ty live BEFORE Rpivot, so map the screen delta back through R^-1.
+      const c = Math.cos(-this.view.rot);
+      const s = Math.sin(-this.view.rot);
+      const dx = c * dxBuffer - s * dyBuffer;
+      const dy = s * dxBuffer + c * dyBuffer;
+      this.view.tx += dx;
+      this.view.ty += dy;
+    } else {
+      this.view.tx += dxBuffer;
+      this.view.ty += dyBuffer;
+    }
     this.markDirty();
+    this.emit();
   }
 
   zoomAt(factor: number, screenX: number, screenY: number): void {
+    // Anchor the zoom on the document point under the cursor: convert the cursor
+    // to doc space (rotation-aware), change scale, then solve tx/ty so that same
+    // doc point lands back under the cursor. This is rotation-correct because we
+    // round-trip through the authoritative matrices.
+    const docBefore = this.screenToDoc(screenX, screenY);
+    const newScale = Math.max(0.02, Math.min(64, this.view.scale * factor));
+    if (newScale === this.view.scale) return;
+    this.view.scale = newScale;
+    // Where does docBefore now land (in buffer px) with the unchanged tx/ty/rot?
+    const bufNow = m3.transformPoint(this.viewMatrix(), docBefore.x, docBefore.y);
     const bx = screenX * this.dpr;
     const by = screenY * this.dpr;
-    const newScale = Math.max(0.02, Math.min(64, this.view.scale * factor));
-    const k = newScale / this.view.scale;
-    this.view.tx = bx - (bx - this.view.tx) * k;
-    this.view.ty = by - (by - this.view.ty) * k;
-    this.view.scale = newScale;
+    // Correct tx/ty by the buffer-space error, un-rotated into the inner frame.
+    let ex = bx - bufNow.x;
+    let ey = by - bufNow.y;
+    if (this.view.rot) {
+      const c = Math.cos(-this.view.rot);
+      const s = Math.sin(-this.view.rot);
+      const rx = c * ex - s * ey;
+      const ry = s * ex + c * ey;
+      ex = rx;
+      ey = ry;
+    }
+    this.view.tx += ex;
+    this.view.ty += ey;
     this.markDirty();
+    this.emit();
   }
 
   getZoom(): number {
@@ -663,17 +780,234 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     this.view.tx = (bw - dw * scale) / 2;
     this.view.ty = (bh - dh * scale) / 2;
     this.markDirty();
+    this.emit();
+  }
+
+  // ── view rotation ───────────────────────────────────────
+  /** Current view rotation in DEGREES (clockwise on screen). */
+  getViewRotation(): number {
+    return (this.view.rot * 180) / Math.PI;
+  }
+  /** Set the absolute view rotation in degrees (wrapped to (-180,180]). */
+  setViewRotation(deg: number): void {
+    let d = ((deg % 360) + 360) % 360; // 0..360
+    if (d > 180) d -= 360; // -180..180
+    const rad = (d * Math.PI) / 180;
+    if (rad === this.view.rot) return;
+    this.view.rot = rad;
+    this.markDirty();
+    this.emit();
+  }
+  /** Rotate the view by a relative delta in degrees. */
+  rotateView(deltaDeg: number): void {
+    this.setViewRotation(this.getViewRotation() + deltaDeg);
+  }
+  /** Reset rotation to 0 and fit the document to the viewport. */
+  resetView(): void {
+    this.view.rot = 0;
+    this.fitToScreen(); // emits + marks dirty
   }
 
   // ── coordinate helpers ──────────────────────────────────
-  /** Screen (CSS px relative to canvas) -> document px. */
+  /** Screen (CSS px relative to canvas) -> document px (rotation-aware). */
   private screenToDoc(screenX: number, screenY: number): { x: number; y: number } {
     const bx = screenX * this.dpr;
     const by = screenY * this.dpr;
+    return m3.transformPoint(this.viewMatrixInverse(), bx, by);
+  }
+
+  /**
+   * Public CSS-px → document-px mapping (rotation-aware). Overlay UI that does
+   * its own pointer math (e.g. guide drag in CanvasHost) must use THIS rather
+   * than the un-rotated `getViewTransform()` inverse so it stays correct when the
+   * view is rotated. At rot=0 it equals `(cssX - tx/dpr)/(scale/dpr)`.
+   */
+  cssToDoc(cssX: number, cssY: number): { x: number; y: number } {
+    return this.screenToDoc(cssX, cssY);
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  NAVIGATOR
+  // ════════════════════════════════════════════════════════
+  /**
+   * A downscaled full-document composite for a Navigator panel. Reuses
+   * renderDocumentComposite (doc-res RGBA8) and draws it into a small 2D canvas
+   * to downscale. `maxPx` caps the longest edge. Returns a PNG blob + its size.
+   * Cheap-ish but still a GPU readback — the UI should throttle calls (e.g.
+   * regen on doc change, not every frame).
+   */
+  async getNavigatorThumbnail(
+    maxPx = 240,
+  ): Promise<{ blob: Blob; width: number; height: number } | null> {
+    const r = this.renderer;
+    if (!r) return null;
+    const dw = Math.max(1, Math.round(this.doc.width));
+    const dh = Math.max(1, Math.round(this.doc.height));
+    const fb = this.renderDocumentComposite();
+    if (!fb) return null;
+    const raw = r.readPixels(fb, 0, 0, dw, dh);
+    r.deleteFramebuffer(fb);
+    // renderDocumentComposite output is PREMULTIPLIED LINEAR bytes; un-premultiply
+    // + linear->sRGB so the thumbnail matches the on-screen present pass. GL reads
+    // bottom-up, so flip rows to top-down ImageData.
+    const full = new Uint8ClampedArray(dw * dh * 4);
+    for (let y = 0; y < dh; y++) {
+      const srcRow = (dh - 1 - y) * dw * 4;
+      const dstRow = y * dw * 4;
+      for (let x = 0; x < dw; x++) {
+        const s = srcRow + x * 4;
+        const d = dstRow + x * 4;
+        const a = (raw[s + 3] ?? 0) / 255;
+        const inv = a > 0.0001 ? 1 / a : 0;
+        for (let ch = 0; ch < 3; ch++) {
+          const lin = ((raw[s + ch] ?? 0) / 255) * inv;
+          full[d + ch] = Math.round(linearToSrgb(lin) * 255);
+        }
+        full[d + 3] = raw[s + 3] ?? 0;
+      }
+    }
+    // Downscale to fit maxPx on the longest edge via a 2D canvas.
+    const scale = Math.min(1, maxPx / Math.max(dw, dh));
+    const tw = Math.max(1, Math.round(dw * scale));
+    const th = Math.max(1, Math.round(dh * scale));
+    const srcCanvas = makeCanvas(dw, dh);
+    const sctx = get2d(srcCanvas);
+    sctx.putImageData(new ImageData(full, dw, dh), 0, 0);
+    const dstCanvas = makeCanvas(tw, th);
+    const dctx = get2d(dstCanvas);
+    dctx.imageSmoothingEnabled = true;
+    dctx.drawImage(srcCanvas as CanvasImageSource, 0, 0, dw, dh, 0, 0, tw, th);
+    const blob = await canvasToBlob(dstCanvas);
+    return blob ? { blob, width: tw, height: th } : null;
+  }
+
+  /**
+   * The document-space region currently visible in the viewport, as a CENTERED,
+   * possibly-rotated rectangle. `{x,y,width,height}` is the AXIS-ALIGNED box
+   * (width = viewport buffer width / scale, etc.); `rotationDeg` is the view
+   * rotation. A Navigator draws the exact viewport by taking this box and
+   * rotating it by `rotationDeg` about its own center (x+width/2, y+height/2).
+   * When rotation is 0 the box equals the literal visible doc rectangle.
+   */
+  getViewportRectInDoc(): {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    rotationDeg: number;
+  } {
+    const bw = this.canvas?.width || 1;
+    const bh = this.canvas?.height || 1;
+    const s = this.view.scale || 1;
+    const width = bw / s;
+    const height = bh / s;
+    // Doc point under the buffer center is the rect center (rotation pivots there).
+    const { cx, cy } = this.viewPivot();
+    const center = m3.transformPoint(this.viewMatrixInverse(), cx, cy);
     return {
-      x: (bx - this.view.tx) / this.view.scale,
-      y: (by - this.view.ty) / this.view.scale,
+      x: center.x - width / 2,
+      y: center.y - height / 2,
+      width,
+      height,
+      rotationDeg: this.getViewRotation(),
     };
+  }
+
+  /**
+   * Recenter the view so the given DOCUMENT point lands at the drawing-buffer
+   * center (used when the user drags the Navigator viewport rectangle). Solves
+   * tx/ty in the inner (un-rotated) frame so it is rotation-correct.
+   */
+  centerViewOnDoc(docX: number, docY: number): void {
+    const { cx, cy } = this.viewPivot();
+    // We want viewMatrix · (docX,docY) == (cx,cy). Rpivot keeps the buffer
+    // center fixed, so it suffices to make the inner T·S map (docX,docY) to the
+    // center; the rotation then leaves the center in place regardless of angle.
+    this.view.tx = cx - docX * this.view.scale;
+    this.view.ty = cy - docY * this.view.scale;
+    this.markDirty();
+    this.emit();
+  }
+
+  // ════════════════════════════════════════════════════════
+  //  CHANNELS
+  // ════════════════════════════════════════════════════════
+  /** Current per-document channel visibility (copied). */
+  getChannelVisibility(): ChannelVisibility {
+    return { ...this.channelVis };
+  }
+  /** Toggle one channel's visibility in the present pass. */
+  setChannelVisible(ch: ChannelKey, visible: boolean): void {
+    if (this.channelVis[ch] === visible) return;
+    this.channelVis = { ...this.channelVis, [ch]: visible };
+    this.markDirty();
+    this.emit();
+  }
+
+  /**
+   * A small preview of one channel of the full-document composite for a Channels
+   * panel. `ch` is 'r'|'g'|'b'|'a' (a single channel shown as grayscale) or
+   * 'rgb' (the full color composite). Reuses renderDocumentComposite + readback,
+   * downscaled to `maxPx`. Returns a PNG blob (opaque grayscale for solo
+   * channels, straight color for 'rgb').
+   */
+  async getChannelThumbnail(
+    ch: ChannelKey | "rgb",
+    maxPx = 96,
+  ): Promise<Blob | null> {
+    const r = this.renderer;
+    if (!r) return null;
+    const dw = Math.max(1, Math.round(this.doc.width));
+    const dh = Math.max(1, Math.round(this.doc.height));
+    const fb = this.renderDocumentComposite();
+    if (!fb) return null;
+    const raw = r.readPixels(fb, 0, 0, dw, dh);
+    r.deleteFramebuffer(fb);
+    // renderDocumentComposite output is PREMULTIPLIED LINEAR bytes. For R/G/B we
+    // un-premultiply + linear->sRGB so the preview matches the displayed channel;
+    // alpha is straight coverage shown directly as grayscale. Flip bottom-up.
+    const out = new Uint8ClampedArray(dw * dh * 4);
+    for (let y = 0; y < dh; y++) {
+      const srcRow = (dh - 1 - y) * dw * 4;
+      const dstRow = y * dw * 4;
+      for (let x = 0; x < dw; x++) {
+        const s = srcRow + x * 4;
+        const d = dstRow + x * 4;
+        const a = (raw[s + 3] ?? 0) / 255;
+        const inv = a > 0.0001 ? 1 / a : 0;
+        const srgbCh = (c: number): number =>
+          Math.round(linearToSrgb(((raw[s + c] ?? 0) / 255) * inv) * 255);
+        if (ch === "rgb") {
+          out[d] = srgbCh(0);
+          out[d + 1] = srgbCh(1);
+          out[d + 2] = srgbCh(2);
+          out[d + 3] = 255;
+        } else if (ch === "a") {
+          const v = raw[s + 3] ?? 0; // straight alpha, shown as grayscale
+          out[d] = v;
+          out[d + 1] = v;
+          out[d + 2] = v;
+          out[d + 3] = 255;
+        } else {
+          const v = srgbCh(ch === "r" ? 0 : ch === "g" ? 1 : 2);
+          out[d] = v;
+          out[d + 1] = v;
+          out[d + 2] = v;
+          out[d + 3] = 255;
+        }
+      }
+    }
+    // Downscale to fit maxPx.
+    const scale = Math.min(1, maxPx / Math.max(dw, dh));
+    const tw = Math.max(1, Math.round(dw * scale));
+    const th = Math.max(1, Math.round(dh * scale));
+    const srcCanvas = makeCanvas(dw, dh);
+    get2d(srcCanvas).putImageData(new ImageData(out, dw, dh), 0, 0);
+    const dstCanvas = makeCanvas(tw, th);
+    const dctx = get2d(dstCanvas);
+    dctx.imageSmoothingEnabled = true;
+    dctx.drawImage(srcCanvas as CanvasImageSource, 0, 0, dw, dh, 0, 0, tw, th);
+    return canvasToBlob(dstCanvas);
   }
 
   // ── undo / redo ─────────────────────────────────────────
@@ -1213,39 +1547,41 @@ void main() { fragColor = texture(u_src, v_uv); }`,
    * (0..1 over the document), then scaled to a target buffer's uv. For masks the
    * target is the full document so docUv == maskUv.
    */
+  /**
+   * Framebuffer-uv (0..1, +y DOWN in uv, row 0 = top) -> drawing-buffer px,
+   * undoing pixToClip's Y-flip. column-major [bw,0,0, 0,-bh,0, 0,bh,1] so
+   * (uv.x,uv.y) -> (uv.x*bw, (1-uv.y)*bh). Composing this with viewMatrixInverse
+   * gives a ROTATION-AWARE viewport-uv -> doc-px map; the old hand-derived
+   * matrices are exactly this product when rot===0.
+   */
+  private fbUvToBufferPx(bw: number, bh: number): Float32Array {
+    return new Float32Array([bw, 0, 0, 0, -bh, 0, 0, bh, 1]);
+  }
+
   private viewportUvToDocUv(
     bw: number,
     bh: number,
     _targetW: number,
     _targetH: number,
   ): Float32Array {
-    // The fullscreen adjustment quad has no Y-flip (v_uv.y=0 at framebuffer
-    // row 0), but the backdrop was written with pixToClip's Y-flip, so the
-    // fragment at v_uv shows doc point docX=(v_uv.x*bw - tx)/scale, and
-    // docY=(bh*(1-v_uv.y) - ty)/scale. Mask/clip textures store row 0 = doc-top
-    // (no flip), so docUv needs the Y inversion baked in here.
-    const s = this.view.scale;
-    const dw = this.doc.width;
-    const dh = this.doc.height;
-    const ax = bw / (s * dw);
-    const ayNeg = -bh / (s * dh);
-    const tx = -this.view.tx / (s * dw);
-    const ty = (bh - this.view.ty) / (s * dh);
-    // column-major: [ax,0,0, 0,ayNeg,0, tx,ty,1]
-    return new Float32Array([ax, 0, 0, 0, ayNeg, 0, tx, ty, 1]);
+    // viewport-uv -> buffer px -> (rotation-aware) doc px -> doc uv.
+    const dw = this.doc.width || 1;
+    const dh = this.doc.height || 1;
+    const m = m3.multiply(this.viewMatrixInverse(), this.fbUvToBufferPx(bw, bh));
+    return m3.multiply(m3.scaling(1 / dw, 1 / dh), m);
   }
 
   /** Viewport-uv -> a specific pixel layer's local uv (for clipping). */
   private viewportUvToLayerUv(bw: number, bh: number, layer: PixelLayer): Float32Array {
-    // Same flip rationale as viewportUvToDocUv; offset by the layer origin.
-    const s = this.view.scale;
-    const lw = layer.width;
-    const lh = layer.height;
-    const ax = bw / (s * lw);
-    const ayNeg = -bh / (s * lh);
-    const tx = (-this.view.tx - layer.x * s) / (s * lw);
-    const ty = (bh - this.view.ty - layer.y * s) / (s * lh);
-    return new Float32Array([ax, 0, 0, 0, ayNeg, 0, tx, ty, 1]);
+    // viewport-uv -> buffer px -> doc px -> layer-local uv (offset by origin).
+    const lw = layer.width || 1;
+    const lh = layer.height || 1;
+    const docPx = m3.multiply(this.viewMatrixInverse(), this.fbUvToBufferPx(bw, bh));
+    const toLayerUv = m3.multiply(
+      m3.scaling(1 / lw, 1 / lh),
+      m3.translation(-layer.x, -layer.y),
+    );
+    return m3.multiply(toLayerUv, docPx);
   }
 
   // ── render loop ─────────────────────────────────────────
@@ -1322,10 +1658,7 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     gl.clear(gl.COLOR_BUFFER_BIT);
 
     const pixToClip = m3.pixelToClip(bw, bh);
-    const view = m3.multiply(
-      m3.translation(this.view.tx, this.view.ty),
-      m3.scaling(this.view.scale, this.view.scale),
-    );
+    const view = this.viewMatrix();
     const activeId = this.doc.getActiveLayerId();
 
     // Composite the document tree (groups recurse into isolated buffers) into
@@ -1359,6 +1692,14 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     gl.uniform1i(gl.getUniformLocation(pp, "u_composite"), 0);
     gl.uniform2f(gl.getUniformLocation(pp, "u_viewport"), bw, bh);
     gl.uniform1f(gl.getUniformLocation(pp, "u_checkSize"), 12 * this.dpr);
+    const cv = this.channelVis;
+    gl.uniform4f(
+      gl.getUniformLocation(pp, "u_chMask"),
+      cv.r ? 1 : 0,
+      cv.g ? 1 : 0,
+      cv.b ? 1 : 0,
+      cv.a ? 1 : 0,
+    );
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, read.color.tex);
     r.drawQuad();
@@ -2079,10 +2420,7 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     const prog = this.brushPreviewProgram();
     gl.useProgram(prog);
     const pixToClip = m3.pixelToClip(write.width, write.height);
-    const viewM = m3.multiply(
-      m3.translation(this.view.tx, this.view.ty),
-      m3.scaling(this.view.scale, this.view.scale),
-    );
+    const viewM = this.viewMatrix();
     const toLayer = m3.multiply(
       m3.translation(layer.x, layer.y),
       m3.scaling(layer.width, layer.height),
@@ -2138,10 +2476,7 @@ void main() {
     const prog = this.patternStampPreviewProgram();
     gl.useProgram(prog);
     const pixToClip = m3.pixelToClip(write.width, write.height);
-    const viewM = m3.multiply(
-      m3.translation(this.view.tx, this.view.ty),
-      m3.scaling(this.view.scale, this.view.scale),
-    );
+    const viewM = this.viewMatrix();
     const toLayer = m3.multiply(
       m3.translation(layer.x, layer.y),
       m3.scaling(layer.width, layer.height),
@@ -2225,13 +2560,27 @@ void main() {
     // committed selection's marching ants are drawn in GL (renderAnts).
   }
 
-  /** View transform in CSS px (for UI overlays). scale here is doc->CSS px. */
+  /**
+   * INNER (un-rotated) view transform in CSS px (for UI overlays). `scale` is
+   * doc->CSS px; tx/ty are the CSS-px pan of the axis-aligned frame. When the
+   * view is rotated, overlays must ALSO apply getViewRotation() about the canvas
+   * CSS center (getViewRotationPivotCss()) to land on screen — or, preferably,
+   * use getViewMatrix()/getViewMatrixInverse() directly (those are in buffer px;
+   * divide/multiply by dpr to reach CSS px). When rotation is 0 this is exactly
+   * the original mapping, so unrotated overlays are unaffected.
+   */
   getViewTransform(): { scale: number; tx: number; ty: number } {
     return {
       scale: this.view.scale / this.dpr,
       tx: this.view.tx / this.dpr,
       ty: this.view.ty / this.dpr,
     };
+  }
+
+  /** Canvas CSS-space center, the pivot overlays rotate about (= buffer/2/dpr). */
+  getViewRotationPivotCss(): { x: number; y: number } {
+    const { cx, cy } = this.viewPivot();
+    return { x: cx / this.dpr, y: cy / this.dpr };
   }
 
   // ════════════════════════════════════════════════════════
@@ -3081,6 +3430,18 @@ void main() {
         return;
       }
     }
+
+    // Don't hijack global combos (Space-pan, Cmd/Ctrl+Z/Y/A/D) while the user is
+    // typing in a form field (e.g. the rotate-angle / zoom inputs, color hex,
+    // export filename). Otherwise Cmd+A would select-all the document instead of
+    // the field text and preventDefault would block the browser's native combos.
+    const tgt = e.target as HTMLElement | null;
+    const typing =
+      !!tgt &&
+      (tgt.tagName === "INPUT" ||
+        tgt.tagName === "TEXTAREA" ||
+        tgt.isContentEditable);
+    if (typing) return;
 
     if (e.code === "Space") {
       this.spaceHeld = true;
@@ -5682,7 +6043,7 @@ void main(){
     // Stash + override the live view so adjustment/group uv->doc math uses
     // identity (doc-resolution export, no pan/zoom).
     const savedView = this.view;
-    this.view = { scale: 1, tx: 0, ty: 0 };
+    this.view = { scale: 1, tx: 0, ty: 0, rot: 0 };
 
     // Same tree fold as the viewport render(), minus the brush preview, so the
     // export includes groups, clipping and layer effects.
@@ -5779,10 +6140,8 @@ void main(){
 
   /** Doc px -> screen (CSS px relative to canvas). Inverse of screenToDoc. */
   private docToScreen(x: number, y: number): { x: number; y: number } {
-    return {
-      x: (x * this.view.scale + this.view.tx) / this.dpr,
-      y: (y * this.view.scale + this.view.ty) / this.dpr,
-    };
+    const buf = m3.transformPoint(this.viewMatrix(), x, y);
+    return { x: buf.x / this.dpr, y: buf.y / this.dpr };
   }
 
   /** Top-most visible text layer whose footprint contains (docX,docY), or null. */
@@ -7030,6 +7389,18 @@ function get2d(
     | null;
   if (!ctx) throw new Error("2D context unavailable");
   return ctx;
+}
+
+/** Encode a canvas built by makeCanvas to a PNG Blob (Offscreen or DOM). */
+async function canvasToBlob(
+  cv: OffscreenCanvas | HTMLCanvasElement,
+): Promise<Blob | null> {
+  if (cv instanceof OffscreenCanvas) {
+    return cv.convertToBlob({ type: "image/png" });
+  }
+  return new Promise<Blob | null>((resolve) => {
+    (cv as HTMLCanvasElement).toBlob((b) => resolve(b), "image/png");
+  });
 }
 
 /** Format a straight-sRGB RGBAColor (0..1) as a CSS rgba() string. */

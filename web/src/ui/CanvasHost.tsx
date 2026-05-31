@@ -75,10 +75,27 @@ function CanvasOverlay() {
   }, []);
 
   const view = engine.getViewTransform();
-  const toScreen = (x: number, y: number): [number, number] => [
-    x * view.scale + view.tx,
-    y * view.scale + view.ty,
-  ];
+  // Rotation-aware doc → CSS-screen mapping. The inner (un-rotated) frame is
+  // `getViewTransform()`; the full transform is that, then rotated about the
+  // canvas CSS centre by the view rotation. When rotation is 0 the rotate step
+  // is a no-op and this is byte-identical to the original `x*scale+tx`.
+  const rotDeg = engine.getViewRotation();
+  const toScreen: ToScreen =
+    rotDeg === 0
+      ? (x, y) => [x * view.scale + view.tx, y * view.scale + view.ty]
+      : (() => {
+          const piv = engine.getViewRotationPivotCss();
+          const a = (rotDeg * Math.PI) / 180;
+          const cos = Math.cos(a);
+          const sin = Math.sin(a);
+          return (x: number, y: number): [number, number] => {
+            const ux = x * view.scale + view.tx;
+            const uy = y * view.scale + view.ty;
+            const dx = ux - piv.x;
+            const dy = uy - piv.y;
+            return [piv.x + cos * dx - sin * dy, piv.y + sin * dx + cos * dy];
+          };
+        })();
 
   const marquee = engine.getLiveMarquee();
   const lasso = engine.getLiveLasso();
@@ -150,22 +167,38 @@ function MarqueePreview({
   marquee: NonNullable<ReturnType<typeof engine.getLiveMarquee>>;
   toScreen: ToScreen;
 }) {
-  const [sx0, sy0] = toScreen(marquee.x0, marquee.y0);
-  const [sx1, sy1] = toScreen(marquee.x1, marquee.y1);
-  const x = Math.min(sx0, sx1);
-  const y = Math.min(sy0, sy1);
-  const w = Math.abs(sx1 - sx0);
-  const h = Math.abs(sy1 - sy0);
   const common = {
     fill: "none",
     stroke: "white",
     strokeWidth: 1,
     strokeDasharray: "5 4",
   } as const;
-  return marquee.shape === "ellipse" ? (
-    <ellipse cx={x + w / 2} cy={y + h / 2} rx={w / 2} ry={h / 2} {...common} />
-  ) : (
-    <rect x={x} y={y} width={w} height={h} {...common} />
+  // Map the four doc-space corners through `toScreen` so the preview stays
+  // correct under view rotation. For a rect we draw the (possibly rotated)
+  // polygon; for an ellipse we draw it axis-aligned in doc space and rotate the
+  // SVG group by the view rotation about its screen centre.
+  const c0 = toScreen(marquee.x0, marquee.y0);
+  const c1 = toScreen(marquee.x1, marquee.y0);
+  const c2 = toScreen(marquee.x1, marquee.y1);
+  const c3 = toScreen(marquee.x0, marquee.y1);
+  if (marquee.shape === "ellipse") {
+    const rotDeg = engine.getViewRotation();
+    const cx = (c0[0] + c2[0]) / 2;
+    const cy = (c0[1] + c2[1]) / 2;
+    // Un-rotated extents = doc-space size × scale (corner distances along edges).
+    const rx = Math.hypot(c1[0] - c0[0], c1[1] - c0[1]) / 2;
+    const ry = Math.hypot(c3[0] - c0[0], c3[1] - c0[1]) / 2;
+    return (
+      <g transform={rotDeg ? `rotate(${rotDeg} ${cx} ${cy})` : undefined}>
+        <ellipse cx={cx} cy={cy} rx={rx} ry={ry} {...common} />
+      </g>
+    );
+  }
+  return (
+    <polygon
+      points={`${c0[0]},${c0[1]} ${c1[0]},${c1[1]} ${c2[0]},${c2[1]} ${c3[0]},${c3[1]}`}
+      {...common}
+    />
   );
 }
 
@@ -361,14 +394,28 @@ function ShapePreview({
       </g>
     );
   }
-  const x = Math.min(x0, x1);
-  const y = Math.min(y0, y1);
-  const w = Math.abs(x1 - x0);
-  const h = Math.abs(y1 - y0);
-  return shape.kind === "ellipse" ? (
-    <ellipse cx={x + w / 2} cy={y + h / 2} rx={w / 2} ry={h / 2} {...common} />
-  ) : (
-    <rect x={x} y={y} width={w} height={h} {...common} />
+  // Map all four doc-space corners so rect/ellipse previews follow view rotation.
+  const c0 = toScreen(shape.from.x, shape.from.y);
+  const c1 = toScreen(shape.to.x, shape.from.y);
+  const c2 = toScreen(shape.to.x, shape.to.y);
+  const c3 = toScreen(shape.from.x, shape.to.y);
+  if (shape.kind === "ellipse") {
+    const rotDeg = engine.getViewRotation();
+    const cx = (c0[0] + c2[0]) / 2;
+    const cy = (c0[1] + c2[1]) / 2;
+    const rx = Math.hypot(c1[0] - c0[0], c1[1] - c0[1]) / 2;
+    const ry = Math.hypot(c3[0] - c0[0], c3[1] - c0[1]) / 2;
+    return (
+      <g transform={rotDeg ? `rotate(${rotDeg} ${cx} ${cy})` : undefined}>
+        <ellipse cx={cx} cy={cy} rx={rx} ry={ry} {...common} />
+      </g>
+    );
+  }
+  return (
+    <polygon
+      points={`${c0[0]},${c0[1]} ${c1[0]},${c1[1]} ${c2[0]},${c2[1]} ${c3[0]},${c3[1]}`}
+      {...common}
+    />
   );
 }
 
@@ -442,29 +489,31 @@ function GridOverlay({
     for (let x = 0; x <= docW + 1e-3; x += minor) {
       const major = Math.abs(x / grid.size - Math.round(x / grid.size)) < 1e-3;
       if (major) continue; // drawn in the major pass
-      const [sx, ya] = toScreen(x, 0);
-      const [, yb] = toScreen(x, docH);
-      lines.push({ x1: sx, y1: ya, x2: sx, y2: yb, major: false });
+      // Map BOTH endpoints fully (both x and y) so lines follow the rotated doc
+      // axes; at rot=0 the endpoints share x/y so this is identical to before.
+      const [xa, ya] = toScreen(x, 0);
+      const [xb, yb] = toScreen(x, docH);
+      lines.push({ x1: xa, y1: ya, x2: xb, y2: yb, major: false });
     }
     for (let y = 0; y <= docH + 1e-3; y += minor) {
       const major = Math.abs(y / grid.size - Math.round(y / grid.size)) < 1e-3;
       if (major) continue;
-      const [xa, sy] = toScreen(0, y);
-      const [xb] = toScreen(docW, y);
-      lines.push({ x1: xa, y1: sy, x2: xb, y2: sy, major: false });
+      const [xa, ya] = toScreen(0, y);
+      const [xb, yb] = toScreen(docW, y);
+      lines.push({ x1: xa, y1: ya, x2: xb, y2: yb, major: false });
     }
   }
   // Major lines.
   if (grid.size * pxPerDoc >= 4) {
     for (let x = 0; x <= docW + 1e-3; x += grid.size) {
-      const [sx, ya] = toScreen(x, 0);
-      const [, yb] = toScreen(x, docH);
-      lines.push({ x1: sx, y1: ya, x2: sx, y2: yb, major: true });
+      const [xa, ya] = toScreen(x, 0);
+      const [xb, yb] = toScreen(x, docH);
+      lines.push({ x1: xa, y1: ya, x2: xb, y2: yb, major: true });
     }
     for (let y = 0; y <= docH + 1e-3; y += grid.size) {
-      const [xa, sy] = toScreen(0, y);
-      const [xb] = toScreen(docW, y);
-      lines.push({ x1: xa, y1: sy, x2: xb, y2: sy, major: true });
+      const [xa, ya] = toScreen(0, y);
+      const [xb, yb] = toScreen(docW, y);
+      lines.push({ x1: xa, y1: ya, x2: xb, y2: yb, major: true });
     }
   }
 
@@ -506,12 +555,32 @@ function GuideLine({
     strokeOpacity: live ? 0.9 : 0.85,
     strokeDasharray: live ? "4 3" : undefined,
   } as const;
+  // A doc-horizontal guide (constant doc-y) runs along the doc-x axis; under view
+  // rotation that axis is tilted on screen. Derive the screen direction from two
+  // points one doc-px apart along the guide, then extend far in both directions.
+  // At rot=0 this collapses to the original axis-aligned line.
   if (guide.axis === "h") {
-    const [, sy] = toScreen(0, guide.pos);
-    return <line x1={-F} y1={sy} x2={F} y2={sy} {...common} />;
+    const [px, py] = toScreen(0, guide.pos);
+    const [qx, qy] = toScreen(1, guide.pos);
+    let dx = qx - px;
+    let dy = qy - py;
+    const len = Math.hypot(dx, dy) || 1;
+    dx /= len;
+    dy /= len;
+    return (
+      <line x1={px - dx * F} y1={py - dy * F} x2={px + dx * F} y2={py + dy * F} {...common} />
+    );
   }
-  const [sx] = toScreen(guide.pos, 0);
-  return <line x1={sx} y1={-F} x2={sx} y2={F} {...common} />;
+  const [px, py] = toScreen(guide.pos, 0);
+  const [qx, qy] = toScreen(guide.pos, 1);
+  let dx = qx - px;
+  let dy = qy - py;
+  const len = Math.hypot(dx, dy) || 1;
+  dx /= len;
+  dy /= len;
+  return (
+    <line x1={px - dx * F} y1={py - dy * F} x2={px + dx * F} y2={py + dy * F} {...common} />
+  );
 }
 
 /**
@@ -547,20 +616,14 @@ function GuideHandles({
       };
     };
 
-    const view = engine.getViewTransform();
     const docW = engine.getSnapshot().width;
     const docH = engine.getSnapshot().height;
 
     const onMove = (ev: PointerEvent) => {
       const local = localFromEvent(ev);
-      // Snap independently to the engine's snap candidates.
-      const docPt = engine.snapPointDoc(
-        {
-          x: (local.x - view.tx) / view.scale,
-          y: (local.y - view.ty) / view.scale,
-        },
-        8,
-      );
+      // Rotation-aware CSS → doc, then snap to the engine's snap candidates.
+      const doc = engine.cssToDoc(local.x, local.y);
+      const docPt = engine.snapPointDoc({ x: doc.x, y: doc.y }, 8);
       engine.moveGuide(g.id, g.axis === "h" ? docPt.y : docPt.x);
     };
 
@@ -569,10 +632,8 @@ function GuideHandles({
       // Dropped onto a ruler strip OR outside the doc bounds → remove.
       const onRuler =
         rulersVisible && (local.x < rulerEdge || local.y < rulerEdge);
-      const pos =
-        g.axis === "h"
-          ? (local.y - view.ty) / view.scale
-          : (local.x - view.tx) / view.scale;
+      const doc = engine.cssToDoc(local.x, local.y);
+      const pos = g.axis === "h" ? doc.y : doc.x;
       const outside = g.axis === "h" ? pos < 0 || pos > docH : pos < 0 || pos > docW;
       if (onRuler || outside) engine.removeGuide(g.id);
       window.removeEventListener("pointermove", onMove);

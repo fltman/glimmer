@@ -42,6 +42,7 @@ import type {
   GridState,
   SamUiPoint,
   LensBlurParams,
+  ChannelVisibility,
 } from "../engine/EditorEngine";
 import type { PathDescription, FillRule } from "../engine/Paths";
 
@@ -193,6 +194,48 @@ function viewExtrasCache() {
     prev.snapEnabled === next.snapEnabled;
   if (!same) _viewExtrasCache = next;
   return _viewExtrasCache;
+}
+
+/**
+ * Reactive view state for zoom/rotate UI (status bar, navigator, rotate
+ * control). The engine emits on pan/zoom/rotate/fit/reset and view recenters.
+ */
+export function useViewState(): { zoom: number; rotationDeg: number } {
+  return useSyncExternalStore(
+    (cb) => engine.subscribe(cb),
+    () => viewStateCache(),
+    () => viewStateCache(),
+  );
+}
+let _viewStateCache = { zoom: 1, rotationDeg: 0 };
+function viewStateCache(): { zoom: number; rotationDeg: number } {
+  const zoom = engine.getZoom();
+  const rotationDeg = engine.getViewRotation();
+  if (_viewStateCache.zoom !== zoom || _viewStateCache.rotationDeg !== rotationDeg) {
+    _viewStateCache = { zoom, rotationDeg };
+  }
+  return _viewStateCache;
+}
+
+/**
+ * Reactive per-document channel visibility for a Channels panel. The engine
+ * emits when a channel is toggled.
+ */
+export function useChannels(): ChannelVisibility {
+  return useSyncExternalStore(
+    (cb) => engine.subscribe(cb),
+    () => channelsCache(),
+    () => channelsCache(),
+  );
+}
+let _channelsCache: ChannelVisibility = { r: true, g: true, b: true, a: true };
+function channelsCache(): ChannelVisibility {
+  const next = engine.getChannelVisibility();
+  const prev = _channelsCache;
+  if (prev.r !== next.r || prev.g !== next.g || prev.b !== next.b || prev.a !== next.a) {
+    _channelsCache = next;
+  }
+  return _channelsCache;
 }
 
 /**
@@ -386,6 +429,53 @@ export const actions = {
   },
   fit() {
     engine.fitToScreen();
+  },
+
+  // ── view (zoom / pan / rotate / navigator) ──
+  /** Reset rotation to 0 and fit the document to the viewport. */
+  resetView() {
+    engine.resetView();
+  },
+  /** Rotate the view by a relative delta in degrees (about the canvas center). */
+  rotateView(deltaDeg: number) {
+    engine.rotateView(deltaDeg);
+  },
+  /** Set the absolute view rotation in degrees. */
+  setViewRotation(deg: number) {
+    engine.setViewRotation(deg);
+  },
+  /** Current view rotation in degrees. */
+  getViewRotation() {
+    return engine.getViewRotation();
+  },
+  /** Recenter the view so a document point is at the viewport center. */
+  centerViewOnDoc(docX: number, docY: number) {
+    engine.centerViewOnDoc(docX, docY);
+  },
+  /** Doc-space region currently visible (for a Navigator viewport rect). */
+  getViewportRectInDoc() {
+    return engine.getViewportRectInDoc();
+  },
+  /** Downscaled full-doc composite thumbnail for a Navigator panel. */
+  getNavigatorThumbnail(maxPx?: number) {
+    return engine.getNavigatorThumbnail(maxPx);
+  },
+
+  // ── channels ──
+  /** Toggle one channel's visibility in the present pass. */
+  setChannelVisible(ch: import("../engine/EditorEngine").ChannelKey, visible: boolean) {
+    engine.setChannelVisible(ch, visible);
+  },
+  /** Current per-document channel visibility. */
+  getChannelVisibility() {
+    return engine.getChannelVisibility();
+  },
+  /** Small channel preview (R/G/B/A grayscale, or 'rgb' composite) for a panel. */
+  getChannelThumbnail(
+    ch: import("../engine/EditorEngine").ChannelKey | "rgb",
+    maxPx?: number,
+  ) {
+    return engine.getChannelThumbnail(ch, maxPx);
   },
   // ── masks ──
   addMaskFromSelection(id: string) {

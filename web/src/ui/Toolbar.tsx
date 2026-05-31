@@ -20,6 +20,8 @@ import {
   ContentAwareFillItem,
   ContentAwareFillModal,
 } from "../ai/contentAware";
+import { NavigatorButton } from "./navigator/NavigatorButton";
+import { ViewControls } from "./navigator/ViewControls";
 
 /**
  * Image ▸ Adjustments dropdown — Photoshop's `Image > Adjustments` menu.
@@ -254,6 +256,12 @@ export function Toolbar() {
       <div className="ml-1 select-none rounded-md border border-edge bg-panelraised px-2 py-1 text-xs tabular-nums text-muted">
         {zoom}%
       </div>
+
+      <div className="mx-1 h-5 w-px bg-edge" />
+
+      {/* Rotate-view controls + Navigator (overview/pan). */}
+      <ViewControls />
+      <NavigatorButton disabled={!hasLayers} />
 
       <div className="flex-1" />
 
