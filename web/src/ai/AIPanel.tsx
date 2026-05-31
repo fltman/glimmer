@@ -3,7 +3,9 @@
  *   ASSISTANT (chat: conversational whole-image edits, prompt-to-layer, and
  *   Auto-edit multi-step planning) · GENERATE (text-to-image) · EDIT (inpaint +
  *   reference-image fill) · HARMONIZE (relight/grade a subject into the scene) ·
- *   CUTOUT (remove bg) · EXPAND (outpaint) · UPSCALE.
+ *   RELIGHT (directional/colored AI relighting) · COLOR MATCH (transfer a
+ *   reference image's grade — local Lab transfer) · CUTOUT (remove bg) ·
+ *   EXPAND (outpaint) · UPSCALE · PRESETS (one-click local cinematic looks).
  *
  * Each tab is a self-contained section that owns its own job lifecycle via the
  * shared useAiJob() hook (submit → WS progress → fetch artifact → loadLayer).
@@ -16,27 +18,36 @@ import { AssistantPanel } from "./assistant/AssistantPanel";
 import { GenerateSection } from "./sections/GenerateSection";
 import { EditSection } from "./sections/EditSection";
 import { HarmonizeSection } from "./harmonize/HarmonizeSection";
+import { RelightSection } from "./sections/RelightSection";
+import { ColorMatchSection } from "./sections/ColorMatchSection";
 import { CutoutSection } from "./sections/CutoutSection";
 import { ExpandSection } from "./sections/ExpandSection";
 import { UpscaleSection } from "./sections/UpscaleSection";
+import { PresetsSection } from "./presets/PresetsSection";
 
 type TabId =
   | "assistant"
   | "generate"
   | "edit"
   | "harmonize"
+  | "relight"
+  | "colormatch"
   | "cutout"
   | "expand"
-  | "upscale";
+  | "upscale"
+  | "presets";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "assistant", label: "Assistant" },
   { id: "generate", label: "Generate" },
   { id: "edit", label: "Edit" },
   { id: "harmonize", label: "Harmonize" },
+  { id: "relight", label: "Relight" },
+  { id: "colormatch", label: "Color Match" },
   { id: "cutout", label: "Cutout" },
   { id: "expand", label: "Expand" },
   { id: "upscale", label: "Upscale" },
+  { id: "presets", label: "Presets" },
 ];
 
 export function AIPanel() {
@@ -73,9 +84,12 @@ export function AIPanel() {
           {tab === "generate" && <GenerateSection />}
           {tab === "edit" && <EditSection />}
           {tab === "harmonize" && <HarmonizeSection />}
+          {tab === "relight" && <RelightSection />}
+          {tab === "colormatch" && <ColorMatchSection />}
           {tab === "cutout" && <CutoutSection />}
           {tab === "expand" && <ExpandSection />}
           {tab === "upscale" && <UpscaleSection />}
+          {tab === "presets" && <PresetsSection />}
         </div>
       )}
     </div>

@@ -1,8 +1,8 @@
 """Celery application: Redis broker + result backend, segregated queues.
 
 Queues (mirrors the routing in the plan):
-  - fast  : quick ops (segment, remove_background fallback, echo)
-  - gen   : generative model calls (text_to_image, image_edit, inpaint, outpaint, harmonize)
+  - fast  : quick ops (segment, remove_background fallback, echo, color_match local grade)
+  - gen   : generative model calls (text_to_image, image_edit, inpaint, outpaint, harmonize, relight)
   - heavy : long-running pixel pipelines (upscale, incl. creative-enhance pass)
 
 Tasks are registered by importing the `aips.tasks.*` modules below.
@@ -28,6 +28,8 @@ app = Celery(
         "aips.tasks.upscale",
         "aips.tasks.segment",
         "aips.tasks.harmonize",
+        "aips.tasks.relight",
+        "aips.tasks.color_match",
     ],
 )
 
@@ -46,6 +48,8 @@ CAPABILITY_TASKS: dict[str, str] = {
     "upscale": "aips.upscale",
     "segment": "aips.segment",
     "harmonize": "aips.harmonize",
+    "relight": "aips.relight",
+    "color_match": "aips.color_match",
     # remove_background runs client-side (ONNX) via a client_directive; no task.
 }
 
@@ -56,8 +60,12 @@ CAPABILITY_QUEUES: dict[str, str] = {
     "inpaint": QUEUE_GEN,
     "outpaint": QUEUE_GEN,
     "harmonize": QUEUE_GEN,
+    # relight is a generative img2img call (like image_edit/harmonize) -> gen.
+    "relight": QUEUE_GEN,
     "segment": QUEUE_FAST,
     "remove_background": QUEUE_FAST,
+    # color_match is a pure local numpy/Pillow op (no model) -> fast queue.
+    "color_match": QUEUE_FAST,
     "upscale": QUEUE_HEAVY,
 }
 

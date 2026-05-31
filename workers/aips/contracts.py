@@ -28,6 +28,8 @@ CAPABILITIES: tuple[str, ...] = (
     "upscale",
     "remove_background",
     "harmonize",
+    "relight",
+    "color_match",
 )
 
 Capability = Literal[
@@ -39,6 +41,8 @@ Capability = Literal[
     "upscale",
     "remove_background",
     "harmonize",
+    "relight",
+    "color_match",
 ]
 
 ExecutionLocation = Literal["server", "client"]
@@ -137,6 +141,33 @@ class HarmonizeInputs(TypedDict, total=False):
     #: 0..1 relight/grade aggressiveness (default ~0.6).
     strength: float
     seed: int
+
+
+#: Where the dominant (key) light comes FROM, relative to the subject.
+RelightDirection = Literal["left", "right", "top", "bottom", "front", "behind"]
+
+
+class RelightInputs(TypedDict, total=False):
+    #: The active image to relight.
+    image: AssetRef
+    #: Where the key light comes FROM (side/top/bottom/front/back).
+    direction: RelightDirection
+    #: Key-light color as #RRGGBB (default warm white "#ffe6c0").
+    color: str
+    #: 0..1 relight strength (default 0.6).
+    intensity: float
+    #: Optional scene/lighting environment to relight INTO.
+    backgroundPrompt: str
+    seed: int
+
+
+class ColorMatchInputs(TypedDict, total=False):
+    #: The active image whose colors will be re-graded (alpha preserved).
+    image: AssetRef
+    #: The reference image whose color grade is transferred onto `image`.
+    reference: AssetRef
+    #: 0..1 — amount of the reference grade to apply (default 1.0).
+    strength: float
 
 
 class JobArtifact(TypedDict, total=False):

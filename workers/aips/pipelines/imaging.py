@@ -154,6 +154,117 @@ def alpha_channel(img: Image.Image) -> Image.Image:
     return img.convert("RGBA").split()[-1]
 
 
+# ──────────────────────────────────────────────────────────────
+# CIE Lab color-grade transfer (Reinhard) — pure numpy, no skimage/cv2
+# ──────────────────────────────────────────────────────────────
+
+# sRGB <-> linear and linear-RGB <-> XYZ (D65) constants.
+_RGB_TO_XYZ = np.array(
+    [
+        [0.4124564, 0.3575761, 0.1804375],
+        [0.2126729, 0.7151522, 0.0721750],
+        [0.0193339, 0.1191920, 0.9503041],
+    ],
+    dtype=np.float64,
+)
+_XYZ_TO_RGB = np.linalg.inv(_RGB_TO_XYZ)
+# D65 reference white.
+_WHITE_XYZ = np.array([0.95047, 1.0, 1.08883], dtype=np.float64)
+
+
+def _srgb_to_linear(c: np.ndarray) -> np.ndarray:
+    """sRGB [0,1] -> linear RGB."""
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+
+
+def _linear_to_srgb(c: np.ndarray) -> np.ndarray:
+    """Linear RGB -> sRGB [0,1]."""
+    return np.where(c <= 0.0031308, c * 12.92, 1.055 * np.power(np.clip(c, 0, None), 1 / 2.4) - 0.055)
+
+
+def _f_lab(t: np.ndarray) -> np.ndarray:
+    delta = 6.0 / 29.0
+    return np.where(t > delta**3, np.cbrt(t), t / (3 * delta**2) + 4.0 / 29.0)
+
+
+def _f_lab_inv(t: np.ndarray) -> np.ndarray:
+    delta = 6.0 / 29.0
+    return np.where(t > delta, t**3, 3 * delta**2 * (t - 4.0 / 29.0))
+
+
+def rgb_to_lab(rgb: np.ndarray) -> np.ndarray:
+    """Convert an (H,W,3) uint8 (or [0,255] float) RGB array to CIE L*a*b*."""
+    c = np.asarray(rgb, dtype=np.float64) / 255.0
+    lin = _srgb_to_linear(c)
+    xyz = lin @ _RGB_TO_XYZ.T
+    xyz_n = xyz / _WHITE_XYZ
+    f = _f_lab(xyz_n)
+    fx, fy, fz = f[..., 0], f[..., 1], f[..., 2]
+    lab = np.empty_like(xyz)
+    lab[..., 0] = 116.0 * fy - 16.0  # L*  in [0,100]
+    lab[..., 1] = 500.0 * (fx - fy)  # a*
+    lab[..., 2] = 200.0 * (fy - fz)  # b*
+    return lab
+
+
+def lab_to_rgb(lab: np.ndarray) -> np.ndarray:
+    """Convert an (H,W,3) CIE L*a*b* array back to uint8 RGB (clamped)."""
+    lab = np.asarray(lab, dtype=np.float64)
+    fy = (lab[..., 0] + 16.0) / 116.0
+    fx = fy + lab[..., 1] / 500.0
+    fz = fy - lab[..., 2] / 200.0
+    xyz = np.stack(
+        [_f_lab_inv(fx), _f_lab_inv(fy), _f_lab_inv(fz)], axis=-1
+    ) * _WHITE_XYZ
+    lin = xyz @ _XYZ_TO_RGB.T
+    srgb = _linear_to_srgb(lin)
+    return np.clip(srgb * 255.0, 0, 255).astype(np.uint8)
+
+
+def lab_color_transfer(
+    image: Image.Image,
+    reference: Image.Image,
+    strength: float = 1.0,
+) -> Image.Image:
+    """Reinhard mean/std color-grade transfer from `reference` onto `image`.
+
+    Pure numpy/Pillow (no skimage/cv2). Works in CIE L*a*b*: each channel of the
+    image is shifted/scaled so its per-channel mean and standard deviation match
+    the reference's, then blended toward the original by `strength`
+    (0 = original unchanged, 1 = full transfer). The image's alpha channel is
+    preserved untouched. Reference alpha (if any) is ignored — all reference
+    pixels contribute to its statistics.
+    """
+    s = float(max(0.0, min(1.0, strength)))
+    src_rgba = image.convert("RGBA")
+    alpha = src_rgba.split()[-1]
+
+    src_rgb = np.asarray(src_rgba.convert("RGB"), dtype=np.float64)
+    ref_rgb = np.asarray(reference.convert("RGB"), dtype=np.float64)
+
+    src_lab = rgb_to_lab(src_rgb)
+    ref_lab = rgb_to_lab(ref_rgb)
+
+    src_mean = src_lab.reshape(-1, 3).mean(axis=0)
+    src_std = src_lab.reshape(-1, 3).std(axis=0)
+    ref_mean = ref_lab.reshape(-1, 3).mean(axis=0)
+    ref_std = ref_lab.reshape(-1, 3).std(axis=0)
+
+    # Guard against a flat (zero-variance) source channel.
+    safe_std = np.where(src_std < 1e-6, 1.0, src_std)
+    scale = ref_std / safe_std
+
+    matched_lab = (src_lab - src_mean) * scale + ref_mean
+    matched_rgb = lab_to_rgb(matched_lab).astype(np.float64)
+
+    # Blend the fully-matched result back toward the original by (1 - strength).
+    out_rgb = np.clip(src_rgb * (1.0 - s) + matched_rgb * s, 0, 255).astype(np.uint8)
+
+    out = Image.fromarray(out_rgb, mode="RGB").convert("RGBA")
+    out.putalpha(alpha)
+    return out
+
+
 def clamp_roi(
     roi: dict, img_w: int, img_h: int, pad_frac: float = 0.30
 ) -> tuple[int, int, int, int]:

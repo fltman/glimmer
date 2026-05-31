@@ -27,6 +27,8 @@ export const CAPABILITIES = [
   "upscale",
   "remove_background",
   "harmonize",
+  "relight",
+  "color_match",
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -142,6 +144,63 @@ export interface RemoveBackgroundInputs {
   image: AssetRef;
 }
 
+/** Light directions the relighter understands (where the key light comes FROM). */
+export const RELIGHT_DIRECTIONS = [
+  "left",
+  "right",
+  "top",
+  "bottom",
+  "front",
+  "behind",
+] as const;
+
+export type RelightDirection = (typeof RELIGHT_DIRECTIONS)[number];
+
+export interface RelightInputs {
+  /** The active image (composite or layer region) to relight. */
+  image: AssetRef;
+  /**
+   * Where the dominant (key) light comes FROM, relative to the subject:
+   * - "left"/"right"  — side light, shapes the subject and casts shadows sideways
+   * - "top"           — overhead light
+   * - "bottom"        — uplight / footlight
+   * - "front"         — flat frontal light (camera-side)
+   * - "behind"        — backlight / rim light (subject lit from behind)
+   */
+  direction: RelightDirection;
+  /**
+   * Key-light color as a #RRGGBB hex string. Drives the color temperature of the
+   * relight. Defaults to a warm white (`#ffe6c0`) when omitted.
+   */
+  color?: string;
+  /**
+   * 0..1 — how strong the relight is. 0 ≈ a whisper of directional shaping,
+   * 1 ≈ dramatic, high-contrast lighting. Defaults to 0.6 when omitted.
+   */
+  intensity?: number;
+  /**
+   * Optional scene/lighting environment to relight INTO (e.g. "golden hour on a
+   * beach", "moody neon-lit alley at night"). When given, the relighter changes
+   * the background/environment lighting to match while preserving the subject's
+   * identity, shapes and composition. When omitted, only the existing scene's
+   * light direction/color/contrast change.
+   */
+  backgroundPrompt?: string;
+  seed?: number;
+}
+
+export interface ColorMatchInputs {
+  /** The active image whose colors will be re-graded. Its alpha is preserved. */
+  image: AssetRef;
+  /** The reference image whose color grade (palette/tone) is transferred onto `image`. */
+  reference: AssetRef;
+  /**
+   * 0..1 — how much of the reference grade to apply. 0 = original image
+   * unchanged, 1 = full Reinhard mean/std transfer. Defaults to 1 when omitted.
+   */
+  strength?: number;
+}
+
 export interface CapabilityInputsMap {
   text_to_image: TextToImageInputs;
   image_edit: ImageEditInputs;
@@ -151,6 +210,8 @@ export interface CapabilityInputsMap {
   upscale: UpscaleInputs;
   remove_background: RemoveBackgroundInputs;
   harmonize: HarmonizeInputs;
+  relight: RelightInputs;
+  color_match: ColorMatchInputs;
 }
 
 // ──────────────────────────────────────────────────────────────

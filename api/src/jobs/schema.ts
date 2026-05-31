@@ -113,6 +113,31 @@ const HarmonizeInputs = z.object({
   seed: z.number().int().optional(),
 });
 
+const RelightInputs = z.object({
+  image: AssetRefSchema,
+  /** Where the key light comes FROM (mirror RELIGHT_DIRECTIONS). */
+  direction: z.enum(["left", "right", "top", "bottom", "front", "behind"]),
+  /** Key-light color as #RRGGBB / #RGB hex; defaults server-side to warm white. */
+  color: z
+    .string()
+    .regex(/^#?[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/, "color must be a hex color")
+    .optional(),
+  /** 0..1 relight strength (default 0.6 server-side). */
+  intensity: z.number().min(0).max(1).optional(),
+  /** Optional scene/lighting environment to relight INTO. */
+  backgroundPrompt: z.string().optional(),
+  seed: z.number().int().optional(),
+});
+
+const ColorMatchInputs = z.object({
+  /** The active image whose colors will be re-graded (alpha preserved). */
+  image: AssetRefSchema,
+  /** The reference image whose color grade is transferred onto `image`. */
+  reference: AssetRefSchema,
+  /** 0..1 amount of the reference grade to apply (default 1 server-side). */
+  strength: z.number().min(0).max(1).optional(),
+});
+
 /**
  * Discriminated request schema. We validate `inputs` against the matching
  * per-capability schema via a refine + transform so the parsed result is
@@ -127,6 +152,8 @@ const CAPABILITY_INPUTS = {
   upscale: UpscaleInputs,
   remove_background: RemoveBackgroundInputs,
   harmonize: HarmonizeInputs,
+  relight: RelightInputs,
+  color_match: ColorMatchInputs,
 } as const;
 
 export const CreateJobRequestSchema = z
