@@ -14,10 +14,14 @@ import {
   isPaintTool,
   isSelectionTool,
   isRetouchTool,
+  usePatterns,
+  usePatternState,
+  renderPatternTile,
   type RGBAColor,
   type ShapeKind,
   type DodgeBurnRange,
   type GradientStopUI,
+  type PatternDef,
 } from "../state/tools";
 import {
   actions,
@@ -29,6 +33,7 @@ import {
 import { ColorPicker } from "./color/ColorPicker";
 import { rgbaCss } from "./color/colorMath";
 import { BrushDynamicsButton, BrushPresetsButton } from "./brush";
+import { PatternsButton } from "./patterns";
 
 /** A tiny checkerboard-backed color chip (so alpha reads correctly). */
 function ColorChip({ color, title }: { color: RGBAColor; title: string }) {
@@ -800,6 +805,92 @@ function FocusBar({ sharpen }: { sharpen: boolean }) {
   );
 }
 
+/**
+ * A small canvas chip previewing a pattern tile (the SAME tile the engine
+ * uploads, via renderPatternTile) tiled across the chip. Used in the pattern-
+ * stamp option bar and the bucket "Fill with Pattern" affordance so the active
+ * pattern is visible at a glance.
+ */
+function PatternChip({ def, size = 20 }: { def: PatternDef; size?: number }) {
+  const ref = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    const cv = ref.current;
+    if (!cv) return;
+    const ctx = cv.getContext("2d");
+    if (!ctx) return;
+    const img = renderPatternTile(def);
+    if (!img) return;
+    const tile = document.createElement("canvas");
+    tile.width = img.width;
+    tile.height = img.height;
+    tile.getContext("2d")?.putImageData(img, 0, 0);
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.imageSmoothingEnabled = false;
+    const pat = ctx.createPattern(tile, "repeat");
+    if (pat) {
+      ctx.fillStyle = pat;
+      ctx.fillRect(0, 0, cv.width, cv.height);
+    } else {
+      for (let y = 0; y < cv.height; y += img.height)
+        for (let x = 0; x < cv.width; x += img.width) ctx.drawImage(tile, x, y);
+    }
+  }, [def]);
+  return (
+    <canvas
+      ref={ref}
+      width={size}
+      height={size}
+      title={`Active pattern: ${def.name}`}
+      className="rounded border border-edge"
+      style={{ imageRendering: "pixelated", width: size, height: size }}
+    />
+  );
+}
+
+/**
+ * Pattern-stamp option bar: active-pattern chip + Patterns picker popover, plus
+ * scale + opacity sliders (shared with fill via the patternStore). Painting is
+ * handled by the engine's own pattern-stamp gesture; these just set the wet-dab
+ * params it reads. Reads usePatterns()/usePatternState() and writes through
+ * actions.setPattern / setPatternScale / setPatternOpacity.
+ */
+function PatternStampBar() {
+  const patterns = usePatterns();
+  const { selectedId, scale, opacity } = usePatternState();
+  const def =
+    patterns.find((p) => p.id === selectedId) ?? patterns[0];
+  return (
+    <div className="flex items-center gap-3">
+      <div className="flex items-center gap-1.5">
+        <span className="text-[11px] text-muted">Pattern</span>
+        {def && <PatternChip def={def} />}
+        <PatternsButton label="Choose" />
+      </div>
+      <Slider
+        label="Scale"
+        value={scale}
+        min={0.05}
+        max={8}
+        step={0.05}
+        fmt={(v) => `${Math.round(v * 100)}%`}
+        onChange={(v) => actions.setPatternScale(v)}
+      />
+      <Slider
+        label="Opacity"
+        value={opacity}
+        min={0}
+        max={1}
+        step={0.01}
+        fmt={(v) => `${Math.round(v * 100)}%`}
+        onChange={(v) => actions.setPatternOpacity(v)}
+      />
+      <span className="text-[11px] text-muted">
+        Drag to stamp the pattern · constrained to the selection when set
+      </span>
+    </div>
+  );
+}
+
 /** True if a path description has at least one closed subpath (>= 2 anchors). */
 function pathHasClosedRegion(
   p: ReturnType<typeof engine.getActivePath>,
@@ -1229,10 +1320,17 @@ export function ToolOptions() {
           <span className="text-[11px] text-muted">
             Fills the selection, or the whole layer when nothing is selected
           </span>
+          {/* Pattern fill affordance: same picker popover used by the stamp. */}
+          <span className="ml-2 border-l border-edge pl-2 text-[11px] text-muted">
+            or
+          </span>
+          <PatternsButton label="Fill with Pattern" />
         </div>
       )}
 
       {active === "gradient" && <GradientBar />}
+
+      {active === "pattern-stamp" && <PatternStampBar />}
 
       {active === "eyedropper" && (
         <span className="text-[11px] text-muted">

@@ -23,6 +23,7 @@ import {
   toolStore,
   swatchStore,
   brushPresetStore,
+  patternStore,
   type RGBAColor,
   type TextParams,
   type ShapeParams,
@@ -353,6 +354,52 @@ export const actions = {
     },
   ) {
     engine.applyGradientFill(layerId, opts);
+  },
+
+  // ── patterns (fill + stamp) ──
+  /**
+   * Tile a pattern across the active layer's selection (or whole layer). Defaults
+   * the pattern id / scale / opacity to the patternStore selection.
+   */
+  fillWithPattern(
+    layerId: string,
+    patternId?: string,
+    opts?: { scale?: number; opacity?: number },
+  ) {
+    engine.fillWithPattern(layerId, patternId ?? patternStore.getState().selectedId, opts);
+  },
+  /** Select the active pattern (pattern-stamp tool + fillWithPattern default). */
+  setPattern(id: string) {
+    patternStore.setSelected(id);
+  },
+  /** Set the pattern tile scale multiplier (1 = native tile size). */
+  setPatternScale(scale: number) {
+    patternStore.setScale(scale);
+  },
+  /** Set the pattern fill/stamp opacity 0..1. */
+  setPatternOpacity(opacity: number) {
+    patternStore.setOpacity(opacity);
+  },
+
+  // ── content-aware fill helpers (UI runs the AI inpaint(mode:'remove') job) ──
+  /** Active layer id if it's a raster layer, else null (gates content-aware fill). */
+  getActiveRasterLayerId(): string | null {
+    return engine.getActiveRasterLayerId();
+  },
+  /** Tight doc-space ROI of the current selection (the region to regenerate). */
+  getSelectionMaskBounds() {
+    return engine.getSelectionMaskBounds();
+  },
+  /** PNG of a layer's composited pixels within an ROI (the source to inpaint). */
+  exportLayerRegionPNG(
+    layerId: string,
+    roi: { x: number; y: number; width: number; height: number },
+  ) {
+    return engine.exportLayerRegionPNG(layerId, roi);
+  },
+  /** PNG of the selection mask (white = remove) within an ROI. */
+  exportSelectionMaskPNG(roi?: { x: number; y: number; width: number; height: number }) {
+    return engine.exportSelectionMaskPNG(roi);
   },
 
   // ── adjustment layers ──

@@ -26,7 +26,13 @@ export type FilterType =
   | "add_noise"
   | "pixelate"
   | "find_edges"
-  | "emboss";
+  | "emboss"
+  | "vignette"
+  | "chromatic_aberration"
+  | "halftone"
+  | "lens_blur"
+  | "oil_paint"
+  | "clarity";
 
 export type FilterParams = ParamBag;
 
@@ -373,18 +379,338 @@ void main() {
       gl.uniform1f(loc("u_amount"), num(params.amount, 1));
     },
   },
+
+  // Vignette — radial darkening toward the edges. `midpoint` sets where the
+  // falloff begins (0 = center, 1 = corners), `feather` softens the transition,
+  // `roundness` morphs between an ellipse fitted to the layer (0) and a circle
+  // (1). The darkening is applied in DISPLAY space (matches PS lens-vignette).
+  vignette: {
+    type: "vignette",
+    label: "Vignette",
+    defaults: { amount: 0.5, midpoint: 0.5, roundness: 0.5, feather: 0.5 },
+    paramsSchema: [
+      { kind: "slider", key: "amount", label: "Amount", min: 0, max: 1, step: 0.01, default: 0.5 },
+      { kind: "slider", key: "midpoint", label: "Midpoint", min: 0, max: 1, step: 0.01, default: 0.5 },
+      { kind: "slider", key: "roundness", label: "Roundness", min: 0, max: 1, step: 0.01, default: 0.5 },
+      { kind: "slider", key: "feather", label: "Feather", min: 0.01, max: 1, step: 0.01, default: 0.5 },
+    ],
+    passes: () => 1,
+    fragSource:
+      F_HEADER +
+      /* glsl */ `
+uniform float u_amount;
+uniform float u_midpoint;
+uniform float u_roundness;
+uniform float u_feather;
+uniform float u_aspect;   // width / height
+void main() {
+  vec4 c = texDisplay(v_uv);
+  // Centered coords; scale x toward circular as roundness -> 1.
+  vec2 d = (v_uv - 0.5) * 2.0;
+  d.x *= mix(u_aspect, 1.0, u_roundness);
+  float r = length(d);
+  // Falloff: fully lit inside the midpoint radius, ramping to full darkening
+  // over the feather band toward the corner radius.
+  float inner = u_midpoint;
+  float outer = u_midpoint + u_feather;
+  float v = smoothstep(inner, outer, r);
+  float darken = 1.0 - v * u_amount;
+  fragColor = vec4(clamp(c.rgb * darken, 0.0, 1.0), c.a);
+}
+`,
+    setUniforms: (ctx) => {
+      const { gl, loc, params, width, height } = ctx;
+      gl.uniform1f(loc("u_amount"), num(params.amount, 0.5));
+      gl.uniform1f(loc("u_midpoint"), num(params.midpoint, 0.5));
+      gl.uniform1f(loc("u_roundness"), num(params.roundness, 0.5));
+      gl.uniform1f(loc("u_feather"), Math.max(0.01, num(params.feather, 0.5)));
+      gl.uniform1f(loc("u_aspect"), Math.max(1e-3, width / Math.max(1, height)));
+    },
+  },
+
+  // Chromatic Aberration — offset the R and B channels radially outward from the
+  // center (lateral CA). `amount` is the max channel shift in px at the corner.
+  // `edgeOnly` ramps the shift with radius^2 so the center stays crisp.
+  chromatic_aberration: {
+    type: "chromatic_aberration",
+    label: "Chromatic Aberration",
+    defaults: { amount: 6, edgeOnly: true },
+    paramsSchema: [
+      { kind: "slider", key: "amount", label: "Amount", min: 0, max: 40, step: 0.5, default: 6 },
+      { kind: "checkbox", key: "edgeOnly", label: "Stronger at Edges", default: true },
+    ],
+    passes: () => 1,
+    fragSource:
+      F_HEADER +
+      /* glsl */ `
+uniform float u_amount;   // px at the corner
+uniform bool u_edgeOnly;
+void main() {
+  vec2 dir = v_uv - 0.5;
+  float r = length(dir) / 0.7071;          // 0 at center, ~1 at corner
+  float falloff = u_edgeOnly ? r * r : r;
+  // Shift in uv: amount px * texel, along the radial direction.
+  vec2 off = normalize(dir + vec2(1e-6)) * (u_amount * falloff) * u_texel;
+  float a = texDisplay(v_uv).a;
+  float rch = texDisplay(v_uv + off).r;     // R pushed out
+  float gch = texDisplay(v_uv).g;           // G stays
+  float bch = texDisplay(v_uv - off).b;     // B pulled in
+  fragColor = vec4(rch, gch, bch, a);
+}
+`,
+    setUniforms: (ctx) => {
+      const { gl, loc, params } = ctx;
+      gl.uniform1f(loc("u_amount"), Math.max(0, num(params.amount, 6)));
+      gl.uniform1i(loc("u_edgeOnly"), bool(params.edgeOnly, true) ? 1 : 0);
+    },
+  },
+
+  // Halftone — newsprint dot screen. The image is sampled on a rotated grid and
+  // each cell becomes a dot whose radius tracks the cell's luminance (mono) or
+  // per-channel value (CMY-ish color screen at staggered angles).
+  halftone: {
+    type: "halftone",
+    label: "Halftone",
+    defaults: { cellSize: 8, angle: 45, monochrome: true },
+    paramsSchema: [
+      { kind: "slider", key: "cellSize", label: "Cell Size", min: 2, max: 40, step: 1, default: 8 },
+      { kind: "slider", key: "angle", label: "Angle", min: 0, max: 90, step: 1, default: 45 },
+      { kind: "checkbox", key: "monochrome", label: "Monochrome", default: true },
+    ],
+    passes: () => 1,
+    fragSource:
+      F_HEADER +
+      /* glsl */ `
+uniform float u_cell;     // px
+uniform float u_angle;    // radians
+uniform bool u_mono;
+float lum(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }
+// Dot coverage for value v (0=dark) at rotated screen angle ang. Returns the
+// ink amount 0..1 at the current pixel for that screen.
+float screen(vec2 px, float v, float ang) {
+  float s = sin(ang), co = cos(ang);
+  mat2 rot = mat2(co, -s, s, co);
+  vec2 rp = rot * px;
+  vec2 cell = mod(rp, u_cell) - u_cell * 0.5;
+  float dist = length(cell);
+  // Darker value -> bigger dot. Radius up to half the cell diagonal.
+  float radius = (1.0 - v) * u_cell * 0.5 * 1.42;
+  return 1.0 - smoothstep(radius - 1.0, radius + 1.0, dist);
+}
+void main() {
+  vec4 c = texDisplay(v_uv);
+  vec2 px = v_uv / u_texel;
+  if (u_mono) {
+    float v = lum(c.rgb);
+    float ink = screen(px, v, u_angle);
+    fragColor = vec4(vec3(1.0 - ink), c.a);   // ink black on white
+  } else {
+    // CMY screens at classic stagger; K not separated (keeps it simple).
+    float cy = screen(px, c.r, u_angle + 0.2618);          // ~15deg
+    float mg = screen(px, c.g, u_angle + 1.309);           // ~75deg
+    float yl = screen(px, c.b, u_angle);                   // 0deg
+    vec3 rgb = vec3(1.0) - vec3(cy, mg, yl);
+    fragColor = vec4(rgb, c.a);
+  }
+}
+`,
+    setUniforms: (ctx) => {
+      const { gl, loc, params } = ctx;
+      gl.uniform1f(loc("u_cell"), Math.max(2, num(params.cellSize, 8)));
+      gl.uniform1f(loc("u_angle"), (num(params.angle, 45) * Math.PI) / 180);
+      gl.uniform1i(loc("u_mono"), bool(params.monochrome, true) ? 1 : 0);
+    },
+  },
+
+  // Lens Blur — disc/bokeh blur. Samples a fixed-count spiral disc kernel (the
+  // sample count scales with radius up to a cap). Highlights are gently boosted
+  // before averaging so bright points bloom into bokeh discs (approximate).
+  lens_blur: {
+    type: "lens_blur",
+    label: "Lens Blur",
+    defaults: { radius: 8, brightnessBoost: 0.3 },
+    paramsSchema: [
+      { kind: "slider", key: "radius", label: "Radius", min: 0, max: 60, step: 0.5, default: 8 },
+      { kind: "slider", key: "brightnessBoost", label: "Highlight Bloom", min: 0, max: 1, step: 0.01, default: 0.3 },
+    ],
+    passes: () => 1,
+    fragSource:
+      F_HEADER +
+      /* glsl */ `
+uniform float u_radius;   // px
+uniform int   u_samples;
+uniform float u_boost;
+// Golden-angle spiral disc sampling — even disc coverage with a fixed budget.
+const float GA = 2.39996323;
+void main() {
+  if (u_radius < 0.5) { fragColor = texDisplay(v_uv); return; }
+  vec4 sum = vec4(0.0);
+  float wsum = 0.0;
+  int n = u_samples;
+  for (int i = 0; i < 256; i++) {
+    if (i >= n) break;
+    float fi = float(i);
+    float t = (fi + 0.5) / float(n);
+    float rr = sqrt(t) * u_radius;        // uniform disc radius
+    float ang = fi * GA;
+    vec2 off = vec2(cos(ang), sin(ang)) * rr * u_texel;
+    vec4 s = texDisplay(v_uv + off);
+    // Highlight weighting: brighter samples count a touch more, so bright
+    // points spread into rounded bokeh instead of just averaging out.
+    float l = dot(s.rgb, vec3(0.299, 0.587, 0.114));
+    float w = 1.0 + u_boost * pow(l, 3.0) * 3.0;
+    sum += s * w;
+    wsum += w;
+  }
+  fragColor = wsum > 0.0 ? sum / wsum : texDisplay(v_uv);
+}
+`,
+    setUniforms: (ctx) => {
+      const { gl, loc, params } = ctx;
+      const radius = Math.max(0, num(params.radius, 8));
+      // Sample budget grows with area, capped at 256 (shader loop bound).
+      const n = Math.max(8, Math.min(256, Math.round(radius * radius * 0.9) + 12));
+      gl.uniform1f(loc("u_radius"), radius);
+      gl.uniform1i(loc("u_samples"), n);
+      gl.uniform1f(loc("u_boost"), num(params.brightnessBoost, 0.3));
+    },
+  },
+
+  // Oil Paint — Kuwahara-style painterly stylize. The neighborhood is split into
+  // four overlapping quadrant windows; the quadrant with the lowest luminance
+  // variance wins and its mean color is output, flattening detail into smooth
+  // "brushed" regions while preserving edges. `intensity` blends toward the
+  // original so the effect can be eased in.
+  oil_paint: {
+    type: "oil_paint",
+    label: "Oil Paint",
+    defaults: { radius: 4, intensity: 1 },
+    paramsSchema: [
+      { kind: "slider", key: "radius", label: "Radius", min: 1, max: 10, step: 1, default: 4 },
+      { kind: "slider", key: "intensity", label: "Intensity", min: 0, max: 1, step: 0.01, default: 1 },
+    ],
+    passes: () => 1,
+    fragSource:
+      F_HEADER +
+      /* glsl */ `
+uniform int u_radius;     // window half-size in px (<= 10)
+uniform float u_intensity;
+float lum(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }
+void main() {
+  vec4 src = texDisplay(v_uv);
+  int rad = u_radius;
+  // Accumulate the four Kuwahara quadrants: mean color + luminance variance.
+  vec3 qmean[4];
+  float qvar[4];
+  for (int q = 0; q < 4; q++) { qmean[q] = vec3(0.0); qvar[q] = 0.0; }
+  // Quadrant offset signs: (-,-), (+,-), (-,+), (+,+).
+  for (int q = 0; q < 4; q++) {
+    vec2 sgn = vec2(q == 1 || q == 3 ? 1.0 : -1.0, q >= 2 ? 1.0 : -1.0);
+    vec3 sumC = vec3(0.0);
+    float sumL = 0.0, sumL2 = 0.0, cnt = 0.0;
+    for (int dy = 0; dy <= 10; dy++) {
+      if (dy > rad) break;
+      for (int dx = 0; dx <= 10; dx++) {
+        if (dx > rad) break;
+        vec2 off = vec2(float(dx) * sgn.x, float(dy) * sgn.y) * u_texel;
+        vec3 c = texDisplay(v_uv + off).rgb;
+        float l = lum(c);
+        sumC += c; sumL += l; sumL2 += l * l; cnt += 1.0;
+      }
+    }
+    qmean[q] = sumC / cnt;
+    float m = sumL / cnt;
+    qvar[q] = sumL2 / cnt - m * m;
+  }
+  // Pick the lowest-variance (flattest) quadrant.
+  vec3 best = qmean[0];
+  float bestVar = qvar[0];
+  for (int q = 1; q < 4; q++) {
+    if (qvar[q] < bestVar) { bestVar = qvar[q]; best = qmean[q]; }
+  }
+  vec3 outc = mix(src.rgb, best, clamp(u_intensity, 0.0, 1.0));
+  fragColor = vec4(outc, src.a);
+}
+`,
+    setUniforms: (ctx) => {
+      const { gl, loc, params } = ctx;
+      gl.uniform1i(loc("u_radius"), Math.max(1, Math.min(10, Math.round(num(params.radius, 4)))));
+      gl.uniform1f(loc("u_intensity"), num(params.intensity, 1));
+    },
+  },
+
+  // Clarity — local-contrast (midtone) boost. We estimate a large-radius blurred
+  // "base" in ONE pass with a wide ring of weighted taps, then add the high-pass
+  // (image - base) back, weighted by a midtone bell so shadows/highlights aren't
+  // crushed. Single pass keeps it self-contained (the original layer is u_src on
+  // pass 0, so image and base come from the same sampler). `amount` can go
+  // negative to SOFTEN local contrast.
+  clarity: {
+    type: "clarity",
+    label: "Clarity",
+    defaults: { amount: 0.4 },
+    paramsSchema: [
+      { kind: "slider", key: "amount", label: "Amount", min: -1, max: 1, step: 0.01, default: 0.4 },
+    ],
+    passes: () => 1,
+    fragSource:
+      F_HEADER +
+      /* glsl */ `
+uniform float u_amount;
+uniform float u_radius;   // base-blur spread in px
+float lum(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }
+void main() {
+  vec4 c = texDisplay(v_uv);
+  // Wide separable-ish ring blur (25 taps on a 5x5 weighted lattice scaled by
+  // radius) approximating the low-frequency base for a large-radius high-pass.
+  vec2 r = u_texel * u_radius;
+  vec3 base = vec3(0.0);
+  float wsum = 0.0;
+  for (int j = -2; j <= 2; j++) {
+    for (int i = -2; i <= 2; i++) {
+      vec2 off = vec2(float(i), float(j)) * r;
+      // Gaussian-ish weight by lattice distance.
+      float w = exp(-(float(i*i + j*j)) / 4.0);
+      base += texDisplay(v_uv + off).rgb * w;
+      wsum += w;
+    }
+  }
+  base /= max(wsum, 1e-4);
+  vec3 high = c.rgb - base;
+  // Midtone bell weight (peaks at 0.5 luminance, eases shadows/highlights).
+  float l = lum(c.rgb);
+  float midtone = 1.0 - pow(clamp(abs(l - 0.5) * 2.0, 0.0, 1.0), 2.0);
+  vec3 outc = clamp(c.rgb + high * u_amount * 1.5 * midtone, 0.0, 1.0);
+  fragColor = vec4(outc, c.a);
+}
+`,
+    setUniforms: (ctx) => {
+      const { gl, loc, params, width, height } = ctx;
+      // Wide base blur (clarity is a large-radius unsharp); spread scales with
+      // the layer so it reads as LOCAL contrast, not edge sharpening.
+      const radius = Math.max(4, Math.min(40, Math.round(Math.min(width, height) * 0.02)));
+      gl.uniform1f(loc("u_radius"), radius);
+      gl.uniform1f(loc("u_amount"), num(params.amount, 0.4));
+    },
+  },
 };
 
 /** Ordered list for the Filter menu. */
 export const FILTER_ORDER: FilterType[] = [
   "gaussian_blur",
+  "lens_blur",
   "motion_blur",
   "sharpen",
   "unsharp_mask",
+  "clarity",
   "add_noise",
   "pixelate",
   "find_edges",
   "emboss",
+  "oil_paint",
+  "halftone",
+  "vignette",
+  "chromatic_aberration",
 ];
 
 /** Deep-clone a filter's defaults. */

@@ -34,6 +34,7 @@ const CURSORS: Record<ToolId, string> = {
   crop: "crosshair",
   text: "text",
   shape: "crosshair",
+  "pattern-stamp": "crosshair",
   clone: "crosshair",
   heal: "crosshair",
   dodge: "crosshair",

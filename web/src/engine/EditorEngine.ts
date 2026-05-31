@@ -77,8 +77,11 @@ import { LiquifyEngine, type LiquifyMode, type LiquifyBrush } from "./LiquifyEng
 import { History, paramCommand } from "./history/History";
 import {
   toolStore,
+  patternStore,
+  renderPatternTile,
   isPaintTool,
   isRetouchTool,
+  isPatternStampTool,
   isSelectionTool,
   selectionOpFromEvent,
   type ToolId,
@@ -249,6 +252,9 @@ export class EditorEngine {
   /** Compiled filter programs, keyed by filter type. */
   private filterPrograms = new Map<FilterType, WebGLProgram>();
 
+  /** Cached pattern tile textures (sRGB), keyed by pattern id. */
+  private patternTextures = new Map<string, TextureHandle>();
+
   /**
    * Active live filter preview, or null. While set, render() applies the filter
    * over the previewed layer's contribution (non-committed). commit/cancel
@@ -296,6 +302,7 @@ export class EditorEngine {
     | { kind: "pan" }
     | { kind: "move"; startX: number; startY: number; origX: number; origY: number; layerId: LayerId }
     | { kind: "paint"; layerId: LayerId; onMask: boolean }
+    | { kind: "pattern-stamp"; layerId: LayerId }
     | { kind: "retouch"; layerId: LayerId; mode: RetouchMode }
     | { kind: "liquify"; layerId: LayerId }
     | { kind: "marquee"; shape: "rect" | "ellipse"; startDoc: { x: number; y: number }; op: ReturnType<typeof selectionOpFromEvent> }
@@ -618,6 +625,19 @@ void main() { fragColor = texture(u_src, v_uv); }`,
   }
 
   /**
+   * The active layer id if (and only if) it is a raster layer; otherwise null.
+   * Convenience for the content-aware-fill / pattern flows, which only operate
+   * on raster pixels (adjustment/group/text layers return null). Used by the UI
+   * to gate "Content-Aware Fill" and to pass the layer id to exportLayerRegionPNG.
+   */
+  getActiveRasterLayerId(): LayerId | null {
+    const id = this.doc.getActiveLayerId();
+    if (!id) return null;
+    const l = this.doc.getLayer(id);
+    return l && l.kind === "raster" ? id : null;
+  }
+
+  /**
    * Export the selection mask within `roi` as a single-channel-encoded PNG
    * (white = selected). Used by inpaint. `roi` defaults to the selection bounds
    * (or the whole document when empty).
@@ -786,6 +806,12 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     this.adjustmentPrograms.clear();
     this.adjustmentLUTs.clear();
     this.filterPrograms.clear();
+    // Pattern tile textures are GPU resources lost with the context; drop the
+    // cache so they re-rasterize + re-upload lazily on next use.
+    this.patternTextures.clear();
+    this._patternFillProg = null;
+    this._patternStampProg = null;
+    this._patternPreviewProg = null;
     this.filterPreview = null;
     this.filterScratch = null;
     this._fillProg = null;
@@ -1307,6 +1333,17 @@ void main() { fragColor = texture(u_src, v_uv); }`,
         !this.gesture.onMask
       ) {
         this.compositeBrushPreview(write, layer as PixelLayer);
+      }
+      // Live pattern-stamp preview: composite the wet coverage textured with the
+      // active pattern over THIS layer in place.
+      if (
+        allowBrushPreview &&
+        this.brush &&
+        this.brush.isActive &&
+        this.gesture.kind === "pattern-stamp" &&
+        this.gesture.layerId === id
+      ) {
+        this.compositePatternStampPreview(write, layer as PixelLayer);
       }
 
       const swp = read; read = write; write = swp;
@@ -1902,6 +1939,77 @@ void main() {
     return this._previewProg;
   }
 
+  /**
+   * Live preview of a pattern-stamp stroke: composite the wet coverage textured
+   * with the active pattern OVER the layer's contribution in `write`. Mirrors
+   * compositeBrushPreview but samples the pattern (tiled in layer space) instead
+   * of a flat color. Premultiplied output, source-over into the accumulator.
+   */
+  private compositePatternStampPreview(write: FramebufferHandle, layer: PixelLayer): void {
+    const r = this.renderer;
+    const wet = this.brush?.wetBuffer;
+    if (!r || !wet) return;
+    const gl = r.gl;
+    const st = patternStore.getState();
+    const patTex = this.resolvePatternTexture(st.selectedId);
+    if (!patTex) return;
+    const def = patternStore.getById(st.selectedId);
+    const tilePx = Math.max(1, def.tileSize * Math.max(0.05, st.scale));
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, write.fbo);
+    gl.viewport(0, 0, write.width, write.height);
+    gl.enable(gl.BLEND);
+    gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    const prog = this.patternStampPreviewProgram();
+    gl.useProgram(prog);
+    const pixToClip = m3.pixelToClip(write.width, write.height);
+    const viewM = m3.multiply(
+      m3.translation(this.view.tx, this.view.ty),
+      m3.scaling(this.view.scale, this.view.scale),
+    );
+    const toLayer = m3.multiply(
+      m3.translation(layer.x, layer.y),
+      m3.scaling(layer.width, layer.height),
+    );
+    const transform = m3.multiply(pixToClip, m3.multiply(viewM, toLayer));
+    gl.uniformMatrix3fv(gl.getUniformLocation(prog, "u_transform"), false, transform);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_wet"), 0);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_pattern"), 1);
+    gl.uniform1f(gl.getUniformLocation(prog, "u_opacity"), this.currentBrushOpacity() * st.opacity);
+    gl.uniform2f(gl.getUniformLocation(prog, "u_size"), layer.width, layer.height);
+    gl.uniform1f(gl.getUniformLocation(prog, "u_tilePx"), tilePx);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, wet.color.tex);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, patTex.tex);
+    r.drawQuad();
+    gl.disable(gl.BLEND);
+  }
+
+  // Lazily-compiled pattern-stamp preview program (pattern-textured wet quad,
+  // premultiplied-linear output for source-over into the float accumulator).
+  private _patternPreviewProg: WebGLProgram | null = null;
+  private patternStampPreviewProgram(): WebGLProgram {
+    if (this._patternPreviewProg) return this._patternPreviewProg;
+    const frag = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv; out vec4 fragColor;
+uniform sampler2D u_wet;
+uniform sampler2D u_pattern;   // sRGB tile (GPU decodes to linear)
+uniform float u_opacity;
+uniform vec2 u_size;           // layer px
+uniform float u_tilePx;        // tile size in layer px
+void main() {
+  vec2 px = v_uv * u_size;
+  vec2 tileUv = fract(px / u_tilePx);
+  vec4 pat = texture(u_pattern, tileUv);   // linear rgb
+  float a = texture(u_wet, v_uv).r * pat.a * u_opacity;
+  fragColor = vec4(pat.rgb * a, a);         // premultiplied linear
+}`;
+    this._patternPreviewProg = this.renderer!.compileProgram(QUAD_VERT, frag);
+    return this._patternPreviewProg;
+  }
+
   private renderAnts(
     bw: number,
     bh: number,
@@ -2358,6 +2466,11 @@ void main() {
       return;
     }
 
+    if (isPatternStampTool(tool) && activeId) {
+      this.beginPatternStamp(activeId, doc, e);
+      return;
+    }
+
     if (tool === "magic-wand") {
       const mw = toolStore.get().magicWand;
       this.magicWandSelect(doc.x, doc.y, {
@@ -2502,8 +2615,9 @@ void main() {
       return;
     }
 
-    if (g.kind === "paint") {
-      // Use coalesced events for smooth high-rate strokes.
+    if (g.kind === "paint" || g.kind === "pattern-stamp") {
+      // Use coalesced events for smooth high-rate strokes. Both gestures stamp
+      // the brush dab into the same wet R8 buffer; only the flatten differs.
       const events = e.getCoalescedEvents?.() ?? [e];
       for (const ce of events) {
         const cl = this.localPoint(ce);
@@ -2613,6 +2727,11 @@ void main() {
 
     if (g.kind === "paint") {
       this.commitPaint(g.layerId, g.onMask);
+      return;
+    }
+
+    if (g.kind === "pattern-stamp") {
+      this.commitPatternStamp(g.layerId);
       return;
     }
 
@@ -2823,6 +2942,49 @@ void main() {
     } else if (layer.kind === "raster") {
       this.flattenStrokeToLayer(layer, wet, isErase);
     }
+    brush.end();
+    this.markDirty();
+  }
+
+  // ── pattern-stamp stroke lifecycle ──────────────────────
+  /**
+   * Begin a pattern-stamp stroke on a raster layer. Uses the same wet R8 brush
+   * buffer as the brush tool (selection-constrained dabs); on pointer-up the wet
+   * coverage is flattened with the active pattern (not the foreground color).
+   * No-op on non-raster layers (patterns paint pixels, not masks).
+   */
+  private beginPatternStamp(
+    layerId: LayerId,
+    doc: { x: number; y: number },
+    e: PointerEvent,
+  ): void {
+    const layer = this.doc.getLayer(layerId);
+    const brush = this.brush;
+    const sel = this.selection;
+    if (!layer || layer.kind !== "raster" || !brush) return;
+    const target = { width: layer.width, height: layer.height, x: layer.x, y: layer.y };
+    const selTex = sel && !sel.isEmpty() ? sel.texture : null;
+    brush.begin(
+      target,
+      toolStore.get().brush,
+      selTex,
+      sel ? sel.size : { width: this.doc.width, height: this.doc.height },
+    );
+    this.gesture = { kind: "pattern-stamp", layerId };
+    brush.stampTo(doc.x - layer.x, doc.y - layer.y, e.pressure);
+    this.markDirty();
+  }
+
+  /** Flatten the pattern-stamp wet stroke into the layer as ONE undo step. */
+  private commitPatternStamp(layerId: LayerId): void {
+    const brush = this.brush;
+    const layer = this.doc.getLayer(layerId);
+    const wet = brush?.wetBuffer;
+    if (!brush || !layer || layer.kind !== "raster" || !wet) {
+      brush?.end();
+      return;
+    }
+    this.flattenPatternStamp(layer, wet);
     brush.end();
     this.markDirty();
   }
@@ -3883,6 +4045,255 @@ void main(){
 }`;
     this._gradProg = this.renderer!.compileProgram(QUAD_VERT, frag);
     return this._gradProg;
+  }
+
+  // ── pattern fill + stamp ────────────────────────────────
+  /**
+   * Resolve (caching by id) a pattern's tile as an sRGB texture. The tile is
+   * rasterized procedurally on a 2D canvas (renderPatternTile) and uploaded with
+   * REPEAT-free CLAMP sampling — tiling is done in-shader via fract(), so the
+   * tile wraps seamlessly regardless of the GPU wrap mode. Returns null if the
+   * pattern can't be rasterized (no 2D context) or no GL.
+   */
+  private resolvePatternTexture(patternId: string): TextureHandle | null {
+    const r = this.renderer;
+    if (!r) return null;
+    const cached = this.patternTextures.get(patternId);
+    if (cached) return cached;
+    const def = patternStore.getById(patternId);
+    const img = renderPatternTile(def);
+    if (!img) return null;
+    // Upload the tile via a canvas source so it lands as SRGB8_ALPHA8 (srgb:true)
+    // — the pattern shader decodes it to linear for compositing, matching fills.
+    const cv = document.createElement("canvas");
+    cv.width = img.width;
+    cv.height = img.height;
+    cv.getContext("2d")!.putImageData(img, 0, 0);
+    const tex = r.createTextureFromSource(cv, { srgb: true });
+    this.patternTextures.set(patternId, tex);
+    return tex;
+  }
+
+  /**
+   * Tile a pattern across the active layer's selected region (or whole layer when
+   * no selection) on a raster layer. `scale` multiplies the tile size; `opacity`
+   * scales the pattern's coverage. ONE undo step (RGBA8 readback -> replaceSource),
+   * mirroring fillSelection/applyGradientFill. No-op for non-raster layers.
+   */
+  fillWithPattern(
+    layerId: LayerId,
+    patternId: string,
+    opts?: { scale?: number; opacity?: number },
+  ): void {
+    const r = this.renderer;
+    if (!r) return;
+    const layer = this.doc.getLayer(layerId);
+    if (!layer || layer.kind !== "raster") return;
+    const gl = r.gl;
+    const tex = this.resolveTexture(layer.id);
+    const patTex = this.resolvePatternTexture(patternId);
+    if (!tex || !patTex) return;
+
+    const def = patternStore.getById(patternId);
+    const scale = Math.max(0.05, opts?.scale ?? patternStore.getState().scale);
+    const opacity = Math.max(0, Math.min(1, opts?.opacity ?? patternStore.getState().opacity));
+    // Tile size in layer px after scaling.
+    const tilePx = Math.max(1, def.tileSize * scale);
+
+    const prog = this.patternFillProgram();
+    const prevSource = layer.source;
+    const target = r.createRGBA8Target(layer.width, layer.height);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+    gl.viewport(0, 0, layer.width, layer.height);
+    gl.disable(gl.BLEND);
+    gl.useProgram(prog);
+    gl.uniformMatrix3fv(
+      gl.getUniformLocation(prog, "u_transform"),
+      false,
+      new Float32Array([2, 0, 0, 0, 2, 0, -1, -1, 1]),
+    );
+    gl.uniform1i(gl.getUniformLocation(prog, "u_layer"), 0);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_pattern"), 1);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_srgbLayer"), tex.srgb ? 0 : 1);
+    gl.uniform1f(gl.getUniformLocation(prog, "u_opacity"), opacity);
+    gl.uniform2f(gl.getUniformLocation(prog, "u_size"), layer.width, layer.height);
+    gl.uniform1f(gl.getUniformLocation(prog, "u_tilePx"), tilePx);
+    const sel = this.selection;
+    const useSel = !!sel && !sel.isEmpty() && !!sel.texture;
+    gl.uniform1i(gl.getUniformLocation(prog, "u_useSelection"), useSel ? 1 : 0);
+    if (useSel && sel) {
+      const { width: dw, height: dh } = sel.size;
+      const uvToSel = new Float32Array([
+        layer.width / dw, 0, 0,
+        0, layer.height / dh, 0,
+        layer.x / dw, layer.y / dh, 1,
+      ]);
+      gl.uniformMatrix3fv(gl.getUniformLocation(prog, "u_uvToSel"), false, uvToSel);
+      gl.uniform1i(gl.getUniformLocation(prog, "u_selection"), 2);
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, sel.texture!);
+    }
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex.tex);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, patTex.tex);
+    r.drawQuad();
+
+    const rawPx = r.readPixels(target, 0, 0, layer.width, layer.height);
+    r.deleteFramebuffer(target);
+    const newSource = rawToImageData(rawPx, layer.width, layer.height);
+    const lid = layer.id;
+    const apply = () => {
+      this.doc.replaceSource(lid, newSource);
+      this.textures.delete(lid);
+    };
+    const revert = () => {
+      this.doc.replaceSource(lid, prevSource);
+      this.textures.delete(lid);
+    };
+    apply();
+    this.history.push({
+      label: "Pattern Fill",
+      bytes: layer.width * layer.height * 4,
+      undo: revert,
+      redo: apply,
+    });
+    this.markDirty();
+  }
+
+  // Lazily-compiled pattern fill program: tiles a pattern over a layer (gated by
+  // the selection), composited source-over in linear light like solid fill.
+  private _patternFillProg: WebGLProgram | null = null;
+  private patternFillProgram(): WebGLProgram {
+    if (this._patternFillProg) return this._patternFillProg;
+    const frag = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv; out vec4 fragColor;
+uniform sampler2D u_layer;
+uniform sampler2D u_pattern;   // sRGB tile (GPU decodes to linear)
+uniform sampler2D u_selection;
+uniform bool u_useSelection;
+uniform bool u_srgbLayer;
+uniform float u_opacity;
+uniform vec2 u_size;           // layer px
+uniform float u_tilePx;        // tile size in layer px
+uniform mat3 u_uvToSel;
+vec3 srgbToLinear(vec3 c){return mix(c/12.92, pow((c+0.055)/1.055, vec3(2.4)), step(0.04045,c));}
+vec3 linearToSrgb(vec3 c){return mix(c*12.92, 1.055*pow(c, vec3(1.0/2.4))-0.055, step(0.0031308,c));}
+void main(){
+  vec2 px = v_uv * u_size;                 // layer px
+  vec2 tileUv = fract(px / u_tilePx);      // seamless wrap
+  vec4 pat = texture(u_pattern, tileUv);   // pattern decoded to linear by GPU
+  float cov = pat.a * u_opacity;
+  if (u_useSelection) { vec3 s = u_uvToSel*vec3(v_uv,1.0); cov *= texture(u_selection, s.xy).r; }
+  vec4 base = texture(u_layer, v_uv);
+  vec3 baseLin = u_srgbLayer ? srgbToLinear(base.rgb) : base.rgb;
+  vec3 patLin = pat.rgb;                    // already linear (SRGB8 sampler)
+  float oa = cov + base.a*(1.0-cov);
+  vec3 oc = oa>1e-5 ? (patLin*cov + baseLin*base.a*(1.0-cov))/oa : vec3(0.0);
+  fragColor = vec4(linearToSrgb(oc), oa);
+}`;
+    this._patternFillProg = this.renderer!.compileProgram(QUAD_VERT, frag);
+    return this._patternFillProg;
+  }
+
+  /**
+   * Flatten a pattern-stamp wet stroke into the active raster layer: the wet R8
+   * buffer holds the brush coverage; the pattern tile is sampled (tiled in layer
+   * space) wherever coverage > 0, composited source-over. ONE undo step. Mirrors
+   * flattenStrokeToLayer but substitutes the pattern for the foreground color.
+   */
+  private flattenPatternStamp(layer: RasterLayer, wet: FramebufferHandle): void {
+    const r = this.renderer!;
+    const gl = r.gl;
+    const tex = this.resolveTexture(layer.id);
+    if (!tex) return;
+    const st = patternStore.getState();
+    const patTex = this.resolvePatternTexture(st.selectedId);
+    if (!patTex) return;
+    const def = patternStore.getById(st.selectedId);
+    const tilePx = Math.max(1, def.tileSize * Math.max(0.05, st.scale));
+    const prevSource = layer.source;
+
+    const prog = this.patternStampProgram();
+    const target = r.createRGBA8Target(layer.width, layer.height);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+    gl.viewport(0, 0, layer.width, layer.height);
+    gl.disable(gl.BLEND);
+    gl.useProgram(prog);
+    gl.uniformMatrix3fv(
+      gl.getUniformLocation(prog, "u_transform"),
+      false,
+      new Float32Array([2, 0, 0, 0, 2, 0, -1, -1, 1]),
+    );
+    gl.uniform1i(gl.getUniformLocation(prog, "u_layer"), 0);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_pattern"), 1);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_wet"), 2);
+    gl.uniform1i(gl.getUniformLocation(prog, "u_srgbLayer"), tex.srgb ? 0 : 1);
+    gl.uniform1f(gl.getUniformLocation(prog, "u_opacity"), this.currentBrushOpacity() * st.opacity);
+    gl.uniform2f(gl.getUniformLocation(prog, "u_size"), layer.width, layer.height);
+    gl.uniform1f(gl.getUniformLocation(prog, "u_tilePx"), tilePx);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex.tex);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, patTex.tex);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, wet.color.tex);
+    r.drawQuad();
+
+    const rawPx = r.readPixels(target, 0, 0, layer.width, layer.height);
+    r.deleteFramebuffer(target);
+    const newSource = rawToImageData(rawPx, layer.width, layer.height);
+    const lid = layer.id;
+    const apply = () => {
+      this.doc.replaceSource(lid, newSource);
+      this.textures.delete(lid);
+    };
+    const revert = () => {
+      this.doc.replaceSource(lid, prevSource);
+      this.textures.delete(lid);
+    };
+    apply();
+    this.history.push({
+      label: "Pattern Stamp",
+      bytes: layer.width * layer.height * 4,
+      undo: revert,
+      redo: apply,
+    });
+    this.markDirty();
+  }
+
+  // Lazily-compiled pattern-stamp program: like patternFill but coverage comes
+  // from the wet R8 brush buffer (not a selection) — the selection already
+  // constrained the dabs at stamp time.
+  private _patternStampProg: WebGLProgram | null = null;
+  private patternStampProgram(): WebGLProgram {
+    if (this._patternStampProg) return this._patternStampProg;
+    const frag = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv; out vec4 fragColor;
+uniform sampler2D u_layer;
+uniform sampler2D u_pattern;   // sRGB tile (GPU decodes to linear)
+uniform sampler2D u_wet;       // brush coverage (R)
+uniform bool u_srgbLayer;
+uniform float u_opacity;
+uniform vec2 u_size;           // layer px
+uniform float u_tilePx;        // tile size in layer px
+vec3 srgbToLinear(vec3 c){return mix(c/12.92, pow((c+0.055)/1.055, vec3(2.4)), step(0.04045,c));}
+vec3 linearToSrgb(vec3 c){return mix(c*12.92, 1.055*pow(c, vec3(1.0/2.4))-0.055, step(0.0031308,c));}
+void main(){
+  vec2 px = v_uv * u_size;
+  vec2 tileUv = fract(px / u_tilePx);
+  vec4 pat = texture(u_pattern, tileUv);
+  float cov = texture(u_wet, v_uv).r * pat.a * u_opacity;
+  vec4 base = texture(u_layer, v_uv);
+  vec3 baseLin = u_srgbLayer ? srgbToLinear(base.rgb) : base.rgb;
+  float oa = cov + base.a*(1.0-cov);
+  vec3 oc = oa>1e-5 ? (pat.rgb*cov + baseLin*base.a*(1.0-cov))/oa : vec3(0.0);
+  fragColor = vec4(linearToSrgb(oc), oa);
+}`;
+    this._patternStampProg = this.renderer!.compileProgram(QUAD_VERT, frag);
+    return this._patternStampProg;
   }
 
   // ── adjustment layers ───────────────────────────────────

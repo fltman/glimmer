@@ -15,6 +15,10 @@ import { FiltersMenu } from "./filters";
 import { SelectMenu } from "./select";
 import { FileMenu } from "./file";
 import { LiquifyMenu } from "./liquify";
+import {
+  ContentAwareFillItem,
+  ContentAwareFillModal,
+} from "../ai/contentAware";
 
 /**
  * Image ▸ Adjustments dropdown — Photoshop's `Image > Adjustments` menu.
@@ -91,6 +95,75 @@ function ImageMenu({ disabled }: { disabled: boolean }) {
   );
 }
 
+/**
+ * Edit menu — host for selection-driven AI edits. Currently a single entry,
+ * Content-Aware Fill, which removes the selected content and reconstructs the
+ * background (inpaint mode:"remove") on a new layer. The item self-gates on a
+ * non-empty selection + active raster layer; the modal (rendered at the menu
+ * root) owns the job lifecycle and progress.
+ */
+function EditMenu() {
+  const [open, setOpen] = useState(false);
+  const [fillOpen, setFillOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDown(e: MouseEvent) {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="relative" ref={rootRef}>
+      <button
+        className="btn"
+        title="Edit ▸ Content-Aware Fill"
+        onClick={() => setOpen((o) => !o)}
+      >
+        Edit
+        <svg
+          width="9"
+          height="9"
+          viewBox="0 0 12 12"
+          className="opacity-70"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+        >
+          <path d="M2.5 4.5 6 8l3.5-3.5" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="absolute left-0 top-full z-40 mt-1 w-56 overflow-hidden rounded-md border border-edge bg-panelraised py-1 shadow-2xl">
+          <ContentAwareFillItem
+            onPick={() => {
+              setFillOpen(true);
+              setOpen(false);
+            }}
+          />
+        </div>
+      )}
+
+      {fillOpen && (
+        <ContentAwareFillModal onClose={() => setFillOpen(false)} />
+      )}
+    </div>
+  );
+}
+
 export function Toolbar() {
   const snap = useEngineSnapshot();
   const history = useHistoryState();
@@ -151,6 +224,7 @@ export function Toolbar() {
 
       {/* Photoshop-style menus */}
       <FileMenu />
+      <EditMenu />
       <ImageMenu disabled={!hasLayers} />
       <FiltersMenu />
       <LiquifyMenu />

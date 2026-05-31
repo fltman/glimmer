@@ -25,6 +25,7 @@ export type ToolId =
   | "crop"
   | "text"
   | "shape"
+  | "pattern-stamp"
   // ── retouch brushes (stroke-based, read the layer pixels) ──
   | "clone"
   | "heal"
@@ -419,10 +420,18 @@ export function isRetouchTool(t: ToolId): boolean {
 
 /**
  * True for tools that paint into a layer / mask (brush family). Includes the
- * retouch brushes so pointerdown routes them through the paint gesture.
+ * retouch brushes so pointerdown routes them through the paint gesture. The
+ * pattern-stamp is NOT included here: it paints with the brush dab into a wet
+ * coverage buffer but flattens the PATTERN (not the foreground color), so the
+ * engine routes it through its own gesture branch (see isPatternStampTool).
  */
 export function isPaintTool(t: ToolId): boolean {
   return t === "brush" || t === "eraser" || isRetouchTool(t);
+}
+
+/** True for the pattern-stamp tool (brush-driven pattern dabs). */
+export function isPatternStampTool(t: ToolId): boolean {
+  return t === "pattern-stamp";
 }
 
 /** True for the marquee/lasso selection tools. */
@@ -675,5 +684,223 @@ export function useBrushParams(): BrushParams {
     (cb) => toolStore.subscribe(cb),
     () => toolStore.get().brush,
     () => toolStore.get().brush,
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+//  PATTERNS (procedural fill / stamp tiles)
+// ════════════════════════════════════════════════════════════
+/**
+ * A pattern is a small SEAMLESSLY-TILING tile drawn procedurally onto a 2D
+ * canvas. The engine rasterizes a tile to ImageData (via renderPatternTile) and
+ * uploads it as a texture, then tiles it across the fill region in-shader using
+ * the pattern's `scale`. Built-ins draw a foreground/background-agnostic tile in
+ * straight sRGB; the engine treats the tile as sRGB on upload.
+ *
+ * A future "define from selection" user pattern would add entries whose tile
+ * ImageData is captured from the canvas — noted as a followup since it needs an
+ * extra readback + storage path.
+ */
+export interface PatternDef {
+  id: string;
+  name: string;
+  /** Tile edge length in px (the tile is square and tiles seamlessly). */
+  tileSize: number;
+  /** Draw one seamless tile filling [0,size]x[0,size] on a 2D context. */
+  draw: (ctx: CanvasRenderingContext2D, size: number) => void;
+}
+
+/** Built-in procedural patterns. Each tile is designed to wrap seamlessly. */
+export const BUILTIN_PATTERNS: PatternDef[] = [
+  {
+    id: "checkerboard",
+    name: "Checkerboard",
+    tileSize: 32,
+    draw: (ctx, s) => {
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, s, s);
+      ctx.fillStyle = "#000000";
+      const h = s / 2;
+      ctx.fillRect(0, 0, h, h);
+      ctx.fillRect(h, h, h, h);
+    },
+  },
+  {
+    id: "dots",
+    name: "Dots",
+    tileSize: 32,
+    draw: (ctx, s) => {
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, s, s);
+      ctx.fillStyle = "#222222";
+      const r = s * 0.16;
+      // Center dot + corner quarters so the tile wraps seamlessly.
+      const pts: [number, number][] = [
+        [s / 2, s / 2],
+        [0, 0],
+        [s, 0],
+        [0, s],
+        [s, s],
+      ];
+      for (const [cx, cy] of pts) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    },
+  },
+  {
+    id: "diagonal-stripes",
+    name: "Diagonal Stripes",
+    tileSize: 32,
+    draw: (ctx, s) => {
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, s, s);
+      ctx.strokeStyle = "#222222";
+      ctx.lineWidth = s * 0.18;
+      // Three offset diagonals so the stripe wraps across the tile edge.
+      ctx.beginPath();
+      for (let o = -s; o <= s; o += s) {
+        ctx.moveTo(o, s);
+        ctx.lineTo(o + s, 0);
+      }
+      ctx.stroke();
+    },
+  },
+  {
+    id: "grid",
+    name: "Grid",
+    tileSize: 32,
+    draw: (ctx, s) => {
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, s, s);
+      ctx.strokeStyle = "#444444";
+      const w = Math.max(1, s * 0.06);
+      ctx.lineWidth = w;
+      // Draw the top + left edges; tiling completes the grid.
+      ctx.strokeRect(w / 2, w / 2, s - w, s - w);
+    },
+  },
+  {
+    id: "noise",
+    name: "Noise",
+    tileSize: 64,
+    draw: (ctx, s) => {
+      const img = ctx.createImageData(s, s);
+      const d = img.data;
+      // Deterministic value noise (stable seed) so the tile is reproducible.
+      let seed = 0x9e3779b9 >>> 0;
+      const rng = () => {
+        seed = (seed * 1664525 + 1013904223) >>> 0;
+        return seed / 0xffffffff;
+      };
+      for (let i = 0; i < s * s; i++) {
+        const v = Math.round(rng() * 255);
+        d[i * 4] = v;
+        d[i * 4 + 1] = v;
+        d[i * 4 + 2] = v;
+        d[i * 4 + 3] = 255;
+      }
+      ctx.putImageData(img, 0, 0);
+    },
+  },
+];
+
+/**
+ * Rasterize a pattern's tile to ImageData (straight sRGB, opaque/with alpha as
+ * drawn). The engine calls this to obtain the tile pixels to upload. Returns
+ * null if a 2D context can't be created (defensive; never in practice).
+ */
+export function renderPatternTile(def: PatternDef): ImageData | null {
+  const size = Math.max(2, Math.round(def.tileSize));
+  const cv = document.createElement("canvas");
+  cv.width = size;
+  cv.height = size;
+  const ctx = cv.getContext("2d");
+  if (!ctx) return null;
+  ctx.clearRect(0, 0, size, size);
+  def.draw(ctx, size);
+  return ctx.getImageData(0, 0, size, size);
+}
+
+export interface PatternState {
+  /** Currently-selected pattern id (one of BUILTIN_PATTERNS, or user). */
+  selectedId: string;
+  /** Tile scale multiplier (1 = native tile size). */
+  scale: number;
+  /** Fill/stamp opacity 0..1. */
+  opacity: number;
+}
+
+class PatternStore {
+  private patterns: PatternDef[] = BUILTIN_PATTERNS.slice();
+  private state: PatternState = {
+    selectedId: BUILTIN_PATTERNS[0]!.id,
+    scale: 1,
+    opacity: 1,
+  };
+  private listeners = new Set<Listener>();
+
+  /** All available pattern definitions (built-ins + any future user tiles). */
+  getPatterns(): readonly PatternDef[] {
+    return this.patterns;
+  }
+  /** The selected-pattern / scale / opacity state. */
+  getState(): PatternState {
+    return this.state;
+  }
+  /** Look up a pattern by id (defaults to the first built-in if unknown). */
+  getById(id: string): PatternDef {
+    return this.patterns.find((p) => p.id === id) ?? this.patterns[0]!;
+  }
+  /** The currently-selected pattern def. */
+  getSelected(): PatternDef {
+    return this.getById(this.state.selectedId);
+  }
+
+  subscribe(cb: Listener): () => void {
+    this.listeners.add(cb);
+    return () => this.listeners.delete(cb);
+  }
+  private emit(): void {
+    for (const cb of this.listeners) cb();
+  }
+
+  setSelected(id: string): void {
+    if (this.state.selectedId === id) return;
+    this.state = { ...this.state, selectedId: id };
+    this.emit();
+  }
+  setScale(scale: number): void {
+    const s = Math.max(0.05, Math.min(16, scale));
+    if (this.state.scale === s) return;
+    this.state = { ...this.state, scale: s };
+    this.emit();
+  }
+  setOpacity(opacity: number): void {
+    const o = clamp01(opacity);
+    if (this.state.opacity === o) return;
+    this.state = { ...this.state, opacity: o };
+    this.emit();
+  }
+}
+
+export const patternStore = new PatternStore();
+
+/** Reactive pattern list (for a Patterns panel / dropdown). */
+export function usePatterns(): readonly PatternDef[] {
+  return useSyncExternalStore(
+    (cb) => patternStore.subscribe(cb),
+    () => patternStore.getPatterns(),
+    () => patternStore.getPatterns(),
+  );
+}
+
+/** Reactive selected-pattern / scale / opacity state (for the options bar). */
+export function usePatternState(): PatternState {
+  return useSyncExternalStore(
+    (cb) => patternStore.subscribe(cb),
+    () => patternStore.getState(),
+    () => patternStore.getState(),
   );
 }
