@@ -10,6 +10,7 @@ import websocket from "@fastify/websocket";
 import { config } from "./config.js";
 import { closeRedis } from "./redis.js";
 import { jobRoutes } from "./jobs/routes.js";
+import { agentRoutes } from "./agent/routes.js";
 import { presignRoutes } from "./storage/presign-routes.js";
 import { wsRoutes } from "./ws.js";
 
@@ -29,6 +30,7 @@ export async function buildApp() {
 
   // Routes
   await app.register(jobRoutes);
+  await app.register(agentRoutes);
   await app.register(presignRoutes);
   await app.register(wsRoutes);
 

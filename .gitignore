@@ -31,3 +31,6 @@ infra/data/
 # ML weights (downloaded at runtime, cached in browser)
 *.onnx
 web/public/models/
+
+# Throwaway workflow orchestration scripts (dev artifacts)
+.workflows/

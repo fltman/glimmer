@@ -1091,6 +1091,23 @@ void main() { fragColor = texture(u_src, v_uv); }`,
   }
 
   /**
+   * The topmost raster layer id (searched top → bottom), or null if the document
+   * has no raster layer. Used by the agentic auto-editor: a planned `apply_filter`
+   * step must target a real pixel layer even when the active layer is an
+   * adjustment/text/group (which it commonly is right after the plan added an
+   * adjustment layer) — otherwise the filter would silently no-op.
+   */
+  getTopRasterLayerId(): LayerId | null {
+    const order = this.doc.orderBottomToTop();
+    for (let i = order.length - 1; i >= 0; i--) {
+      const id = order[i]!;
+      const l = this.doc.getLayer(id);
+      if (l && l.kind === "raster") return id;
+    }
+    return null;
+  }
+
+  /**
    * Export the selection mask within `roi` as a single-channel-encoded PNG
    * (white = selected). Used by inpaint. `roi` defaults to the selection bounds
    * (or the whole document when empty).

@@ -38,6 +38,8 @@ const EnvSchema = z.object({
   OPENROUTER_IMAGE_MODEL: z
     .string()
     .default("google/gemini-3-pro-image-preview"),
+  /** Text/chat model used for agent planning (POST /ai/agent). */
+  OPENROUTER_TEXT_MODEL: z.string().default("google/gemini-2.5-flash"),
 });
 
 const parsed = EnvSchema.safeParse(process.env);
@@ -74,6 +76,7 @@ export const config = {
     apiKey: env.OPENROUTER_API_KEY,
     baseUrl: env.OPENROUTER_BASE_URL,
     imageModel: env.OPENROUTER_IMAGE_MODEL,
+    textModel: env.OPENROUTER_TEXT_MODEL,
   },
 } as const;
 
