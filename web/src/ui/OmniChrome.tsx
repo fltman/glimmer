@@ -77,6 +77,13 @@ export function OmniChrome() {
       {/* top-right: the essential summons */}
       <div className="animate-fadein pointer-events-none absolute right-3 top-3 z-30 flex items-center gap-1.5">
         <PillButton
+          onClick={() => workspaceStore.openFloatingPanel("ai")}
+          title="AI tools & assistant"
+          active={ws.floatingPanel === "ai"}
+        >
+          ✦ AI
+        </PillButton>
+        <PillButton
           onClick={() => workspaceStore.toggleTools()}
           title="Tools"
           active={ws.toolsOpen}
