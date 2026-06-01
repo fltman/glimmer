@@ -502,7 +502,7 @@ function EmptyCanvasHero({ onOpen }: { onOpen: () => void }) {
       {/* Subtle glass card so the copy reads cleanly over the checkerboard. */}
       <div className="flex max-w-md flex-col items-center gap-5 rounded-2xl border border-edge/70 bg-panel/70 px-10 py-9 text-center shadow-2xl backdrop-blur-md">
         <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-fuchsia-500 text-white shadow-lg">
-          <Sparkles size={26} strokeWidth={2} />
+          <Sparkles size={26} strokeWidth={1.75} />
         </div>
         <div className="space-y-2">
           <h1 className="text-xl font-semibold text-ink">Start with an image</h1>

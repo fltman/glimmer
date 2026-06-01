@@ -258,7 +258,7 @@ export function Omnibar() {
               : "border-edge hover:border-edge/80"
           }`}
         >
-          <Sparkles size={18} className="shrink-0 text-accent" />
+          <Sparkles size={18} strokeWidth={1.75} className="shrink-0 text-accent" />
           <input
             ref={inputRef}
             value={query}

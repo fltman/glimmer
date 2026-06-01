@@ -39,6 +39,7 @@ import {
   Square,
   Circle,
   Slash,
+  ChevronRight,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -210,7 +211,11 @@ function GroupButton({
         title={`${title}${shortcut ? ` (${shortcut})` : ""} · click for more`}
       >
         <current.Icon size={18} strokeWidth={1.75} />
-        <span className="absolute bottom-0.5 right-0.5 h-0 w-0 border-b-[4px] border-l-[4px] border-b-muted border-l-transparent" />
+        <ChevronRight
+          size={9}
+          strokeWidth={3}
+          className="absolute bottom-[3px] right-[2px] text-muted/70"
+        />
       </button>
 
       {open && (
@@ -265,7 +270,11 @@ function ShapeButton({ selected }: { selected: boolean }) {
       >
         <ShapeIcon size={18} strokeWidth={1.75} />
         {/* Flyout affordance: a little corner tick like Photoshop's tool groups. */}
-        <span className="absolute bottom-0.5 right-0.5 h-0 w-0 border-b-[4px] border-l-[4px] border-b-muted border-l-transparent" />
+        <ChevronRight
+          size={9}
+          strokeWidth={3}
+          className="absolute bottom-[3px] right-[2px] text-muted/70"
+        />
       </button>
 
       {open && (

@@ -3,6 +3,7 @@
  * the engine; React never reads pixels.
  */
 import { useEffect, useRef, useState } from "react";
+import { Sparkles } from "lucide-react";
 import {
   engine,
   actions,
@@ -217,7 +218,9 @@ export function Toolbar() {
   return (
     <div className="flex items-center gap-2 border-b border-edge bg-panel px-3 py-2">
       <div className="mr-2 flex shrink-0 items-center gap-2">
-        <div className="h-5 w-5 rounded bg-gradient-to-br from-accent to-fuchsia-500" />
+        <span className="flex h-5 w-5 items-center justify-center rounded bg-gradient-to-br from-accent to-fuchsia-500 text-white">
+          <Sparkles size={12} strokeWidth={2.25} />
+        </span>
         <span className="text-sm font-semibold tracking-tight">ai-ps</span>
       </div>
 

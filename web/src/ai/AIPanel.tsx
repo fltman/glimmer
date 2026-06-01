@@ -120,7 +120,7 @@ function ToolLauncher({ onPick }: { onPick: (id: TabId) => void }) {
         className="flex items-center gap-3 rounded-xl border border-accent/40 bg-gradient-to-br from-accent/15 to-fuchsia-500/10 p-3 text-left transition-colors hover:from-accent/25 hover:to-fuchsia-500/15"
       >
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-accent to-fuchsia-500 text-white shadow">
-          <Sparkles size={18} strokeWidth={2} />
+          <Sparkles size={18} strokeWidth={1.75} />
         </span>
         <span className="min-w-0">
           <span className="block text-sm font-semibold text-ink">Assistant</span>

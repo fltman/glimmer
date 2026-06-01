@@ -15,6 +15,7 @@
  * token and credit counts.
  */
 import { useEffect, useRef, useState } from "react";
+import { CircleDollarSign } from "lucide-react";
 import {
   useAccount,
   initAccount,
@@ -122,7 +123,7 @@ export function AccountWidget() {
       )}
 
       <button
-        className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium tabular-nums transition-colors ${
+        className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium tabular-nums transition-colors ${
           low
             ? "border-amber-500/50 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
             : "border-edge bg-panelraised text-ink hover:bg-edge"
@@ -130,7 +131,7 @@ export function AccountWidget() {
         onClick={() => setOpen((o) => !o)}
         title={`Credits & account — ${formatCredits(acct.balanceCredits)} credits`}
       >
-        <CoinIcon />
+        <CircleDollarSign size={13} strokeWidth={1.75} className="opacity-80" />
         {balShort}
       </button>
 
@@ -268,24 +269,6 @@ function NoticeBanner({
         ✕
       </button>
     </div>
-  );
-}
-
-function CoinIcon() {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      className="opacity-80"
-      aria-hidden
-    >
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 7v10M9.5 9.5h3.2a1.8 1.8 0 0 1 0 3.6H9.8h3.4a1.8 1.8 0 0 1 0 3.6H9" />
-    </svg>
   );
 }
 

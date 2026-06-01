@@ -75,8 +75,10 @@ export function OmniChrome() {
   return (
     <>
       {/* top-left: document identity (subtle) */}
-      <div className="animate-fadein pointer-events-none absolute left-3 top-3 z-30 flex items-center gap-2 rounded-md border border-edge bg-panel/80 px-2.5 py-1 text-[11px] text-muted shadow-lg backdrop-blur">
-        <div className="h-3.5 w-3.5 rounded bg-gradient-to-br from-accent to-fuchsia-500" />
+      <div className="animate-fadein pointer-events-none absolute left-3 top-3 z-30 flex items-center gap-2 rounded-md border border-edge bg-panel/80 py-1 pl-1.5 pr-2.5 text-[11px] text-muted shadow-lg backdrop-blur">
+        <span className="flex h-4 w-4 items-center justify-center rounded bg-gradient-to-br from-accent to-fuchsia-500 text-white">
+          <Sparkles size={10} strokeWidth={2.25} />
+        </span>
         <span className="font-medium text-ink">{active?.name ?? "Untitled"}</span>
         {active && (
           <span className="tabular-nums">
