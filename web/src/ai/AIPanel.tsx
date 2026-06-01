@@ -13,7 +13,7 @@
  * URLs — except CUTOUT, which can run RMBG-1.4 entirely client-side. ASSISTANT
  * additionally talks to the synchronous planner at POST /ai/agent.
  */
-import { useState } from "react";
+import { useWorkspace, workspaceStore } from "../state/workspace";
 import { AssistantPanel } from "./assistant/AssistantPanel";
 import { GenerateSection } from "./sections/GenerateSection";
 import { EditSection } from "./sections/EditSection";
@@ -57,7 +57,10 @@ const TABS: { id: TabId; label: string }[] = [
 ];
 
 export function AIPanel() {
-  const [tab, setTab] = useState<TabId>("assistant");
+  // Tab is controlled by the workspace store so the ⌘K command palette can
+  // deep-link a specific AI tool (e.g. "AI: Relight" opens this panel on Relight).
+  const tab = useWorkspace().aiTab as TabId;
+  const setTab = (t: TabId) => workspaceStore.setAiTab(t);
 
   return (
     <div className="flex h-full flex-col">

@@ -38,7 +38,7 @@
     @apply px-3 py-2 text-xs font-semibold uppercase tracking-wider text-muted;
   }
   .btn {
-    @apply inline-flex items-center justify-center gap-1.5 rounded-md border border-edge bg-panelraised px-2.5 py-1.5 text-xs font-medium text-ink transition-colors hover:bg-edge disabled:cursor-not-allowed disabled:opacity-40;
+    @apply inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border border-edge bg-panelraised px-2.5 py-1.5 text-xs font-medium text-ink transition-colors hover:bg-edge disabled:cursor-not-allowed disabled:opacity-40;
   }
   .btn-accent {
     @apply border-transparent bg-accent text-white hover:bg-accenthover;

@@ -4,7 +4,7 @@
  *   left tool rail  |  center canvas  |  right panels
  * The canvas host is mounted once and lives between the rails and the panels.
  */
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { Toolbar } from "./ui/Toolbar";
 import { ToolRail } from "./ui/ToolRail";
 import { ToolOptions } from "./ui/ToolOptions";
@@ -21,6 +21,12 @@ import { SwatchesPanel } from "./ui/swatches/SwatchesPanel";
 import { ChannelsPanel } from "./ui/channels/ChannelsPanel";
 import { engine, useEngineSnapshot, actions, isAgentBatching } from "./state/useEngine";
 import { toolStore, type ToolId, type ShapeKind } from "./state/tools";
+import {
+  useWorkspace,
+  workspaceStore,
+  type SidebarTab,
+} from "./state/workspace";
+import { CommandPalette } from "./ui/command/CommandPalette";
 
 /**
  * Single-key tool shortcuts (no modifier; ignored while typing). These map a
@@ -179,12 +185,47 @@ function useEditorShortcuts() {
   }, []);
 }
 
-type SidebarTab = "ai" | "adjust" | "history" | "paths" | "swatches" | "channels";
+/**
+ * Workspace shortcuts for the adaptive, laptop-first chrome:
+ *   ⌘K / Ctrl+K → command palette (anywhere, even while typing)
+ *   Tab         → hide/show all chrome for a full-bleed canvas (not while typing)
+ * Plus a resize listener that flips the workspace into "compact" (auto-collapsed
+ * dock) below a width breakpoint so small laptops reclaim the canvas.
+ */
+function useWorkspaceShortcuts() {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        workspaceStore.togglePalette();
+        return;
+      }
+      if (e.key === "Tab" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        if (isTypingTarget(e)) return;
+        if (workspaceStore.getSnapshot().paletteOpen) return;
+        e.preventDefault();
+        workspaceStore.toggleChrome();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  useEffect(() => {
+    const apply = () => workspaceStore.setCompact(window.innerWidth < 1100);
+    apply();
+    window.addEventListener("resize", apply);
+    return () => window.removeEventListener("resize", apply);
+  }, []);
+}
 
 export default function App() {
   useToolShortcuts();
   useEditorShortcuts();
-  const [tab, setTab] = useState<SidebarTab>("ai");
+  useWorkspaceShortcuts();
+  const ws = useWorkspace();
+  const tab = ws.rightTab;
+  const setTab = (t: SidebarTab) => workspaceStore.setRightTab(t);
   const snap = useEngineSnapshot();
 
   // Reveal the Adjust tab whenever an adjustment layer becomes active (e.g.
@@ -201,69 +242,164 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col">
-      <Toolbar />
-      <ToolOptions />
+      {!ws.chromeHidden && <Toolbar />}
+      {!ws.chromeHidden && <ToolOptions />}
       <div className="flex min-h-0 flex-1">
-        <ToolRail />
-        {/* Center column: the document tab strip sits ABOVE the canvas. The tab
-            bar lives OUTSIDE <main> so it never shifts the canvas origin (which
-            the type-tool overlay is positioned against) and so switching tabs
-            never remounts <CanvasHost/> / the single GL canvas. */}
+        {!ws.chromeHidden && ws.leftRail && <ToolRail />}
+        {/* Center column (ALWAYS mounted — never remount <CanvasHost/> / the GL
+            context). The document tab strip sits ABOVE the canvas, OUTSIDE
+            <main> so it never shifts the canvas origin the type overlay uses. */}
         <div className="flex min-w-0 flex-1 flex-col">
-          <DocumentTabs />
-          {/* Relative wrapper so the type-tool <textarea> overlay (positioned in
-              CSS px from the engine's view transform) aligns with the canvas,
-              which fills this element edge-to-edge. */}
+          {!ws.chromeHidden && <DocumentTabs />}
           <main className="relative min-h-0 min-w-0 flex-1">
             <CanvasHost />
             <TextEditOverlay />
-            {/* Floating Liquify controls; render only while a warp session is
-                active (the panel itself returns null otherwise). */}
+            {/* Floating Liquify controls; render only while warping. */}
             <LiquifyPanel />
+            {/* Canvas-first launcher: ⌘K everywhere + a way back from focus mode. */}
+            <FloatingControls chromeHidden={ws.chromeHidden} leftRail={ws.leftRail} />
           </main>
         </div>
-        <aside className="flex w-80 flex-col border-l border-edge bg-panel">
-          {/* Tabbed top section: AI / Adjust / History / Paths / Swatches. */}
-          <div className="flex shrink-0 border-b border-edge">
-            <TabButton active={tab === "ai"} onClick={() => setTab("ai")}>
-              AI
-            </TabButton>
-            <TabButton active={tab === "adjust"} onClick={() => setTab("adjust")}>
-              Adjust
-            </TabButton>
-            <TabButton active={tab === "history"} onClick={() => setTab("history")}>
-              History
-            </TabButton>
-            <TabButton active={tab === "paths"} onClick={() => setTab("paths")}>
-              Paths
-            </TabButton>
-            <TabButton active={tab === "swatches"} onClick={() => setTab("swatches")}>
-              Swatch
-            </TabButton>
-            <TabButton active={tab === "channels"} onClick={() => setTab("channels")}>
-              Chan
-            </TabButton>
-          </div>
-          <div className="min-h-0 flex-[3] overflow-hidden">
-            {tab === "ai" ? (
-              <AIPanel />
-            ) : tab === "adjust" ? (
-              <AdjustmentsPanel />
-            ) : tab === "history" ? (
-              <HistoryPanel />
-            ) : tab === "paths" ? (
-              <PathsPanel />
-            ) : tab === "channels" ? (
-              <ChannelsPanel />
-            ) : (
-              <SwatchesPanel />
-            )}
-          </div>
-          <div className="min-h-0 flex-[2] overflow-hidden border-t border-edge">
-            <LayersPanel />
-          </div>
-        </aside>
+        {!ws.chromeHidden &&
+          (ws.rightDockOpen ? (
+            <aside className="flex w-80 flex-col border-l border-edge bg-panel">
+              <div className="flex shrink-0 items-stretch border-b border-edge">
+                <div className="flex min-w-0 flex-1 overflow-x-auto">
+                  <TabButton active={tab === "ai"} onClick={() => setTab("ai")}>
+                    AI
+                  </TabButton>
+                  <TabButton active={tab === "adjust"} onClick={() => setTab("adjust")}>
+                    Adjust
+                  </TabButton>
+                  <TabButton active={tab === "history"} onClick={() => setTab("history")}>
+                    History
+                  </TabButton>
+                  <TabButton active={tab === "paths"} onClick={() => setTab("paths")}>
+                    Paths
+                  </TabButton>
+                  <TabButton active={tab === "swatches"} onClick={() => setTab("swatches")}>
+                    Swatch
+                  </TabButton>
+                  <TabButton active={tab === "channels"} onClick={() => setTab("channels")}>
+                    Chan
+                  </TabButton>
+                </div>
+                <button
+                  onClick={() => workspaceStore.setRightDockOpen(false)}
+                  title="Collapse panel dock"
+                  className="shrink-0 border-l border-edge px-2 text-muted hover:bg-edge hover:text-ink"
+                >
+                  ▶
+                </button>
+              </div>
+              <div className="min-h-0 flex-[3] overflow-hidden">
+                {tab === "ai" ? (
+                  <AIPanel />
+                ) : tab === "adjust" ? (
+                  <AdjustmentsPanel />
+                ) : tab === "history" ? (
+                  <HistoryPanel />
+                ) : tab === "paths" ? (
+                  <PathsPanel />
+                ) : tab === "channels" ? (
+                  <ChannelsPanel />
+                ) : (
+                  <SwatchesPanel />
+                )}
+              </div>
+              <div className="min-h-0 flex-[2] overflow-hidden border-t border-edge">
+                <LayersPanel />
+              </div>
+            </aside>
+          ) : (
+            <DockStrip activeTab={tab} />
+          ))}
       </div>
+      <CommandPalette />
+    </div>
+  );
+}
+
+/** Panels reachable from the collapsed dock strip + their glyphs. */
+const DOCK_PANELS: { id: SidebarTab; glyph: string; label: string }[] = [
+  { id: "ai", glyph: "✦", label: "AI" },
+  { id: "adjust", glyph: "◐", label: "Adjustments" },
+  { id: "history", glyph: "↺", label: "History" },
+  { id: "paths", glyph: "✎", label: "Paths" },
+  { id: "swatches", glyph: "🎨", label: "Swatches" },
+  { id: "channels", glyph: "◫", label: "Channels" },
+];
+
+/** Collapsed right dock — a thin icon strip; click an icon to open that panel. */
+function DockStrip({ activeTab }: { activeTab: SidebarTab }) {
+  return (
+    <aside className="flex w-11 shrink-0 flex-col items-center gap-1 border-l border-edge bg-panel py-2">
+      <button
+        onClick={() => workspaceStore.setRightDockOpen(true)}
+        title="Expand panel dock"
+        className="flex h-8 w-8 items-center justify-center rounded-md text-muted hover:bg-panelraised hover:text-ink"
+      >
+        ◀
+      </button>
+      <div className="my-1 h-px w-6 bg-edge" />
+      {DOCK_PANELS.map((p) => (
+        <button
+          key={p.id}
+          onClick={() => workspaceStore.setRightTab(p.id)}
+          title={p.label}
+          className={`flex h-8 w-8 items-center justify-center rounded-md text-sm transition-colors ${
+            p.id === activeTab
+              ? "bg-accent/20 text-ink ring-1 ring-accent/60"
+              : "text-muted hover:bg-panelraised hover:text-ink"
+          }`}
+        >
+          {p.glyph}
+        </button>
+      ))}
+    </aside>
+  );
+}
+
+/**
+ * Canvas-corner launcher. The ⌘K button is always available (so the palette is
+ * discoverable even with chrome hidden); in focus mode it also offers a visible
+ * way back to the panels (besides the Tab key).
+ */
+function FloatingControls({
+  chromeHidden,
+  leftRail,
+}: {
+  chromeHidden: boolean;
+  leftRail: boolean;
+}) {
+  return (
+    <div className="pointer-events-none absolute right-2 top-2 z-20 flex items-center gap-1.5">
+      {chromeHidden ? (
+        <button
+          onClick={() => workspaceStore.toggleChrome()}
+          title="Show panels (Tab)"
+          className="pointer-events-auto rounded-md border border-edge bg-panel/90 px-2 py-1 text-xs text-muted shadow-lg backdrop-blur hover:bg-edge hover:text-ink"
+        >
+          ⤢ Show UI
+        </button>
+      ) : (
+        !leftRail && (
+          <button
+            onClick={() => workspaceStore.toggleLeftRail()}
+            title="Show tool rail"
+            className="pointer-events-auto rounded-md border border-edge bg-panel/90 px-2 py-1 text-xs text-muted shadow-lg backdrop-blur hover:bg-edge hover:text-ink"
+          >
+            ⧉ Tools
+          </button>
+        )
+      )}
+      <button
+        onClick={() => workspaceStore.openPalette()}
+        title="Command palette (⌘K)"
+        className="pointer-events-auto rounded-md border border-edge bg-panel/90 px-2 py-1 text-xs font-medium text-muted shadow-lg backdrop-blur hover:bg-edge hover:text-ink"
+      >
+        ⌘K
+      </button>
     </div>
   );
 }

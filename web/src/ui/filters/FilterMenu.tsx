@@ -11,11 +11,13 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { useEngineSnapshot } from "../../state/useEngine";
+import { useWorkspace, workspaceStore } from "../../state/workspace";
 import { FILTERS, FILTER_ORDER, type FilterType } from "../../engine/filters";
 import { FilterDialog } from "./FilterDialog";
 
 export function FiltersMenu() {
   const snap = useEngineSnapshot();
+  const ws = useWorkspace();
   const [menuOpen, setMenuOpen] = useState(false);
   const [activeFilter, setActiveFilter] = useState<FilterType | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -25,6 +27,14 @@ export function FiltersMenu() {
   const targetId =
     active && active.kind === "raster" ? active.id : null;
   const disabled = targetId === null;
+
+  // ⌘K deep-link: the command palette sets `pendingFilter`; open that filter's
+  // dialog here (when a raster layer is targetable) and clear the request.
+  useEffect(() => {
+    if (!ws.pendingFilter) return;
+    if (!disabled) setActiveFilter(ws.pendingFilter);
+    workspaceStore.clearPendingFilter();
+  }, [ws.pendingFilter, disabled]);
 
   // Close the dropdown on outside click / Escape.
   useEffect(() => {

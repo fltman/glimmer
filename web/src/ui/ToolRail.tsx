@@ -86,7 +86,7 @@ const SHAPE_ORDER: ShapeKind[] = ["rect", "ellipse", "line"];
  * first keeps the rail highlight immediate). Everything else is a plain store
  * write that the engine reads when routing pointer events.
  */
-function selectTool(id: ToolId): void {
+export function selectTool(id: ToolId): void {
   if (id === "transform") {
     actions.setActiveTool("transform");
     actions.beginTransform();
@@ -281,7 +281,7 @@ export function ToolRail() {
   const { active } = useToolState();
   return (
     <div className="flex w-12 flex-col items-center border-r border-edge bg-panel py-2">
-      <div className="flex flex-1 flex-col items-center gap-1">
+      <div className="flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto">{/* scrolls if the rail is taller than the viewport */}
         {TOOLS.map((t, i) => {
           const prev = TOOLS[i - 1];
           const dividerBefore = prev !== undefined && prev.group !== t.group;
@@ -340,7 +340,7 @@ export function ToolRail() {
         })}
       </div>
       {/* Foreground / background color + picker, always visible at the foot. */}
-      <div className="mt-2 border-t border-edge pt-2">
+      <div className="mt-2 shrink-0 border-t border-edge pt-2">
         <ColorControls />
       </div>
     </div>
