@@ -25,7 +25,7 @@ export function Logo({
         <span
           className={`font-semibold tracking-tight text-ink ${sm ? "text-[13px]" : "text-sm"}`}
         >
-          ai<span className="text-accent">·</span>ps
+          Glimmer
         </span>
       )}
     </span>

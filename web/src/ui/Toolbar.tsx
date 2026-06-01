@@ -208,7 +208,7 @@ export function Toolbar() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "ai-ps-export.png";
+    a.download = "glimmer-export.png";
     a.click();
     URL.revokeObjectURL(url);
   }

@@ -49,7 +49,7 @@ export function ExportDialog({ width, height, onClose }: ExportDialogProps) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `ai-ps-export.${fmt.ext}`;
+      a.download = `glimmer-export.${fmt.ext}`;
       a.click();
       URL.revokeObjectURL(url);
       onClose();
