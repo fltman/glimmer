@@ -1282,6 +1282,25 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     this.emit();
   }
 
+  /** After a crop, keep the current zoom but re-centre the (now smaller)
+   *  document, so the result reads as "the image got smaller", not "zoomed in".
+   *  Falls back to fit-to-screen if the cropped doc no longer fits this zoom. */
+  private recenterAfterCrop(): void {
+    if (!this.canvas) return;
+    const bw = this.canvas.width || 1;
+    const bh = this.canvas.height || 1;
+    const dw = this.doc.width || 1;
+    const dh = this.doc.height || 1;
+    if (dw * this.view.scale > bw || dh * this.view.scale > bh) {
+      this.fitToScreen();
+      return;
+    }
+    this.view.tx = (bw - dw * this.view.scale) / 2;
+    this.view.ty = (bh - dh * this.view.scale) / 2;
+    this.markDirty();
+    this.emit();
+  }
+
   // ── view rotation ───────────────────────────────────────
   /** Current view rotation in DEGREES (clockwise on screen). */
   getViewRotation(): number {
@@ -7992,11 +8011,87 @@ void main(){
 
     const prevW = this.doc.width;
     const prevH = this.doc.height;
-    // Snapshot every pixel layer's position for undo.
+    // Non-raster pixel layers (text / smart objects) just shift by the crop
+    // origin — trimming them would break re-rasterization / the live transform.
     const prevPositions: { id: LayerId; x: number; y: number }[] = [];
     for (const id of this.doc.orderBottomToTop()) {
       const l = this.doc.getLayer(id);
-      if (l && isPixelLayer(l)) prevPositions.push({ id, x: l.x, y: l.y });
+      if (l && isPixelLayer(l) && l.kind !== "raster") {
+        prevPositions.push({ id, x: l.x, y: l.y });
+      }
+    }
+    // Raster layers are physically TRIMMED to the crop rectangle so the pixels
+    // outside it are actually discarded (otherwise the composite — which is
+    // viewport-, not document-sized — keeps showing them when you pan/zoom, so
+    // the crop reads as a mere zoom). Snapshot old source/pos/mask for undo and
+    // precompute the trimmed source/pos/mask.
+    type RasterEdit = {
+      id: LayerId;
+      prevSource: ImageBitmap | ImageData;
+      prevX: number;
+      prevY: number;
+      prevMask: { data: Uint8Array; w: number; h: number } | null;
+      nextSource: ImageData;
+      nextX: number;
+      nextY: number;
+      nextMask: { data: Uint8Array; w: number; h: number } | null;
+    };
+    const rasterEdits: RasterEdit[] = [];
+    for (const id of this.doc.orderBottomToTop()) {
+      const l = this.doc.getLayer(id);
+      if (!l || l.kind !== "raster") continue;
+      const full = this.snapshotSourceImageData(l.source);
+      if (!full) continue;
+      const lx = Math.round(l.x);
+      const ly = Math.round(l.y);
+      // Intersection of the layer's footprint with the crop rect (old coords).
+      const ix0 = Math.max(lx, rect.x);
+      const iy0 = Math.max(ly, rect.y);
+      const ix1 = Math.min(lx + l.width, rect.x + rect.width);
+      const iy1 = Math.min(ly + l.height, rect.y + rect.height);
+      const iw = ix1 - ix0;
+      const ih = iy1 - iy0;
+      const hasMask = !!l.mask;
+      if (iw <= 0 || ih <= 0) {
+        // Layer is entirely outside the keep-region → becomes a 1×1 transparent.
+        rasterEdits.push({
+          id,
+          prevSource: l.source,
+          prevX: l.x,
+          prevY: l.y,
+          prevMask: hasMask ? { data: l.mask!.data.slice(), w: l.mask!.width, h: l.mask!.height } : null,
+          nextSource: new ImageData(1, 1),
+          nextX: 0,
+          nextY: 0,
+          nextMask: hasMask ? { data: new Uint8Array([255]), w: 1, h: 1 } : null,
+        });
+        continue;
+      }
+      const nextSource = cropImageDataRect(full, ix0 - lx, iy0 - ly, iw, ih);
+      const nextMask =
+        hasMask && l.mask
+          ? {
+              data: cropMaskBuffer(l.mask.data, l.mask.width, l.mask.height, {
+                x: ix0 - lx,
+                y: iy0 - ly,
+                width: iw,
+                height: ih,
+              }),
+              w: iw,
+              h: ih,
+            }
+          : null;
+      rasterEdits.push({
+        id,
+        prevSource: l.source,
+        prevX: l.x,
+        prevY: l.y,
+        prevMask: hasMask ? { data: l.mask!.data.slice(), w: l.mask!.width, h: l.mask!.height } : null,
+        nextSource,
+        nextX: ix0 - rect.x,
+        nextY: iy0 - rect.y,
+        nextMask,
+      });
     }
     // Adjustment-layer masks are full-document, so they must be cropped to the
     // new doc bounds too (raster/text masks are layer-local and ride along with
@@ -8032,16 +8127,22 @@ void main(){
     const apply = () => {
       this.doc.width = rect.width;
       this.doc.height = rect.height;
+      // Shift text/smart layers; trim raster layers to their kept region.
       for (const p of prevPositions) {
         const l = this.doc.getLayer(p.id);
         if (l && isPixelLayer(l)) this.doc.setPosition(p.id, p.x - rect.x, p.y - rect.y);
       }
+      for (const e of rasterEdits) {
+        this.doc.replaceSource(e.id, e.nextSource);
+        this.doc.setPosition(e.id, e.nextX, e.nextY);
+        if (e.nextMask) setMask(e.id, e.nextMask);
+        this.textures.delete(e.id);
+      }
       for (const e of adjMaskEdits) setMask(e.id, e.next);
       this.selection?.resize(rect.width, rect.height);
       this.snapshotCache = this.doc.snapshot();
-      // The document size changed — refresh the tab/title dimensions and the
-      // canvas extent, otherwise the title pill shows the pre-crop size and the
-      // cropped doc sits off-centre (which reads as "nothing happened").
+      // The document size changed — refresh the tab/title dimensions, otherwise
+      // the title pill shows the pre-crop size.
       this.emitDocList();
       this.markDirty();
       this.emit();
@@ -8053,6 +8154,12 @@ void main(){
         const l = this.doc.getLayer(p.id);
         if (l && isPixelLayer(l)) this.doc.setPosition(p.id, p.x, p.y);
       }
+      for (const e of rasterEdits) {
+        this.doc.replaceSource(e.id, e.prevSource);
+        this.doc.setPosition(e.id, e.prevX, e.prevY);
+        if (e.prevMask) setMask(e.id, e.prevMask);
+        this.textures.delete(e.id);
+      }
       for (const e of adjMaskEdits) setMask(e.id, e.prev);
       this.selection?.resize(prevW, prevH);
       this.snapshotCache = this.doc.snapshot();
@@ -8062,9 +8169,10 @@ void main(){
     };
 
     apply();
-    // Centre + fit the freshly cropped document so the result is obviously the
-    // new canvas (not the old one with content shifted into a corner).
-    this.fitToScreen();
+    // Keep the current zoom and just RE-CENTRE the (now smaller) document, so
+    // the crop reads as "the image got smaller" rather than "zoomed in". If the
+    // cropped doc no longer fits at this zoom, fall back to fit-to-screen.
+    this.recenterAfterCrop();
     this.history.push({
       label: "Crop",
       bytes: 0,
@@ -9008,6 +9116,35 @@ function cropMaskBuffer(
       const sx = rect.x + x;
       if (sx < 0 || sx >= srcW) continue;
       out[y * rect.width + x] = src[sy * srcW + sx] ?? 0;
+    }
+  }
+  return out;
+}
+
+/** Pixel-exact RGBA sub-rect copy (no premultiply round-trip / no resampling).
+ *  Out-of-bounds pixels stay transparent. Used to TRIM layers on crop. */
+function cropImageDataRect(
+  src: ImageData,
+  rx: number,
+  ry: number,
+  rw: number,
+  rh: number,
+): ImageData {
+  const out = new ImageData(Math.max(1, rw), Math.max(1, rh));
+  const sd = src.data;
+  const od = out.data;
+  for (let y = 0; y < rh; y++) {
+    const sy = ry + y;
+    if (sy < 0 || sy >= src.height) continue;
+    for (let x = 0; x < rw; x++) {
+      const sx = rx + x;
+      if (sx < 0 || sx >= src.width) continue;
+      const si = (sy * src.width + sx) * 4;
+      const di = (y * rw + x) * 4;
+      od[di] = sd[si]!;
+      od[di + 1] = sd[si + 1]!;
+      od[di + 2] = sd[si + 2]!;
+      od[di + 3] = sd[si + 3]!;
     }
   }
   return out;
