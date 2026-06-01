@@ -8,7 +8,8 @@
  *
  * Pure UI — every mutation goes through `actions` (toolStore under the hood).
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { actions, useColors } from "../../state/useEngine";
 import type { RGBAColor } from "../../state/tools";
 import { ColorPicker } from "./ColorPicker";
@@ -48,6 +49,19 @@ export function ColorSwatches() {
   const { foreground, background } = useColors();
   const [open, setOpen] = useState<Slot | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  // The picker is portalled to <body> with fixed positioning so it escapes the
+  // tool-rail's overflow/stacking context and never opens off the bottom of the
+  // screen (the swatches sit at the foot of the rail). Anchored to the right of
+  // the swatches, growing upward from their bottom edge.
+  const [pickerPos, setPickerPos] = useState<{ left: number; bottom: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!open) {
+      setPickerPos(null);
+      return;
+    }
+    const r = rootRef.current?.getBoundingClientRect();
+    if (r) setPickerPos({ left: r.right + 8, bottom: window.innerHeight - r.bottom });
+  }, [open]);
 
   // Close the popover on outside click / Escape.
   useEffect(() => {
@@ -146,19 +160,23 @@ export function ColorSwatches() {
         </button>
       </div>
 
-      {/* Picker popover */}
-      {open && (
-        <div
-          className="absolute left-0 top-full z-50 mt-2"
-          onPointerDown={(e) => e.stopPropagation()}
-        >
-          <ColorPicker
-            value={activeColor}
-            onChange={onPickerChange}
-            onEyedropper={() => setOpen(null)}
-          />
-        </div>
-      )}
+      {/* Picker popover — portalled so it escapes the rail's clipping/stacking. */}
+      {open &&
+        pickerPos &&
+        createPortal(
+          <div
+            style={{ position: "fixed", left: pickerPos.left, bottom: pickerPos.bottom }}
+            className="z-[200]"
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <ColorPicker
+              value={activeColor}
+              onChange={onPickerChange}
+              onEyedropper={() => setOpen(null)}
+            />
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

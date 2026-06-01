@@ -485,6 +485,13 @@ export class EditorEngine {
   /** Live crop rectangle (doc px) or null when no crop session is active. */
   private cropSession: { rect: Rect } | null = null;
 
+  // ── internal clipboard (Copy/Cut/Paste of pixel regions) ─
+  /** Straight-alpha sRGB pixels copied from a layer's selected region, plus the
+   *  doc-space origin so Paste lands in place. Null until the first Copy/Cut. */
+  private clipboard:
+    | { data: Uint8ClampedArray; width: number; height: number; x: number; y: number }
+    | null = null;
+
   // ── text editing ────────────────────────────────────────
   /** The text layer currently being edited via the UI overlay, or null. */
   private textEditing: { layerId: LayerId } | null = null;
@@ -1622,12 +1629,27 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     layerId: LayerId,
     roi: { x: number; y: number; width: number; height: number },
   ): Promise<Blob> {
+    const img = this.readLayerRegionImageData(layerId, roi);
+    if (!img) throw new Error("Layer not found.");
+    return encodePng(img.data, roi.width, roi.height);
+  }
+
+  /**
+   * Read a raster layer's pixels over a doc-space ROI as straight-alpha sRGB
+   * ImageData (top row first). Shared by PNG export, AI region transfer, and the
+   * internal clipboard (Copy/Cut/Layer-via-copy). Returns null if the layer
+   * isn't a ready raster.
+   */
+  private readLayerRegionImageData(
+    layerId: LayerId,
+    roi: { x: number; y: number; width: number; height: number },
+  ): ImageData | null {
     const r = this.renderer;
     const blend = this.normalBlendProgram;
-    if (!r || !blend) throw new Error("Engine not ready.");
+    if (!r || !blend) return null;
     const layer = this.doc.getLayer(layerId);
     const tex = this.resolveTexture(layerId);
-    if (!layer || layer.kind !== "raster" || !tex) throw new Error("Layer not found.");
+    if (!layer || layer.kind !== "raster" || !tex) return null;
     const gl = r.gl;
     // RGBA8 (not float) target: this result is read back as bytes, which is an
     // invalid format combo on a float FBO and returns zeros.
@@ -1671,7 +1693,7 @@ void main() { fragColor = texture(u_src, v_uv); }`,
         out[dstRow + x + 3] = rawLinear[srcRow + x + 3] ?? 0;
       }
     }
-    return encodePng(out, roi.width, roi.height);
+    return new ImageData(out, roi.width, roi.height);
   }
 
   // ── layer masks ─────────────────────────────────────────
@@ -1759,6 +1781,7 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     this.filterPreview = null;
     this.filterScratch = null;
     this._fillProg = null;
+    this._eraseProg = null;
     this._gradProg = null;
     this._histProg = null;
     this._previewProg = null;
@@ -2308,6 +2331,11 @@ void main() { fragColor = texture(u_src, v_uv); }`,
     for (const id of ids) {
       const layer = this.doc.getLayer(id);
       if (!layer || !layer.visible || layer.opacity <= 0) continue;
+      // While a text layer is being edited, the WYSIWYG <textarea> overlay IS
+      // what the user sees — hide the engine's own raster of that layer so the
+      // two don't double-expose (the rasterizer's padding offsets them, which
+      // looks like overlapping/stacked glyphs while typing).
+      if (this.textEditing && this.textEditing.layerId === id) continue;
 
       // Adjustment layers: fullscreen pass over the current accumulator.
       if (isAdjustmentLayer(layer)) {
@@ -3425,11 +3453,23 @@ void main() {
     // Crop: route drags to the live crop rect.
     if (tool === "crop") {
       if (!this.cropSession) this.beginCrop();
-      const mode = this.hitTestCrop(local.x, local.y);
+      const cs = this.cropSession!;
+      let mode = this.hitTestCrop(local.x, local.y);
+      // The crop starts covering the whole image. While it's still untouched
+      // there's no empty space to drag a new box out of, so an inside-drag
+      // (which would otherwise be a no-op "move") instead DRAWS a fresh region —
+      // matching the natural "drag the part to keep" expectation. Once the crop
+      // has been resized, inside-drag reverts to moving the box.
+      const isFullDoc =
+        cs.rect.x === 0 &&
+        cs.rect.y === 0 &&
+        cs.rect.width === this.doc.width &&
+        cs.rect.height === this.doc.height;
+      if (isFullDoc && mode === "move") mode = "new";
       const startRect = mode === "new"
         ? { x: doc.x, y: doc.y, width: 0, height: 0 }
-        : { ...this.cropSession!.rect };
-      if (mode === "new") this.cropSession!.rect = startRect;
+        : { ...cs.rect };
+      if (mode === "new") cs.rect = startRect;
       this.gesture = { kind: "crop", mode, startDoc: doc, startRect };
       this.markDirty();
       return;
@@ -3616,7 +3656,7 @@ void main() {
 
     if (g.kind === "crop") {
       const doc = this.screenToDoc(local.x, local.y);
-      this.updateCropDrag(g, doc);
+      this.updateCropDrag(g, doc, { shift: e.shiftKey, alt: e.altKey });
       this.markDirty();
       this.emit();
       return;
@@ -3653,10 +3693,12 @@ void main() {
     }
 
     if (g.kind === "pen") {
-      // Drag the just-placed anchor's out handle (mirrors to the in handle), so
-      // a click-drag produces a smooth anchor.
+      // Drag the just-placed anchor's out handle. Normally it mirrors to the in
+      // handle (a smooth anchor); holding Option/Alt breaks the mirror so the
+      // out handle moves independently — a corner/cusp point (Photoshop's
+      // "convert point" while drawing).
       const doc = this.screenToDoc(local.x, local.y);
-      this.paths.setLastAnchorOut(doc.x, doc.y, true);
+      this.paths.setLastAnchorOut(doc.x, doc.y, !e.altKey);
       this.markDirty();
       this.emit();
       return;
@@ -3731,14 +3773,34 @@ void main() {
 
     if (g.kind === "marquee" && this.liveMarquee) {
       let doc = this.screenToDoc(local.x, local.y);
-      // Snap the dragged (moving) corner; the start corner stays put.
-      if (this.snapEnabled) doc = this.snapPointDoc(doc, 8);
-      this.liveMarquee = {
-        x0: g.startDoc.x,
-        y0: g.startDoc.y,
-        x1: doc.x,
-        y1: doc.y,
-      };
+      // Snap the dragged (moving) corner; the start corner stays put. Skip
+      // snapping while constraining to a square (it would break the 1:1 ratio).
+      if (this.snapEnabled && !e.shiftKey) doc = this.snapPointDoc(doc, 8);
+      // The add/subtract/intersect operator was frozen at pointer-down (g.op),
+      // so here Shift/Alt are free to mean constrain / from-centre — exactly
+      // Photoshop's marquee semantics.
+      let w = doc.x - g.startDoc.x;
+      let h = doc.y - g.startDoc.y;
+      if (e.shiftKey) {
+        // Square / circle: equal extent, preserving drag direction.
+        const sz = Math.max(Math.abs(w), Math.abs(h));
+        w = (Math.sign(w) || 1) * sz;
+        h = (Math.sign(h) || 1) * sz;
+      }
+      this.liveMarquee = e.altKey
+        ? {
+            // From centre: the press point is the centre of the marquee.
+            x0: g.startDoc.x - w,
+            y0: g.startDoc.y - h,
+            x1: g.startDoc.x + w,
+            y1: g.startDoc.y + h,
+          }
+        : {
+            x0: g.startDoc.x,
+            y0: g.startDoc.y,
+            x1: g.startDoc.x + w,
+            y1: g.startDoc.y + h,
+          };
       this.markDirty();
       return;
     }
@@ -3833,9 +3895,29 @@ void main() {
       return;
     }
 
-    // Transform / crop drags persist in their session (no commit on pointer-up;
-    // Enter commits, Esc cancels). Just settle the render.
-    if (g.kind === "transform" || g.kind === "crop") {
+    if (g.kind === "crop") {
+      // A near-zero "new" drag (a stray click, or a tiny accidental box) must
+      // not collapse the crop to a sliver — restore the full-document rect so
+      // the user can try again. Resizing handles persist; Enter/Apply commits.
+      if (g.mode === "new" && this.cropSession) {
+        const rr = this.cropSession.rect;
+        if (rr.width < 8 || rr.height < 8) {
+          this.cropSession.rect = {
+            x: 0,
+            y: 0,
+            width: this.doc.width,
+            height: this.doc.height,
+          };
+        }
+      }
+      this.markDirty();
+      this.emit();
+      return;
+    }
+
+    // Transform drags persist in their session (no commit on pointer-up; Enter
+    // commits, Esc cancels). Just settle the render.
+    if (g.kind === "transform") {
       this.markDirty();
       this.emit();
       return;
@@ -3975,6 +4057,46 @@ void main() {
     if (meta && (e.key === "d" || e.key === "D")) {
       e.preventDefault();
       this.clearSelection();
+      return;
+    }
+    // Inverse selection (⇧⌘I).
+    if (meta && e.shiftKey && (e.key === "i" || e.key === "I")) {
+      e.preventDefault();
+      this.invertSelection();
+      return;
+    }
+    // Copy / Cut the selected region of the active layer.
+    if (meta && !e.shiftKey && (e.key === "c" || e.key === "C")) {
+      e.preventDefault();
+      this.copySelection();
+      return;
+    }
+    if (meta && !e.shiftKey && (e.key === "x" || e.key === "X")) {
+      e.preventDefault();
+      this.cutSelection();
+      return;
+    }
+    // Paste: our internal clipboard takes precedence (paste-in-place). When it's
+    // empty, fall through (no preventDefault) so the window 'paste' handler can
+    // import an image from the system clipboard.
+    if (meta && (e.key === "v" || e.key === "V")) {
+      if (this.clipboard) {
+        e.preventDefault();
+        this.pasteClipboard();
+      }
+      return;
+    }
+    // Layer via Copy (⌘J) — duplicate the selection (or layer) into a new layer.
+    if (meta && (e.key === "j" || e.key === "J")) {
+      e.preventDefault();
+      this.duplicateSelectionToLayer();
+      return;
+    }
+    // Delete / Backspace clears the selected pixels (only when something is
+    // selected, so it doesn't wipe a whole layer by accident).
+    if ((e.key === "Delete" || e.key === "Backspace") && this.selection && !this.selection.isEmpty()) {
+      e.preventDefault();
+      this.deleteSelectionContent("Delete");
       return;
     }
   }
@@ -5296,6 +5418,333 @@ void main() {
     if (feather > 0) sel.feather(feather);
     this.markDirty();
     this.emit();
+  }
+
+  // ── clipboard: Copy / Cut / Paste / Layer-via-copy ──────
+  /** True when there's pixel content on the internal clipboard to paste. */
+  hasClipboard(): boolean {
+    return this.clipboard !== null;
+  }
+
+  /**
+   * The doc-space ROI to copy/duplicate from the active layer: the selection
+   * bounds (clamped to the document) or, with no selection, the whole layer.
+   */
+  private regionForActiveLayer(
+    layer: RasterLayer,
+  ): { x: number; y: number; width: number; height: number } | null {
+    const sel = this.selection;
+    if (sel && !sel.isEmpty()) {
+      const b = sel.getBounds();
+      if (!b) return null;
+      const x0 = Math.max(0, Math.floor(b.x));
+      const y0 = Math.max(0, Math.floor(b.y));
+      const x1 = Math.min(this.doc.width, Math.ceil(b.x + b.width));
+      const y1 = Math.min(this.doc.height, Math.ceil(b.y + b.height));
+      if (x1 - x0 <= 0 || y1 - y0 <= 0) return null;
+      return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+    }
+    return {
+      x: Math.round(layer.x),
+      y: Math.round(layer.y),
+      width: layer.width,
+      height: layer.height,
+    };
+  }
+
+  /**
+   * Read the active raster layer's pixels over the copy ROI, with the selection
+   * applied as alpha (so an ellipse/lasso copies with the right shape + soft
+   * edges). Returns the masked pixels + their doc-space origin, or null.
+   */
+  private extractActiveLayerRegion():
+    | { data: Uint8ClampedArray; width: number; height: number; x: number; y: number }
+    | null {
+    const id = this.doc.getActiveLayerId();
+    if (!id) return null;
+    const layer = this.doc.getLayer(id);
+    if (!layer || layer.kind !== "raster") return null;
+    const roi = this.regionForActiveLayer(layer);
+    if (!roi) return null;
+    const img = this.readLayerRegionImageData(id, roi);
+    if (!img) return null;
+    const sel = this.selection;
+    if (sel && !sel.isEmpty()) {
+      const mask = this.sampleSelectionIntoRegion(roi);
+      if (mask) {
+        const d = img.data;
+        for (let i = 0; i < mask.length; i++) {
+          d[i * 4 + 3] = Math.round((d[i * 4 + 3] ?? 0) * ((mask[i] ?? 0) / 255));
+        }
+      }
+    }
+    return { data: img.data, width: roi.width, height: roi.height, x: roi.x, y: roi.y };
+  }
+
+  /** Read the selection mask (0..255) over a doc-space ROI, top row first
+   *  (matching readLayerRegionImageData). Null if no active selection. */
+  private sampleSelectionIntoRegion(roi: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }): Uint8Array | null {
+    const r = this.renderer;
+    const sel = this.selection;
+    if (!r || !sel || sel.isEmpty() || !sel.framebuffer) return null;
+    const { width: dw, height: dh } = sel.size;
+    const ox = Math.round(roi.x);
+    const oy = Math.round(roi.y);
+    const x0 = Math.max(0, Math.min(dw, ox));
+    const y0 = Math.max(0, Math.min(dh, oy));
+    const x1 = Math.max(0, Math.min(dw, ox + roi.width));
+    const y1 = Math.max(0, Math.min(dh, oy + roi.height));
+    const rw = x1 - x0;
+    const rh = y1 - y0;
+    const out = new Uint8Array(roi.width * roi.height); // 0 (hidden) outside doc
+    if (rw <= 0 || rh <= 0) return out;
+    // The selection FBO is stored doc-top-down, so a direct read at (x0,y0) is
+    // already top row first — aligned with readLayerRegionImageData's output.
+    const raw = r.readR8(sel.framebuffer, x0, y0, rw, rh);
+    for (let y = 0; y < rh; y++) {
+      const dy = y0 - oy + y;
+      if (dy < 0 || dy >= roi.height) continue;
+      for (let x = 0; x < rw; x++) {
+        const dx = x0 - ox + x;
+        if (dx < 0 || dx >= roi.width) continue;
+        out[dy * roi.width + dx] = raw[y * rw + x] ?? 0;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Copy the active layer's selected region to the internal clipboard (and,
+   * best-effort, the system clipboard as PNG). With no selection, copies the
+   * whole active layer. Returns false if there's nothing to copy.
+   */
+  copySelection(): boolean {
+    const region = this.extractActiveLayerRegion();
+    if (!region) return false;
+    this.clipboard = region;
+    void this.writeImageToSystemClipboard(
+      new ImageData(new Uint8ClampedArray(region.data), region.width, region.height),
+    );
+    this.emit(); // refresh Paste-enabled state
+    return true;
+  }
+
+  /** Cut = copy + erase the selected pixels (one extra undo step). */
+  cutSelection(): boolean {
+    if (!this.copySelection()) return false;
+    this.deleteSelectionContent("Cut");
+    return true;
+  }
+
+  /**
+   * Erase (clear to transparent) the selected pixels of the active raster
+   * layer — the whole layer if there's no selection. One undo step. Used by
+   * Cut and the Delete/Backspace key.
+   */
+  deleteSelectionContent(label = "Delete"): void {
+    const id = this.doc.getActiveLayerId();
+    if (!id) return;
+    const layer = this.doc.getLayer(id);
+    if (!layer || layer.kind !== "raster") return;
+    const r = this.renderer;
+    if (!r) return;
+    const gl = r.gl;
+    const tex = this.resolveTexture(layer.id);
+    if (!tex) return;
+    const prog = this.eraseProgram();
+    const prevSource = layer.source;
+    const target = r.createRGBA8Target(layer.width, layer.height);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+    gl.viewport(0, 0, layer.width, layer.height);
+    gl.disable(gl.BLEND);
+    gl.useProgram(prog);
+    gl.uniformMatrix3fv(
+      gl.getUniformLocation(prog, "u_transform"),
+      false,
+      new Float32Array([2, 0, 0, 0, 2, 0, -1, -1, 1]),
+    );
+    gl.uniform1i(gl.getUniformLocation(prog, "u_layer"), 0);
+    const sel = this.selection;
+    const useSel = !!sel && !sel.isEmpty() && !!sel.texture;
+    gl.uniform1i(gl.getUniformLocation(prog, "u_useSelection"), useSel ? 1 : 0);
+    if (useSel && sel) {
+      const { width: dw, height: dh } = sel.size;
+      const uvToSel = new Float32Array([
+        layer.width / dw, 0, 0,
+        0, layer.height / dh, 0,
+        layer.x / dw, layer.y / dh, 1,
+      ]);
+      gl.uniformMatrix3fv(gl.getUniformLocation(prog, "u_uvToSel"), false, uvToSel);
+      gl.uniform1i(gl.getUniformLocation(prog, "u_selection"), 1);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, sel.texture!);
+    }
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex.tex);
+    r.drawQuad();
+
+    const rawPx = r.readPixels(target, 0, 0, layer.width, layer.height);
+    r.deleteFramebuffer(target);
+    const newSource = rawToImageData(rawPx, layer.width, layer.height);
+    const lid = layer.id;
+    const apply = () => {
+      this.doc.replaceSource(lid, newSource);
+      this.textures.delete(lid);
+    };
+    const revert = () => {
+      this.doc.replaceSource(lid, prevSource);
+      this.textures.delete(lid);
+    };
+    apply();
+    this.history.push({
+      label,
+      bytes: layer.width * layer.height * 4,
+      undo: revert,
+      redo: apply,
+    });
+    this.markDirty();
+    this.emit();
+  }
+
+  /**
+   * Paste the internal clipboard as a new raster layer at its original
+   * doc-space position ("Paste in place"). Selects the new layer. One undo
+   * step. No-op when the clipboard is empty.
+   */
+  pasteClipboard(): LayerId | null {
+    const clip = this.clipboard;
+    if (!clip) return null;
+    const img = new ImageData(
+      new Uint8ClampedArray(clip.data),
+      clip.width,
+      clip.height,
+    );
+    const id = this.doc.addRasterLayer(img, "Pasted", { x: clip.x, y: clip.y });
+    this.doc.setActive(id);
+    this.selection?.resize(this.doc.width, this.doc.height);
+    this.history.push(
+      paramCommand("Paste", () => {}, () => this.doc.remove(id)),
+    );
+    this.snapshotCache = this.doc.snapshot();
+    this.markDirty();
+    this.emit();
+    return id;
+  }
+
+  /**
+   * Layer via Copy (Cmd+J): copy the active layer's selected region into a new
+   * raster layer in place, without touching the clipboard. With no selection,
+   * duplicates the whole layer. One undo step. Selects the new layer.
+   */
+  duplicateSelectionToLayer(): LayerId | null {
+    const region = this.extractActiveLayerRegion();
+    if (!region) return null;
+    const img = new ImageData(
+      new Uint8ClampedArray(region.data),
+      region.width,
+      region.height,
+    );
+    const id = this.doc.addRasterLayer(img, "Layer", { x: region.x, y: region.y });
+    this.doc.setActive(id);
+    this.history.push(
+      paramCommand("Layer via Copy", () => {}, () => this.doc.remove(id)),
+    );
+    this.snapshotCache = this.doc.snapshot();
+    this.markDirty();
+    this.emit();
+    return id;
+  }
+
+  /** Add a new transparent raster layer at document size, select it. One undo
+   *  step. (The Layers panel "+" button.) */
+  addBlankRasterLayer(name = "Layer"): LayerId | null {
+    const w = Math.max(1, this.doc.width);
+    const h = Math.max(1, this.doc.height);
+    const img = new ImageData(new Uint8ClampedArray(w * h * 4), w, h);
+    const id = this.doc.addRasterLayer(img, name);
+    this.doc.setActive(id);
+    this.history.push(
+      paramCommand("New layer", () => {}, () => this.doc.remove(id)),
+    );
+    this.snapshotCache = this.doc.snapshot();
+    this.markDirty();
+    this.emit();
+    return id;
+  }
+
+  /** Duplicate the active raster layer into a new layer in place (ignores any
+   *  selection — the whole layer). One undo step. Selects the copy. Raster only
+   *  for now. */
+  duplicateActiveLayer(): LayerId | null {
+    const id = this.doc.getActiveLayerId();
+    if (!id) return null;
+    const layer = this.doc.getLayer(id);
+    if (!layer || layer.kind !== "raster") return null;
+    const roi = {
+      x: Math.round(layer.x),
+      y: Math.round(layer.y),
+      width: layer.width,
+      height: layer.height,
+    };
+    const img = this.readLayerRegionImageData(id, roi);
+    if (!img) return null;
+    const newId = this.doc.addRasterLayer(img, "Layer copy", { x: roi.x, y: roi.y });
+    this.doc.setActive(newId);
+    this.history.push(
+      paramCommand("Duplicate layer", () => {}, () => this.doc.remove(newId)),
+    );
+    this.snapshotCache = this.doc.snapshot();
+    this.markDirty();
+    this.emit();
+    return newId;
+  }
+
+  /** Best-effort: place a PNG of the copied region on the system clipboard so
+   *  it can be pasted into other apps. Silently no-ops if unsupported/denied. */
+  private async writeImageToSystemClipboard(img: ImageData): Promise<void> {
+    try {
+      if (typeof ClipboardItem === "undefined" || !navigator.clipboard?.write) return;
+      const canvas = document.createElement("canvas");
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.putImageData(img, 0, 0);
+      const blob: Blob | null = await new Promise((res) =>
+        canvas.toBlob((b) => res(b), "image/png"),
+      );
+      if (!blob) return;
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+    } catch {
+      // Permission denied / unsupported — the internal clipboard still works.
+    }
+  }
+
+  private _eraseProg: WebGLProgram | null = null;
+  /** Alpha-erase shader: out = vec4(layer.rgb, layer.a * (1 - coverage)),
+   *  coverage = selection mask (or 1 everywhere when no selection). */
+  private eraseProgram(): WebGLProgram {
+    if (this._eraseProg) return this._eraseProg;
+    const frag = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv; out vec4 fragColor;
+uniform sampler2D u_layer;
+uniform sampler2D u_selection;
+uniform bool u_useSelection;
+uniform mat3 u_uvToSel;
+void main(){
+  vec4 base = texture(u_layer, v_uv);
+  float cov = 1.0;
+  if (u_useSelection) { vec3 s = u_uvToSel*vec3(v_uv,1.0); cov = texture(u_selection, s.xy).r; }
+  fragColor = vec4(base.rgb, base.a * (1.0 - cov));
+}`;
+    this._eraseProg = this.renderer!.compileProgram(QUAD_VERT, frag);
+    return this._eraseProg;
   }
 
   /** Render layer texture + wet stroke into a new RGBA8 source; swap + undo. */
@@ -7362,6 +7811,12 @@ void main(){
       rect: { x: 0, y: 0, width: this.doc.width, height: this.doc.height },
     };
     toolStore.setActive("crop");
+    // Toggling the crop session must be visible to snapshot consumers (the
+    // CropBar gates on isCropping()): refresh the cached snapshot so
+    // useSyncExternalStore returns a new reference and the bar re-renders.
+    // Without this the bar mounts during the synchronous tool-switch render
+    // (session still null → "No active crop") and never updates.
+    this.snapshotCache = this.doc.snapshot();
     this.markDirty();
     this.emit();
   }
@@ -7417,10 +7872,19 @@ void main(){
     return "new";
   }
 
-  /** Advance the live crop rect from a drag (doc px). */
+  /**
+   * Advance the live crop rect from a drag (doc px).
+   *
+   * Modifiers (held while dragging, classic Photoshop semantics):
+   *  - Shift → constrain proportions: a square on a fresh drag, or the start
+   *    rect's aspect ratio when resizing a corner/edge.
+   *  - Alt/Option → resize symmetrically about the rect's centre (the press
+   *    point on a fresh drag).
+   */
   private updateCropDrag(
     g: { mode: CropDragMode; startDoc: { x: number; y: number }; startRect: Rect },
     doc: { x: number; y: number },
+    opts: { shift: boolean; alt: boolean } = { shift: false, alt: false },
   ): void {
     const cs = this.cropSession;
     if (!cs) return;
@@ -7433,17 +7897,73 @@ void main(){
     let y1 = s.y + s.height;
 
     if (g.mode === "new") {
-      x0 = Math.min(g.startDoc.x, doc.x);
-      y0 = Math.min(g.startDoc.y, doc.y);
-      x1 = Math.max(g.startDoc.x, doc.x);
-      y1 = Math.max(g.startDoc.y, doc.y);
+      let w = doc.x - g.startDoc.x;
+      let h = doc.y - g.startDoc.y;
+      if (opts.shift) {
+        // Square: equal extent, preserving each axis' drag direction.
+        const sz = Math.max(Math.abs(w), Math.abs(h));
+        w = (Math.sign(w) || 1) * sz;
+        h = (Math.sign(h) || 1) * sz;
+      }
+      if (opts.alt) {
+        // From centre: the press point is the centre, mirror to both sides.
+        x0 = g.startDoc.x - w; y0 = g.startDoc.y - h;
+        x1 = g.startDoc.x + w; y1 = g.startDoc.y + h;
+      } else {
+        x0 = g.startDoc.x; y0 = g.startDoc.y;
+        x1 = g.startDoc.x + w; y1 = g.startDoc.y + h;
+      }
     } else if (g.mode === "move") {
       x0 += dx; x1 += dx; y0 += dy; y1 += dy;
     } else {
+      // Edge / corner resize.
       if (g.mode.includes("w")) x0 = s.x + dx;
       if (g.mode.includes("e")) x1 = s.x + s.width + dx;
       if (g.mode.includes("n")) y0 = s.y + dy;
       if (g.mode.includes("s")) y1 = s.y + s.height + dy;
+
+      const horiz = g.mode.includes("w") || g.mode.includes("e");
+      const vert = g.mode.includes("n") || g.mode.includes("s");
+
+      // Shift: lock to the start rect's aspect ratio.
+      if (opts.shift && s.width > 0 && s.height > 0) {
+        const aspect = s.width / s.height; // w : h
+        if (horiz && vert) {
+          // Corner: keep the anchored (opposite) corner fixed; derive the
+          // smaller-relative axis from the larger one along the start ratio.
+          const wNew = x1 - x0;
+          const hNew = y1 - y0;
+          if (Math.abs(wNew) / aspect >= Math.abs(hNew)) {
+            const hMag = Math.abs(wNew) / aspect;
+            if (g.mode.includes("n")) y0 = y1 - (Math.sign(hNew) || 1) * hMag;
+            else y1 = y0 + (Math.sign(hNew) || 1) * hMag;
+          } else {
+            const wMag = Math.abs(hNew) * aspect;
+            if (g.mode.includes("w")) x0 = x1 - (Math.sign(wNew) || 1) * wMag;
+            else x1 = x0 + (Math.sign(wNew) || 1) * wMag;
+          }
+        } else if (horiz) {
+          // Vertical edge dragged: set height from the new width, about centre.
+          const hMag = Math.abs(x1 - x0) / aspect;
+          const cy = s.y + s.height / 2;
+          y0 = cy - hMag / 2; y1 = cy + hMag / 2;
+        } else {
+          // Horizontal edge dragged: set width from the new height, about centre.
+          const wMag = Math.abs(y1 - y0) * aspect;
+          const cx = s.x + s.width / 2;
+          x0 = cx - wMag / 2; x1 = cx + wMag / 2;
+        }
+      }
+
+      // Alt: resize symmetrically about the start rect's centre.
+      if (opts.alt) {
+        const cx = s.x + s.width / 2;
+        const cy = s.y + s.height / 2;
+        if (g.mode.includes("w")) x1 = 2 * cx - x0;
+        if (g.mode.includes("e")) x0 = 2 * cx - x1;
+        if (g.mode.includes("n")) y1 = 2 * cy - y0;
+        if (g.mode.includes("s")) y0 = 2 * cy - y1;
+      }
     }
     // Normalize (allow dragging an edge past the opposite one).
     const nx0 = Math.min(x0, x1);
@@ -7519,6 +8039,10 @@ void main(){
       for (const e of adjMaskEdits) setMask(e.id, e.next);
       this.selection?.resize(rect.width, rect.height);
       this.snapshotCache = this.doc.snapshot();
+      // The document size changed — refresh the tab/title dimensions and the
+      // canvas extent, otherwise the title pill shows the pre-crop size and the
+      // cropped doc sits off-centre (which reads as "nothing happened").
+      this.emitDocList();
       this.markDirty();
       this.emit();
     };
@@ -7532,11 +8056,15 @@ void main(){
       for (const e of adjMaskEdits) setMask(e.id, e.prev);
       this.selection?.resize(prevW, prevH);
       this.snapshotCache = this.doc.snapshot();
+      this.emitDocList();
       this.markDirty();
       this.emit();
     };
 
     apply();
+    // Centre + fit the freshly cropped document so the result is obviously the
+    // new canvas (not the old one with content shifted into a corner).
+    this.fitToScreen();
     this.history.push({
       label: "Crop",
       bytes: 0,
@@ -7549,6 +8077,8 @@ void main(){
   cancelCrop(): void {
     if (!this.cropSession) return;
     this.cropSession = null;
+    // See beginCrop: keep isCropping() reactive for snapshot consumers.
+    this.snapshotCache = this.doc.snapshot();
     this.markDirty();
     this.emit();
   }

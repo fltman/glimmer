@@ -369,8 +369,11 @@ export default function App() {
             {omni && <Omnibar />}
             {omni && ws.toolsOpen && (
               <>
-                {/* Floating tool rail (clears the doc pill above + omnibar below). */}
-                <div className="animate-fadein pointer-events-auto absolute bottom-20 left-3 top-16 z-30 flex overflow-hidden rounded-xl border border-edge bg-panel/95 shadow-2xl backdrop-blur">
+                {/* Floating tool rail (clears the doc pill above + omnibar below).
+                    Sizes to its content (two columns, no scroll) and is NOT
+                    overflow-clipped, so the tool flyouts + colour picker can
+                    open beyond the card edge. */}
+                <div className="animate-fadein pointer-events-auto absolute bottom-20 left-3 top-16 z-30 flex max-h-[calc(100vh-9rem)] items-start rounded-xl border border-edge bg-panel/95 shadow-2xl backdrop-blur">
                   <ToolRail />
                 </div>
                 {/* Contextual options — ONLY the active tool's controls, and only

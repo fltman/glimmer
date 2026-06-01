@@ -410,7 +410,7 @@ function CropBar() {
         ))}
       </div>
       <span className="text-[11px] text-muted">
-        Drag edges/corners to size · Enter applies · Esc cancels
+        Drag a region or the edges · Shift = ratio · Alt = from centre · Enter applies · Esc cancels
       </span>
       <div className="ml-auto flex items-center gap-2">
         <button className="btn-accent" onClick={() => actions.commitCrop()}>

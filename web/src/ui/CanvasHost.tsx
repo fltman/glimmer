@@ -14,7 +14,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { engine } from "../state/useEngine";
-import { useToolState, type ToolId } from "../state/tools";
+import { useToolState, type ToolId, type ToolState } from "../state/tools";
 import type { SubPath } from "../engine/Paths";
 
 const CURSORS: Record<ToolId, string> = {
@@ -926,9 +926,127 @@ function PathPreview({
   );
 }
 
+/**
+ * Brush-like tools draw a circle cursor sized to the brush diameter (doc px ×
+ * zoom) instead of a generic crosshair, so you can see exactly what you'll
+ * paint. Maps each tool to the doc-px diameter it reads from the tool store.
+ */
+const BRUSH_SIZE: Partial<Record<ToolId, (ts: ToolState) => number>> = {
+  brush: (ts) => ts.brush.size,
+  eraser: (ts) => ts.brush.size,
+  clone: (ts) => ts.clone.size,
+  heal: (ts) => ts.clone.size,
+  dodge: (ts) => ts.dodgeBurn.size,
+  burn: (ts) => ts.dodgeBurn.size,
+  smudge: (ts) => ts.smudge.size,
+  "blur-brush": (ts) => ts.focus.size,
+  "sharpen-brush": (ts) => ts.focus.size,
+};
+
+/**
+ * The custom cursor for brush-like tools: a ring at the brush diameter + a
+ * centre dot. For the clone/heal tools, holding Option/Alt shows a "set source"
+ * target instead — the cue to Alt-click a sample point. Tracks the pointer in
+ * CSS px relative to the canvas host; pointer-events:none so it never blocks
+ * canvas drags.
+ */
+function BrushCursor({ hostRef }: { hostRef: React.RefObject<HTMLDivElement | null> }) {
+  const ts = useToolState();
+  const isBrushTool = !!BRUSH_SIZE[ts.active];
+  const [p, setP] = useState({ x: 0, y: 0, inside: false, alt: false });
+
+  useEffect(() => {
+    if (!isBrushTool) return;
+    const read = (e: PointerEvent | { clientX: number; clientY: number; altKey: boolean }) => {
+      const host = hostRef.current;
+      if (!host) return;
+      const r = host.getBoundingClientRect();
+      const x = e.clientX - r.left;
+      const y = e.clientY - r.top;
+      setP({
+        x,
+        y,
+        inside: x >= 0 && y >= 0 && x <= r.width && y <= r.height,
+        alt: e.altKey,
+      });
+    };
+    let last: PointerEvent | null = null;
+    const onMove = (e: PointerEvent) => {
+      last = e;
+      read(e);
+    };
+    // Pressing/releasing Alt without moving still flips the clone "set source"
+    // cue (use the last known pointer position).
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Alt" && last) read({ clientX: last.clientX, clientY: last.clientY, altKey: e.type === "keydown" });
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKey);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKey);
+    };
+  }, [isBrushTool, hostRef]);
+
+  const sizeFn = BRUSH_SIZE[ts.active];
+  if (!sizeFn || !p.inside) return null;
+  const scale = engine.getViewTransform().scale;
+  const diameter = Math.max(4, sizeFn(ts) * scale);
+  const isCloneSource = (ts.active === "clone" || ts.active === "heal") && p.alt;
+
+  if (isCloneSource) {
+    return (
+      <div
+        className="pointer-events-none absolute z-10"
+        style={{ left: p.x, top: p.y, transform: "translate(-50%,-50%)" }}
+      >
+        <svg width="28" height="28" viewBox="0 0 28 28" className="overflow-visible">
+          <g fill="none" stroke="#000" strokeWidth="2.5" opacity="0.55">
+            <circle cx="14" cy="14" r="9" />
+            <line x1="14" y1="2" x2="14" y2="26" />
+            <line x1="2" y1="14" x2="26" y2="14" />
+          </g>
+          <g fill="none" stroke="#fff" strokeWidth="1.25">
+            <circle cx="14" cy="14" r="9" />
+            <line x1="14" y1="2" x2="14" y2="26" />
+            <line x1="2" y1="14" x2="26" y2="14" />
+          </g>
+        </svg>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="pointer-events-none absolute z-10 rounded-full"
+      style={{
+        left: p.x,
+        top: p.y,
+        width: diameter,
+        height: diameter,
+        transform: "translate(-50%,-50%)",
+        // Double ring (white outline over a dark outline) reads on any backdrop.
+        border: "1px solid rgba(255,255,255,0.9)",
+        boxShadow: "0 0 0 1px rgba(0,0,0,0.45)",
+      }}
+    >
+      {/* Precise centre dot. */}
+      <span
+        className="absolute left-1/2 top-1/2 h-[3px] w-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-white"
+        style={{ boxShadow: "0 0 0 1px rgba(0,0,0,0.45)" }}
+      />
+    </div>
+  );
+}
+
 export function CanvasHost() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const hostRef = useRef<HTMLDivElement | null>(null);
   const { active } = useToolState();
+  // Brush-like tools hide the OS cursor and show the ring (BrushCursor) instead.
+  const cursor = BRUSH_SIZE[active] ? "none" : CURSORS[active];
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -938,13 +1056,14 @@ export function CanvasHost() {
   }, []);
 
   return (
-    <div className="relative h-full w-full overflow-hidden bg-[#0b0c0d]">
+    <div ref={hostRef} className="relative h-full w-full overflow-hidden bg-[#0b0c0d]">
       <canvas
         ref={canvasRef}
         className="block h-full w-full touch-none select-none"
-        style={{ cursor: CURSORS[active] }}
+        style={{ cursor }}
       />
       <CanvasOverlay />
+      <BrushCursor hostRef={hostRef} />
     </div>
   );
 }

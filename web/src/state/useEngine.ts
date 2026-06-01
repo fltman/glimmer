@@ -625,6 +625,34 @@ export const actions = {
     engine.setSelectionFromMask(source, feather);
   },
 
+  // ── clipboard (Copy / Cut / Paste / Layer-via-copy) ──
+  copySelection() {
+    return engine.copySelection();
+  },
+  cutSelection() {
+    return engine.cutSelection();
+  },
+  pasteClipboard() {
+    return engine.pasteClipboard();
+  },
+  duplicateSelectionToLayer() {
+    return engine.duplicateSelectionToLayer();
+  },
+  deleteSelectionContent(label?: string) {
+    engine.deleteSelectionContent(label);
+  },
+  hasClipboard() {
+    return engine.hasClipboard();
+  },
+
+  // ── layer create / duplicate (Layers panel) ──
+  addBlankRasterLayer(name?: string) {
+    return engine.addBlankRasterLayer(name);
+  },
+  duplicateActiveLayer() {
+    return engine.duplicateActiveLayer();
+  },
+
   // ── clone source (clone/heal cursor hint) ──
   setCloneSource(docX: number, docY: number) {
     engine.setCloneSource(docX, docY);

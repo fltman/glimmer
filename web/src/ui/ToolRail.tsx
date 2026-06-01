@@ -9,7 +9,8 @@
  * (rect / ellipse / line) without leaving the rail.
  */
 import type React from "react";
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Move,
   SquareDashed,
@@ -171,6 +172,43 @@ function useFlyoutDismiss(
 }
 
 /**
+ * Renders flyout content as a fixed-position portal anchored to the right of
+ * `anchorRef`. Portalling to <body> escapes the tool-rail's overflow-clipping
+ * ancestors (the omni rail card uses overflow-hidden; the rail body can scroll)
+ * — a plain absolute popover would be cropped and never show.
+ */
+function Flyout({
+  anchorRef,
+  open,
+  children,
+}: {
+  anchorRef: React.RefObject<HTMLElement | null>;
+  open: boolean;
+  children: React.ReactNode;
+}) {
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!open) {
+      setPos(null);
+      return;
+    }
+    const r = anchorRef.current?.getBoundingClientRect();
+    if (r) setPos({ left: r.right + 6, top: r.top });
+  }, [open, anchorRef]);
+  if (!open || !pos) return null;
+  return createPortal(
+    <div
+      style={{ position: "fixed", left: pos.left, top: pos.top }}
+      className="z-[200] flex gap-1 rounded-md border border-edge bg-panelraised p-1 shadow-2xl"
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      {children}
+    </div>,
+    document.body,
+  );
+}
+
+/**
  * A rail button that fronts a group of related tools (like the Shape button):
  * it shows the currently-active member's glyph and opens a flyout to pick a
  * sibling. Clicking the button selects whichever member is active (or the first,
@@ -190,6 +228,7 @@ function GroupButton({
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
   useFlyoutDismiss(open, setOpen, rootRef);
 
   const current = members.find((m) => m.id === active) ?? members[0]!;
@@ -198,50 +237,46 @@ function GroupButton({
   return (
     <div ref={rootRef} className="relative">
       <button
+        ref={btnRef}
         onClick={() => {
           // Selecting the group adopts the current member (last-used wins).
           selectTool(current.id);
           setOpen((o) => !o);
         }}
-        className={`relative flex h-9 w-9 items-center justify-center rounded-md transition-colors ${
+        className={`relative flex h-8 w-8 items-center justify-center rounded-md transition-colors ${
           selected
             ? "bg-accent/20 text-ink ring-1 ring-accent/60"
             : "text-muted hover:bg-panelraised hover:text-ink"
         }`}
         title={`${title}${shortcut ? ` (${shortcut})` : ""} · click for more`}
       >
-        <current.Icon size={18} strokeWidth={1.75} />
+        <current.Icon size={17} strokeWidth={1.75} />
         <ChevronRight
           size={9}
           strokeWidth={3}
-          className="absolute bottom-[3px] right-[2px] text-muted/70"
+          className="absolute bottom-[2px] right-[1px] text-muted/70"
         />
       </button>
 
-      {open && (
-        <div
-          className="absolute left-full top-0 z-50 ml-1 flex gap-1 rounded-md border border-edge bg-panelraised p-1 shadow-lg"
-          onPointerDown={(e) => e.stopPropagation()}
-        >
-          {members.map((m) => (
-            <button
-              key={m.id}
-              onClick={() => {
-                selectTool(m.id);
-                setOpen(false);
-              }}
-              title={m.label}
-              className={`flex h-8 w-8 items-center justify-center rounded transition-colors ${
-                m.id === active
-                  ? "bg-accent/20 text-ink ring-1 ring-accent/60"
-                  : "text-muted hover:bg-panel hover:text-ink"
-              }`}
-            >
-              <m.Icon size={17} strokeWidth={1.75} />
-            </button>
-          ))}
-        </div>
-      )}
+      <Flyout anchorRef={btnRef} open={open}>
+        {members.map((m) => (
+          <button
+            key={m.id}
+            onClick={() => {
+              selectTool(m.id);
+              setOpen(false);
+            }}
+            title={m.label}
+            className={`flex h-8 w-8 items-center justify-center rounded transition-colors ${
+              m.id === active
+                ? "bg-accent/20 text-ink ring-1 ring-accent/60"
+                : "text-muted hover:bg-panel hover:text-ink"
+            }`}
+          >
+            <m.Icon size={17} strokeWidth={1.75} />
+          </button>
+        ))}
+      </Flyout>
     </div>
   );
 }
@@ -251,60 +286,57 @@ function ShapeButton({ selected }: { selected: boolean }) {
   const { shape } = useToolState();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
   useFlyoutDismiss(open, setOpen, rootRef);
   const ShapeIcon = SHAPE_ICON[shape.kind];
 
   return (
     <div ref={rootRef} className="relative">
       <button
+        ref={btnRef}
         onClick={() => {
           toolStore.setActive("shape");
           setOpen((o) => !o);
         }}
-        className={`relative flex h-9 w-9 items-center justify-center rounded-md transition-colors ${
+        className={`relative flex h-8 w-8 items-center justify-center rounded-md transition-colors ${
           selected
             ? "bg-accent/20 text-ink ring-1 ring-accent/60"
             : "text-muted hover:bg-panelraised hover:text-ink"
         }`}
         title={`Shape — ${SHAPE_LABEL[shape.kind]} (U) · click for more`}
       >
-        <ShapeIcon size={18} strokeWidth={1.75} />
+        <ShapeIcon size={17} strokeWidth={1.75} />
         {/* Flyout affordance: a little corner tick like Photoshop's tool groups. */}
         <ChevronRight
           size={9}
           strokeWidth={3}
-          className="absolute bottom-[3px] right-[2px] text-muted/70"
+          className="absolute bottom-[2px] right-[1px] text-muted/70"
         />
       </button>
 
-      {open && (
-        <div
-          className="absolute left-full top-0 z-50 ml-1 flex gap-1 rounded-md border border-edge bg-panelraised p-1 shadow-lg"
-          onPointerDown={(e) => e.stopPropagation()}
-        >
-          {SHAPE_ORDER.map((k) => {
-            const KIcon = SHAPE_ICON[k];
-            return (
-              <button
-                key={k}
-                onClick={() => {
-                  actions.setShapeKind(k);
-                  toolStore.setActive("shape");
-                  setOpen(false);
-                }}
-                title={SHAPE_LABEL[k]}
-                className={`flex h-8 w-8 items-center justify-center rounded transition-colors ${
-                  shape.kind === k
-                    ? "bg-accent/20 text-ink ring-1 ring-accent/60"
-                    : "text-muted hover:bg-panel hover:text-ink"
-                }`}
-              >
-                <KIcon size={17} strokeWidth={1.75} />
-              </button>
-            );
-          })}
-        </div>
-      )}
+      <Flyout anchorRef={btnRef} open={open}>
+        {SHAPE_ORDER.map((k) => {
+          const KIcon = SHAPE_ICON[k];
+          return (
+            <button
+              key={k}
+              onClick={() => {
+                actions.setShapeKind(k);
+                toolStore.setActive("shape");
+                setOpen(false);
+              }}
+              title={SHAPE_LABEL[k]}
+              className={`flex h-8 w-8 items-center justify-center rounded transition-colors ${
+                shape.kind === k
+                  ? "bg-accent/20 text-ink ring-1 ring-accent/60"
+                  : "text-muted hover:bg-panel hover:text-ink"
+              }`}
+            >
+              <KIcon size={17} strokeWidth={1.75} />
+            </button>
+          );
+        })}
+      </Flyout>
     </div>
   );
 }
@@ -324,16 +356,22 @@ const FOCUS_GROUP: { id: ToolId; Icon: LucideIcon; label: string }[] = [
 export function ToolRail() {
   const { active } = useToolState();
   return (
-    <div className="flex w-12 flex-col items-center border-r border-edge bg-panel py-2">
-      <div className="flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto">{/* scrolls if the rail is taller than the viewport */}
+    <div className="flex flex-col items-center border-r border-edge bg-panel px-1.5 py-2">
+      {/* Two columns so every tool fits without scrolling on a laptop. Group
+          dividers span both columns, which also forces each group to start on a
+          fresh row. */}
+      <div className="grid grid-cols-2 gap-1">
         {TOOLS.map((t, i) => {
           const prev = TOOLS[i - 1];
           const dividerBefore = prev !== undefined && prev.group !== t.group;
           const selected = t.id === active;
+          const divider = dividerBefore ? (
+            <div className="col-span-2 my-0.5 h-px w-full bg-edge" />
+          ) : null;
           if (t.id === "shape") {
             return (
               <Fragment key={t.id}>
-                {dividerBefore && <div className="my-1 h-px w-6 bg-edge" />}
+                {divider}
                 <ShapeButton selected={selected} />
               </Fragment>
             );
@@ -342,7 +380,7 @@ export function ToolRail() {
           if (t.id === "dodge") {
             return (
               <Fragment key={t.id}>
-                {dividerBefore && <div className="my-1 h-px w-6 bg-edge" />}
+                {divider}
                 <GroupButton
                   members={TONING_GROUP}
                   active={active}
@@ -356,7 +394,7 @@ export function ToolRail() {
           if (t.id === "blur-brush") {
             return (
               <Fragment key={t.id}>
-                {dividerBefore && <div className="my-1 h-px w-6 bg-edge" />}
+                {divider}
                 <GroupButton
                   members={FOCUS_GROUP}
                   active={active}
@@ -367,17 +405,17 @@ export function ToolRail() {
           }
           return (
             <Fragment key={t.id}>
-              {dividerBefore && <div className="my-1 h-px w-6 bg-edge" />}
+              {divider}
               <button
                 onClick={() => selectTool(t.id)}
-                className={`flex h-9 w-9 items-center justify-center rounded-md transition duration-100 active:scale-90 ${
+                className={`flex h-8 w-8 items-center justify-center rounded-md transition duration-100 active:scale-90 ${
                   selected
                     ? "bg-accent/20 text-ink ring-1 ring-accent/60"
                     : "text-muted hover:bg-panelraised hover:text-ink"
                 }`}
                 title={t.key ? `${t.label} (${t.key})` : t.label}
               >
-                <t.Icon size={18} strokeWidth={1.75} />
+                <t.Icon size={17} strokeWidth={1.75} />
               </button>
             </Fragment>
           );

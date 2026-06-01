@@ -137,6 +137,21 @@ export function LayersPanel() {
       {/* Layer actions */}
       <div className="flex flex-wrap items-center gap-1.5 border-t border-edge p-2">
         <button
+          className="btn btn-accent"
+          onClick={() => actions.addBlankRasterLayer("Layer")}
+          title="Add a new blank layer"
+        >
+          + Layer
+        </button>
+        <button
+          className="btn"
+          disabled={!snap.activeLayerId}
+          onClick={() => actions.duplicateActiveLayer()}
+          title="Duplicate the active layer"
+        >
+          Duplicate
+        </button>
+        <button
           className="btn"
           disabled={!snap.activeLayerId}
           onClick={() => snap.activeLayerId && actions.reorder(snap.activeLayerId, 1)}
