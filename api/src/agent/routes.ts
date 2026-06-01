@@ -11,10 +11,15 @@
  * actions and (per-step) AI jobs. The provider key stays server-side.
  */
 import type { FastifyPluginAsync } from "fastify";
+import { nanoid } from "nanoid";
 import type { AgentResponse } from "@aips/shared-types";
 import { AgentRequestSchema, RawPlanSchema, coercePlan } from "./schema.js";
 import { buildPlannerMessages } from "./prompt.js";
 import { chatCompletion, OpenRouterTextError } from "./openrouter-text.js";
+import { config } from "../config.js";
+import { getUserId, requireAuth } from "../auth.js";
+import { InsufficientCredits, refundAll, reserve, settle } from "../credits/ledger.js";
+import { routeRateLimit } from "../ratelimit.js";
 
 /**
  * Extract a JSON object from a model response. Handles the common cases where
@@ -52,7 +57,13 @@ function parseModelJson(text: string): unknown {
 }
 
 export const agentRoutes: FastifyPluginAsync = async (app) => {
-  app.post("/ai/agent", async (request, reply) => {
+  app.post(
+    "/ai/agent",
+    {
+      preHandler: requireAuth,
+      config: { rateLimit: routeRateLimit(config.rateLimit.syncPerMin) },
+    },
+    async (request, reply) => {
     const parsed = AgentRequestSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply
@@ -60,13 +71,40 @@ export const agentRoutes: FastifyPluginAsync = async (app) => {
         .send({ error: "invalid_request", issues: parsed.error.issues });
     }
     const { goal, context } = parsed.data;
+    const userId = getUserId(request);
+
+    // Flat reserve → settle/refund for this synchronous (no job id) call. A
+    // synthetic `sync:<id>` job id keys the ledger's exactly-once guards.
+    const syncJobId = `sync:${nanoid()}`;
+    const cost = config.credits.syncAgentCost;
+    try {
+      await reserve(userId, syncJobId, cost);
+    } catch (err) {
+      if (err instanceof InsufficientCredits) {
+        return reply.code(402).send({
+          error: "insufficient_credits",
+          message: "Not enough credits for the agent planner",
+          required: err.required,
+          balance: err.balance,
+        });
+      }
+      throw err;
+    }
 
     const messages = buildPlannerMessages(goal, context);
 
+    const startedAt = Date.now();
     let raw: string;
     try {
       raw = await chatCompletion(messages);
     } catch (err) {
+      // Provider failed → refund the reservation (user wasn't served).
+      await refundAll({
+        jobId: syncJobId,
+        userId,
+        capability: "agent",
+        reason: "agent provider error",
+      });
       if (err instanceof OpenRouterTextError) {
         request.log.warn(
           { code: err.code, msg: err.message },
@@ -81,6 +119,15 @@ export const agentRoutes: FastifyPluginAsync = async (app) => {
         .code(502)
         .send({ error: "planner_failed", message: "Agent planner failed" });
     }
+    // Provider succeeded → settle the flat cost (refund 0; records ai_usage).
+    await settle({
+      jobId: syncJobId,
+      userId,
+      capability: "agent",
+      model: config.openrouter.textModel,
+      rawCostUsd: null,
+      latencyMs: Date.now() - startedAt,
+    });
 
     // Parse the model's JSON, then validate + sanitize against AGENT_OPS.
     let candidate: unknown;
@@ -113,5 +160,6 @@ export const agentRoutes: FastifyPluginAsync = async (app) => {
 
     const response: AgentResponse = { plan };
     return reply.send(response);
-  });
+    },
+  );
 };

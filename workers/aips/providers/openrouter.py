@@ -81,7 +81,12 @@ class OpenRouterImageProvider:
         if width and height:
             text += f"\n\nTarget dimensions: {width}x{height} pixels."
         content: list[dict] = [{"type": "text", "text": text}]
-        return self._generate(content, seed=seed)
+        return self._generate(
+            content,
+            seed=seed,
+            cap="text_to_image",
+            cache_sig=[text, width, height, seed],
+        )
 
     def image_edit(self, image_bytes: bytes, instruction: str, *, seed: int | None = None) -> ImageResult:
         """Edit an image with a natural-language instruction (Gemini-style edit)."""
@@ -90,7 +95,12 @@ class OpenRouterImageProvider:
             {"type": "text", "text": instruction},
             {"type": "image_url", "image_url": {"url": data_url}},
         ]
-        return self._generate(content, seed=seed)
+        return self._generate(
+            content,
+            seed=seed,
+            cap="image_edit",
+            cache_sig=[image_bytes, instruction, seed],
+        )
 
     def image_edit_with_mask(
         self,
@@ -115,7 +125,12 @@ class OpenRouterImageProvider:
             {"type": "image_url", "image_url": {"url": img_url}},
             {"type": "image_url", "image_url": {"url": mask_url}},
         ]
-        return self._generate(content, seed=seed)
+        return self._generate(
+            content,
+            seed=seed,
+            cap="image_edit_with_mask",
+            cache_sig=[image_bytes, mask_bytes, instruction, seed],
+        )
 
     def image_edit_multi(
         self,
@@ -139,11 +154,77 @@ class OpenRouterImageProvider:
         for img in images:
             data_url = "data:image/png;base64," + base64.b64encode(img).decode("ascii")
             content.append({"type": "image_url", "image_url": {"url": data_url}})
-        return self._generate(content, seed=seed)
+        return self._generate(
+            content,
+            seed=seed,
+            cap="image_edit_multi",
+            cache_sig=[*images, instruction, seed],
+        )
 
     # ── internals ─────────────────────────────────────────────
 
-    def _generate(self, content: list[dict], *, seed: int | None) -> ImageResult:
+    def _generate(
+        self,
+        content: list[dict],
+        *,
+        seed: int | None,
+        cap: str = "generate",
+        cache_sig: list | None = None,
+    ) -> ImageResult:
+        """Run a generation with retry/circuit-breaking and a raw-output cache.
+
+        The single network round-trip lives in ``_http_attempt`` and is wrapped by
+        ``resilience.request_with_retry`` (transient 429/5xx/network/timeout get
+        exponential-backoff retries honouring Retry-After; content-policy / bad
+        request fail fast). The whole paid call is additionally memoised on the
+        call signature so a *post-processing* retry of the surrounding Celery task
+        re-reads the already-paid PNG instead of re-billing OpenRouter — a cache
+        hit reports ``cost_usd=None`` (billed 0) while still surfacing the model.
+        """
+        # Imported here (not at module top) to avoid a circular import:
+        # resilience imports ProviderError from this module.
+        from . import resilience
+
+        def _do_call() -> resilience.CachedOutput:
+            result = resilience.request_with_retry(
+                lambda: self._http_attempt(content, seed=seed),
+                provider="openrouter",
+            )
+            return resilience.CachedOutput(
+                data=result.png_bytes,
+                cost_usd=result.cost_usd,
+                model=result.model,
+                cached=False,
+            )
+
+        # Cache only meaningful when we have a signature (we always pass one).
+        if cache_sig is not None:
+            key = resilience.make_cache_key(capability=cap, model=self.model, parts=cache_sig)
+            cached = resilience.get_or_call(key, _do_call)
+        else:
+            cached = _do_call()
+
+        img = Image.open(BytesIO(cached.data)).convert("RGBA")
+        out = BytesIO()
+        img.save(out, format="PNG")
+        return ImageResult(
+            png_bytes=out.getvalue(),
+            width=img.width,
+            height=img.height,
+            # On a cache HIT bill nothing (already paid); else the real cost.
+            cost_usd=None if cached.cached else cached.cost_usd,
+            model=cached.model or self.model,
+        )
+
+    def _http_attempt(self, content: list[dict], *, seed: int | None) -> ImageResult:
+        """One OpenRouter round-trip. Raises a classified ProviderError on failure.
+
+        429 / 503 carry their ``Retry-After`` to the retry loop via
+        ``resilience.attach_retry_after``. The status→code mapping is UNCHANGED so
+        tasks that switch on ``ProviderError.code`` keep working.
+        """
+        from . import resilience
+
         body: dict = {
             "model": self.model,
             "messages": [{"role": "user", "content": content}],
@@ -168,13 +249,21 @@ class OpenRouterImageProvider:
                     headers=headers,
                     json=body,
                 )
+        except httpx.TimeoutException as exc:
+            raise ProviderError("provider_timeout", f"OpenRouter timed out: {exc}") from exc
         except httpx.HTTPError as exc:
             raise ProviderError("provider_network_error", f"OpenRouter request failed: {exc}") from exc
 
         if resp.status_code == 429:
-            raise ProviderError("provider_rate_limited", "OpenRouter rate limited (429)")
+            raise resilience.attach_retry_after(
+                ProviderError("provider_rate_limited", "OpenRouter rate limited (429)"),
+                resp.headers.get("Retry-After"),
+            )
         if resp.status_code >= 500:
-            raise ProviderError("provider_unavailable", f"OpenRouter {resp.status_code}: {resp.text[:300]}")
+            raise resilience.attach_retry_after(
+                ProviderError("provider_unavailable", f"OpenRouter {resp.status_code}: {resp.text[:300]}"),
+                resp.headers.get("Retry-After"),
+            )
         if resp.status_code in (400, 422):
             raise ProviderError("provider_bad_request", f"OpenRouter {resp.status_code}: {resp.text[:300]}")
         if resp.status_code == 403:

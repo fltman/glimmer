@@ -14,10 +14,8 @@ import type {
   PresignUploadResponse,
   AssetRef,
 } from "@aips/shared-types";
-
-const API_URL: string =
-  (import.meta.env.VITE_API_URL as string | undefined) ??
-  "http://localhost:8080";
+import { API_URL, authHeaders, wsUrlWithToken } from "./auth";
+import { errorFromResponse } from "./apiError";
 
 /** sha256 hex of bytes using SubtleCrypto. */
 export async function sha256Hex(data: ArrayBuffer): Promise<string> {
@@ -34,17 +32,28 @@ export async function idempotencyKey(parts: unknown): Promise<string> {
   return sha256Hex(buf.buffer as ArrayBuffer);
 }
 
+/** Coerce any HeadersInit (record / array / Headers) into a plain record. */
+function normalizeHeaders(h: HeadersInit | undefined): Record<string, string> {
+  if (!h) return {};
+  if (h instanceof Headers) return Object.fromEntries(h.entries());
+  if (Array.isArray(h)) return Object.fromEntries(h);
+  return h;
+}
+
 async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  // authHeaders() attaches `Authorization: Bearer <token>` when we hold one.
+  // The token is server-minted (transparently via dev-login on boot); no
+  // secret ever lives in the bundle.
   const res = await fetch(`${API_URL}${path}`, {
     ...init,
-    headers: {
+    headers: authHeaders({
       "Content-Type": "application/json",
-      ...(init?.headers ?? {}),
-    },
+      ...normalizeHeaders(init?.headers),
+    }),
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`API ${path} failed: ${res.status} ${text}`);
+    // Throws a structured ApiError and emits the global 402/429/401 notice.
+    throw await errorFromResponse(res, path);
   }
   return (await res.json()) as T;
 }
@@ -106,9 +115,10 @@ export function connectJobSocket(
   onUpdate: (job: Job) => void,
   onError?: (code: string, message: string) => void,
 ): () => void {
-  // http(s) -> ws(s)
-  const wsBase = API_URL.replace(/^http/i, "ws");
-  const ws = new WebSocket(`${wsBase}/ws`);
+  // http(s) -> ws(s), with the auth token on the query string (browser WS can't
+  // set headers). In dev the API accepts a missing token as dev-user; a present
+  // token is verified on the upgrade.
+  const ws = new WebSocket(wsUrlWithToken("/ws"));
   let closed = false;
 
   const send = (msg: ClientWsMessage) => {

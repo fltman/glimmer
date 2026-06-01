@@ -10,7 +10,7 @@
  */
 import type { FastifyPluginAsync } from "fastify";
 import type { PresignUploadResponse } from "@aips/shared-types";
-import { getUserId } from "../auth.js";
+import { getUserId, requireAuth } from "../auth.js";
 import { PresignUploadRequestSchema } from "../jobs/schema.js";
 import { buildKey, objectExists, presignPut } from "../storage.js";
 
@@ -27,7 +27,10 @@ function extFor(contentType: string): string {
 }
 
 export const presignRoutes: FastifyPluginAsync = async (app) => {
-  app.post("/storage/presign-upload", async (request, reply) => {
+  app.post(
+    "/storage/presign-upload",
+    { preHandler: requireAuth },
+    async (request, reply) => {
     const parsed = PresignUploadRequestSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply
@@ -58,5 +61,6 @@ export const presignRoutes: FastifyPluginAsync = async (app) => {
       requiredHeaders: { "Content-Type": contentType },
     };
     return reply.send(response);
-  });
+    },
+  );
 };

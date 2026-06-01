@@ -715,3 +715,182 @@ export interface AnalyzeDistractionsResponse {
    */
   message?: string;
 }
+
+// ──────────────────────────────────────────────────────────────
+// Auth (JWT) — Bearer header AND ?token= query param
+//
+// Tokens are minted SERVER-SIDE only (the JWT secret never reaches the
+// browser). The web client stores the opaque token and attaches it as
+// `Authorization: Bearer <token>` on every request, and as `?token=<token>`
+// on the WebSocket upgrade URL (the browser WS API cannot set headers).
+// In dev mode the web client can mint a frictionless token via POST
+// /auth/dev-login with no credentials.
+// ──────────────────────────────────────────────────────────────
+
+/** Request body for POST /auth/dev-login (dev/self-host only). */
+export interface DevLoginRequest {
+  /** User id to mint a token for. Defaults to "dev-user" server-side. */
+  userId?: string;
+}
+
+/** Response body for POST /auth/dev-login. */
+export interface DevLoginResponse {
+  /** Signed JWT — attach as `Authorization: Bearer <token>` and `?token=`. */
+  token: string;
+  userId: string;
+  /** Unix seconds when the token expires. */
+  expiresAt: number;
+  /** Current credit balance (granted on first login in dev mode). */
+  balanceCredits: number;
+}
+
+/** Response body for GET /auth/me (requires auth). Identity + live balance. */
+export interface MeResponse {
+  userId: string;
+  isAdmin: boolean;
+  balanceCredits: number;
+}
+
+// ──────────────────────────────────────────────────────────────
+// Credits / billing
+//
+// Credits are integers. CREDITS_PER_USD (default 100 → 1 credit = $0.01) is the
+// server-side conversion rate; the web never needs it (it reads credit counts
+// directly). A job RESERVES an estimate before enqueuing, then SETTLES against
+// the real provider cost when the job reaches a terminal state (refunding the
+// difference). Insufficient balance → HTTP 402 `insufficient_credits`.
+// ──────────────────────────────────────────────────────────────
+
+/** Response body for GET /account (requires auth). Balance + recent usage. */
+export interface AccountResponse {
+  userId: string;
+  isAdmin: boolean;
+  balanceCredits: number;
+  usage: CreditUsageEntry[];
+}
+
+/** Response body for GET /account/balance (requires auth). */
+export interface BalanceResponse {
+  userId: string;
+  balanceCredits: number;
+}
+
+/** A single billed usage row (one settled job or sync call). */
+export interface CreditUsageEntry {
+  /** Job id, or `sync:<id>` for the synchronous agent/distractions endpoints. */
+  jobId: string | null;
+  capability: string;
+  model: string | null;
+  /** Raw provider cost in USD, when known (null for local/no-provider passes). */
+  rawCostUsd: number | null;
+  /** Credits actually billed for this entry. */
+  billedCredits: number;
+  /** End-to-end latency in milliseconds, when measured. */
+  latencyMs: number | null;
+  /** ISO 8601 timestamp. */
+  createdAt: string;
+}
+
+/** Response body for GET /account/usage (requires auth). */
+export interface UsageResponse {
+  usage: CreditUsageEntry[];
+}
+
+/** 402 body returned when a reservation exceeds the balance. */
+export interface InsufficientCreditsResponse {
+  error: "insufficient_credits";
+  message: string;
+  /** Credits the operation required (the reservation). */
+  required: number;
+  /** The user's current balance. */
+  balance: number;
+}
+
+/** Request body for POST /admin/credits/grant (dev/admin top-up). */
+export interface GrantCreditsRequest {
+  userId: string;
+  credits: number;
+  reason?: string;
+}
+
+/** Response body for POST /admin/credits/grant. */
+export interface GrantCreditsResponse {
+  userId: string;
+  balanceCredits: number;
+}
+
+// ──────────────────────────────────────────────────────────────
+// Stripe checkout (SCAFFOLDING ONLY)
+//
+// POST /billing/checkout-session is INERT unless STRIPE_SECRET_KEY is set on
+// the server. No real card/Stripe credentials are wired here — when unset it
+// returns 501 `stripe_not_configured`. The credit-pack list is static.
+// ──────────────────────────────────────────────────────────────
+
+/** Request body for POST /billing/checkout-session. */
+export interface CheckoutSessionRequest {
+  /** Id of a CreditPack (see GET /billing/packs). */
+  packId: string;
+  /** Where Stripe redirects on success/cancel (web origin URLs). */
+  successUrl?: string;
+  cancelUrl?: string;
+}
+
+/** Response body for POST /billing/checkout-session (when Stripe is configured). */
+export interface CheckoutSessionResponse {
+  /** Stripe-hosted checkout URL to redirect the browser to. */
+  url: string;
+  sessionId: string;
+}
+
+/** A purchasable bundle of credits. */
+export interface CreditPack {
+  id: string;
+  credits: number;
+  priceUsd: number;
+  label: string;
+}
+
+/** Response body for GET /billing/packs. */
+export interface BillingPacksResponse {
+  packs: CreditPack[];
+  /** True when STRIPE_SECRET_KEY is configured (checkout will work). */
+  stripeEnabled: boolean;
+}
+
+// ──────────────────────────────────────────────────────────────
+// API error envelope
+//
+// Every non-2xx JSON body follows `{ error: <code>, ... }`. These are the
+// stable error codes the web client may switch on. (Provider-failure codes
+// like `provider_rate_limited` are surfaced verbatim from the worker/agent.)
+// ──────────────────────────────────────────────────────────────
+
+/** Stable top-level error codes returned by the API. */
+export const API_ERROR_CODES = [
+  "invalid_request",
+  "unauthorized",
+  "forbidden",
+  "not_found",
+  "conflict",
+  "insufficient_credits",
+  "rate_limited",
+  "stripe_not_configured",
+  "internal_error",
+] as const;
+
+export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
+
+/** Generic error body. Specific endpoints may add fields (e.g. 402 adds balance/required). */
+export interface ApiError {
+  error: string;
+  message?: string;
+}
+
+/** 429 body returned by the rate limiter. */
+export interface RateLimitedResponse {
+  error: "rate_limited";
+  message: string;
+  /** Seconds the client should wait before retrying (mirrors Retry-After). */
+  retryAfterSeconds: number;
+}

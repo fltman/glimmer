@@ -21,6 +21,7 @@ import re
 import httpx
 
 from ..config import settings
+from . import resilience
 from .openrouter import ProviderError
 
 _TIMEOUT = httpx.Timeout(connect=15.0, read=240.0, write=60.0, pool=15.0)
@@ -85,21 +86,34 @@ def _first_image_field(data: dict) -> str | None:
     return None
 
 
-def _post_sync(model: str, payload: dict) -> dict:
+def _post_sync_attempt(model: str, payload: dict) -> dict:
+    """One fal sync round-trip. Raises a classified ProviderError on failure.
+
+    Retryable statuses (429/5xx) carry their Retry-After to the retry loop; the
+    status→code mapping is unchanged so callers keep their existing handling.
+    """
     headers = _auth_headers()
     url = f"{_SYNC_BASE}/{model}"
     try:
         with httpx.Client(timeout=_TIMEOUT) as client:
             resp = client.post(url, headers=headers, json=payload)
+    except httpx.TimeoutException as exc:
+        raise ProviderError("provider_timeout", f"fal timed out: {exc}") from exc
     except httpx.HTTPError as exc:
         raise ProviderError("provider_network_error", f"fal request failed: {exc}") from exc
 
     if resp.status_code == 401:
         raise ProviderError("provider_auth_error", "fal rejected the API key (401)")
     if resp.status_code == 429:
-        raise ProviderError("provider_rate_limited", "fal rate limited (429)")
+        raise resilience.attach_retry_after(
+            ProviderError("provider_rate_limited", "fal rate limited (429)"),
+            resp.headers.get("Retry-After"),
+        )
     if resp.status_code >= 500:
-        raise ProviderError("provider_unavailable", f"fal {resp.status_code}: {resp.text[:300]}")
+        raise resilience.attach_retry_after(
+            ProviderError("provider_unavailable", f"fal {resp.status_code}: {resp.text[:300]}"),
+            resp.headers.get("Retry-After"),
+        )
     if resp.status_code != 200:
         raise ProviderError("provider_error", f"fal {resp.status_code}: {resp.text[:300]}")
     try:
@@ -108,16 +122,36 @@ def _post_sync(model: str, payload: dict) -> dict:
         raise ProviderError("provider_bad_response", "fal returned non-JSON") from exc
 
 
+def _post_sync(model: str, payload: dict) -> dict:
+    """Retry/circuit-wrapped fal POST (circuit key "fal")."""
+    return resilience.request_with_retry(
+        lambda: _post_sync_attempt(model, payload),
+        provider="fal",
+    )
+
+
 def upscale(image_bytes: bytes, scale: int, *, model: str | None = None) -> bytes:
-    """Upscale via fal (Clarity/ESRGAN family). Returns PNG/JPEG bytes."""
+    """Upscale via fal (Clarity/ESRGAN family). Returns PNG/JPEG bytes.
+
+    The raw provider output is cached on the call signature so a redelivered /
+    retried task re-reads the already-fetched bytes instead of re-calling fal.
+    """
     model = model or DEFAULT_UPSCALE_MODEL
-    payload = {"image_url": _data_uri(image_bytes), "scale": int(scale)}
-    data = _post_sync(model, payload)
-    field = _first_image_field(data)
-    if not field:
-        raise ProviderError("no_image_in_response", "fal upscale returned no image")
-    with httpx.Client(timeout=_TIMEOUT) as client:
-        return _resolve_image(field, client)
+    key = resilience.make_cache_key(
+        capability="fal_upscale", model=model, parts=[image_bytes, scale]
+    )
+
+    def _produce() -> resilience.CachedOutput:
+        payload = {"image_url": _data_uri(image_bytes), "scale": int(scale)}
+        data = _post_sync(model, payload)
+        field = _first_image_field(data)
+        if not field:
+            raise ProviderError("no_image_in_response", "fal upscale returned no image")
+        with httpx.Client(timeout=_TIMEOUT) as client:
+            out = _resolve_image(field, client)
+        return resilience.CachedOutput(data=out, cost_usd=None, model="fal.ai", cached=False)
+
+    return resilience.get_or_call(key, _produce).data
 
 
 def segment(
@@ -141,9 +175,20 @@ def segment(
         payload["box"] = [box.get("x"), box.get("y"),
                           box.get("x", 0) + box.get("width", 0),
                           box.get("y", 0) + box.get("height", 0)]
-    data = _post_sync(model, payload)
-    field = _first_image_field(data)
-    if not field:
-        raise ProviderError("no_image_in_response", "fal segment returned no mask")
-    with httpx.Client(timeout=_TIMEOUT) as client:
-        return _resolve_image(field, client)
+
+    key = resilience.make_cache_key(
+        capability="fal_segment",
+        model=model,
+        parts=[image_bytes, repr(points), repr(box)],
+    )
+
+    def _produce() -> resilience.CachedOutput:
+        data = _post_sync(model, payload)
+        field = _first_image_field(data)
+        if not field:
+            raise ProviderError("no_image_in_response", "fal segment returned no mask")
+        with httpx.Client(timeout=_TIMEOUT) as client:
+            out = _resolve_image(field, client)
+        return resilience.CachedOutput(data=out, cost_usd=None, model="fal.ai", cached=False)
+
+    return resilience.get_or_call(key, _produce).data

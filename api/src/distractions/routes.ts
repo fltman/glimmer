@@ -12,9 +12,14 @@
  * and adjusts the selection before anything is removed.
  */
 import type { FastifyPluginAsync } from "fastify";
+import { nanoid } from "nanoid";
 import type { AnalyzeDistractionsResponse } from "@aips/shared-types";
 import { getObjectBytes } from "../storage.js";
 import { chatCompletion, OpenRouterTextError } from "../agent/openrouter-text.js";
+import { config } from "../config.js";
+import { getUserId, requireAuth } from "../auth.js";
+import { InsufficientCredits, refundAll, reserve, settle } from "../credits/ledger.js";
+import { routeRateLimit } from "../ratelimit.js";
 import { buildDistractionMessages } from "./prompt.js";
 import {
   AnalyzeDistractionsRequestSchema,
@@ -54,7 +59,13 @@ function parseModelJson(text: string): unknown {
 }
 
 export const distractionRoutes: FastifyPluginAsync = async (app) => {
-  app.post("/ai/analyze-distractions", async (request, reply) => {
+  app.post(
+    "/ai/analyze-distractions",
+    {
+      preHandler: requireAuth,
+      config: { rateLimit: routeRateLimit(config.rateLimit.syncPerMin) },
+    },
+    async (request, reply) => {
     const parsed = AnalyzeDistractionsRequestSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply
@@ -62,12 +73,36 @@ export const distractionRoutes: FastifyPluginAsync = async (app) => {
         .send({ error: "invalid_request", issues: parsed.error.issues });
     }
     const { image } = parsed.data;
+    const userId = getUserId(request);
+
+    // Flat reserve → settle/refund (synchronous vision call; synthetic job id).
+    const syncJobId = `sync:${nanoid()}`;
+    const cost = config.credits.syncDistractionsCost;
+    try {
+      await reserve(userId, syncJobId, cost);
+    } catch (err) {
+      if (err instanceof InsufficientCredits) {
+        return reply.code(402).send({
+          error: "insufficient_credits",
+          message: "Not enough credits for distraction analysis",
+          required: err.required,
+          balance: err.balance,
+        });
+      }
+      throw err;
+    }
+    // Helper: refund the reservation on any pre-/non-provider failure path.
+    const refund = (reason: string): Promise<void> =>
+      refundAll({ jobId: syncJobId, userId, capability: "distractions", reason });
+
+    const startedAt = Date.now();
 
     // 1) read the image bytes server-side (internal S3 endpoint).
     let bytes: Buffer;
     try {
       bytes = await getObjectBytes(image.key);
     } catch (err) {
+      await refund("storage read error");
       request.log.warn(
         { err, key: image.key },
         "analyze-distractions: could not read image object",
@@ -78,6 +113,7 @@ export const distractionRoutes: FastifyPluginAsync = async (app) => {
       });
     }
     if (bytes.byteLength > MAX_IMAGE_BYTES) {
+      await refund("image too large");
       return reply.code(413).send({
         error: "image_too_large",
         message: `Image exceeds the ${MAX_IMAGE_BYTES} byte analysis limit`,
@@ -97,6 +133,8 @@ export const distractionRoutes: FastifyPluginAsync = async (app) => {
     try {
       raw = await chatCompletion(messages);
     } catch (err) {
+      // Provider failed → refund (user wasn't served).
+      await refund("distractions provider error");
       if (err instanceof OpenRouterTextError) {
         request.log.warn(
           { code: err.code, msg: err.message },
@@ -112,6 +150,15 @@ export const distractionRoutes: FastifyPluginAsync = async (app) => {
         message: "Distraction analyzer failed",
       });
     }
+    // Provider succeeded → settle the flat cost (records ai_usage).
+    await settle({
+      jobId: syncJobId,
+      userId,
+      capability: "distractions",
+      model: config.openrouter.textModel,
+      rawCostUsd: null,
+      latencyMs: Date.now() - startedAt,
+    });
 
     // 4) parse + validate + sanitize the model's JSON.
     let candidate: unknown;
@@ -162,5 +209,6 @@ export const distractionRoutes: FastifyPluginAsync = async (app) => {
           : {}),
     };
     return reply.send(response);
-  });
+    },
+  );
 };

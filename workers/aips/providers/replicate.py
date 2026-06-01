@@ -19,6 +19,7 @@ import time
 import httpx
 
 from ..config import settings
+from . import resilience
 from .openrouter import ProviderError
 
 _TIMEOUT = httpx.Timeout(connect=15.0, read=60.0, write=60.0, pool=15.0)
@@ -48,22 +49,53 @@ def _data_uri(image_bytes: bytes, mime: str = "image/png") -> str:
     return f"data:{mime};base64," + base64.b64encode(image_bytes).decode("ascii")
 
 
-def _run_prediction(version: str, input_payload: dict) -> dict:
-    """Create a prediction and poll to completion; return the final object."""
+def _create_prediction(version: str, input_payload: dict) -> dict:
+    """POST a new prediction (the call worth retrying) and return its initial obj.
+
+    Retryable statuses (429/5xx) carry their Retry-After to the retry loop; the
+    status→code mapping is unchanged.
+    """
     headers = _auth_headers()
     try:
         with httpx.Client(timeout=_TIMEOUT) as client:
             resp = client.post(_API, headers=headers, json={"version": version, "input": input_payload})
-            if resp.status_code == 401:
-                raise ProviderError("provider_auth_error", "Replicate rejected the token (401)")
-            if resp.status_code == 429:
-                raise ProviderError("provider_rate_limited", "Replicate rate limited (429)")
-            if resp.status_code >= 500:
-                raise ProviderError("provider_unavailable", f"Replicate {resp.status_code}: {resp.text[:300]}")
-            if resp.status_code not in (200, 201):
-                raise ProviderError("provider_error", f"Replicate {resp.status_code}: {resp.text[:300]}")
-            pred = resp.json()
+    except httpx.TimeoutException as exc:
+        raise ProviderError("provider_timeout", f"Replicate timed out: {exc}") from exc
+    except httpx.HTTPError as exc:
+        raise ProviderError("provider_network_error", f"Replicate request failed: {exc}") from exc
 
+    if resp.status_code == 401:
+        raise ProviderError("provider_auth_error", "Replicate rejected the token (401)")
+    if resp.status_code == 429:
+        raise resilience.attach_retry_after(
+            ProviderError("provider_rate_limited", "Replicate rate limited (429)"),
+            resp.headers.get("Retry-After"),
+        )
+    if resp.status_code >= 500:
+        raise resilience.attach_retry_after(
+            ProviderError("provider_unavailable", f"Replicate {resp.status_code}: {resp.text[:300]}"),
+            resp.headers.get("Retry-After"),
+        )
+    if resp.status_code not in (200, 201):
+        raise ProviderError("provider_error", f"Replicate {resp.status_code}: {resp.text[:300]}")
+    return resp.json()
+
+
+def _run_prediction(version: str, input_payload: dict) -> dict:
+    """Create a prediction (retry/circuit-wrapped) and poll to completion.
+
+    Only the CREATE POST is retried — once a prediction exists, re-POSTing would
+    create (and pay for) a duplicate, so the poll loop keeps its single hard
+    wall-clock timeout instead of being retried.
+    """
+    pred = resilience.request_with_retry(
+        lambda: _create_prediction(version, input_payload),
+        provider="replicate",
+    )
+
+    headers = _auth_headers()
+    try:
+        with httpx.Client(timeout=_TIMEOUT) as client:
             get_url = (pred.get("urls") or {}).get("get")
             deadline = time.monotonic() + _POLL_TIMEOUT_S
             while pred.get("status") in ("starting", "processing") and get_url:
@@ -113,10 +145,23 @@ def _download_output(pred: dict) -> bytes:
 
 
 def upscale(image_bytes: bytes, scale: int, *, version: str | None = None) -> bytes:
-    """Upscale via Replicate (Real-ESRGAN). Returns image bytes."""
+    """Upscale via Replicate (Real-ESRGAN). Returns image bytes.
+
+    Raw output is cached on the call signature so a redelivered / retried task
+    re-reads the already-paid bytes instead of creating a new prediction.
+    """
     version = version or DEFAULT_UPSCALE_VERSION
-    pred = _run_prediction(version, {"image": _data_uri(image_bytes), "scale": int(scale)})
-    return _download_output(pred)
+    key = resilience.make_cache_key(
+        capability="replicate_upscale", model=version, parts=[image_bytes, scale]
+    )
+
+    def _produce() -> resilience.CachedOutput:
+        pred = _run_prediction(version, {"image": _data_uri(image_bytes), "scale": int(scale)})
+        return resilience.CachedOutput(
+            data=_download_output(pred), cost_usd=None, model="replicate", cached=False
+        )
+
+    return resilience.get_or_call(key, _produce).data
 
 
 def segment(
@@ -137,5 +182,17 @@ def segment(
         payload["box"] = [box.get("x"), box.get("y"),
                           box.get("x", 0) + box.get("width", 0),
                           box.get("y", 0) + box.get("height", 0)]
-    pred = _run_prediction(version, payload)
-    return _download_output(pred)
+
+    key = resilience.make_cache_key(
+        capability="replicate_segment",
+        model=version,
+        parts=[image_bytes, repr(points), repr(box)],
+    )
+
+    def _produce() -> resilience.CachedOutput:
+        pred = _run_prediction(version, payload)
+        return resilience.CachedOutput(
+            data=_download_output(pred), cost_usd=None, model="replicate", cached=False
+        )
+
+    return resilience.get_or_call(key, _produce).data

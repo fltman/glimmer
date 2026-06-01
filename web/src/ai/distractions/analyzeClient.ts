@@ -18,10 +18,8 @@ import type {
   AnalyzeDistractionsResponse,
   DistractionRegion,
 } from "@aips/shared-types";
-
-const API_URL: string =
-  (import.meta.env.VITE_API_URL as string | undefined) ??
-  "http://localhost:8080";
+import { API_URL, authHeaders } from "../auth";
+import { errorFromResponse } from "../apiError";
 
 /**
  * A typed error thrown when the analyzer endpoint fails. `status` is the HTTP
@@ -58,11 +56,17 @@ export async function analyzeDistractions(
   const body: AnalyzeDistractionsRequest = { image };
   const res = await fetch(`${API_URL}/ai/analyze-distractions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
 
   if (!res.ok) {
+    // Side effect only: surface the shared credit/rate-limit/auth banner. The
+    // typed AnalyzeDistractionsError below is still thrown for the section's own
+    // handling.
+    if (res.status === 402 || res.status === 429 || res.status === 401) {
+      void errorFromResponse(res, "/ai/analyze-distractions");
+    }
     // Try to surface the API's stable {error/code, message} body; fall back to
     // the raw text + status when it isn't JSON.
     let code = "analyzer_failed";

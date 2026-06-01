@@ -10,10 +10,8 @@
  * its own tiny fetch wrapper that surfaces the documented error envelopes.
  */
 import type { AgentRequest, AgentResponse } from "@aips/shared-types";
-
-const API_URL: string =
-  (import.meta.env.VITE_API_URL as string | undefined) ??
-  "http://localhost:8080";
+import { API_URL, authHeaders } from "../auth";
+import { errorFromResponse } from "../apiError";
 
 /** A structured failure from the planner endpoint (4xx/5xx envelopes). */
 export class AgentRequestError extends Error {
@@ -39,7 +37,7 @@ export async function requestPlan(req: AgentRequest): Promise<AgentResponse> {
   try {
     res = await fetch(`${API_URL}/ai/agent`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(req),
     });
   } catch (e) {
@@ -51,6 +49,13 @@ export async function requestPlan(req: AgentRequest): Promise<AgentResponse> {
   }
 
   if (!res.ok) {
+    // Side effect only: emit the shared 402/429/401 notice (and clear a stale
+    // session on 401) so the credit/rate-limit banner appears no matter which
+    // tab the user is on. We still throw the AgentRequestError below so the
+    // assistant's own per-code error handling is preserved.
+    if (res.status === 402 || res.status === 429 || res.status === 401) {
+      void errorFromResponse(res, "/ai/agent");
+    }
     // The API returns { error, issues } (400) or { error, message } (502).
     // Parse defensively — a proxy or crash could return non-JSON.
     let body: unknown = null;

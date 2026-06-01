@@ -32,8 +32,50 @@ export interface CreateJobArgs {
 }
 
 /**
- * Create a new queued job and register its idempotency index.
- * The caller is responsible for enqueuing onto the worker list afterward.
+ * Atomically CLAIM the idempotency slot for a (user, key) → id mapping.
+ *
+ * Uses `SET ... NX` so exactly one of N concurrent identical POSTs wins. Returns
+ * `{ won: true }` for the winner, or `{ won: false, existingId }` for everyone
+ * else (the id the winner already claimed). The route MUST claim BEFORE
+ * reserving credits so a duplicate post can never reserve/enqueue a second paid
+ * job — closing the concurrent double-charge race.
+ */
+export async function claimIdempotency(
+  userId: string,
+  idempotencyKey: string,
+  id: string,
+): Promise<{ won: true } | { won: false; existingId: string }> {
+  const key = idemKey(userId, idempotencyKey);
+  const ok = await redis.set(key, id, "EX", IDEM_TTL_SECONDS, "NX");
+  if (ok === "OK") return { won: true };
+  // Lost the race (or a prior identical post already claimed it).
+  const existingId = (await redis.get(key)) ?? id;
+  return { won: false, existingId };
+}
+
+/**
+ * Release an idempotency claim that never produced a job (e.g. the reservation
+ * failed with 402, or job creation threw). Only deletes the slot when it still
+ * points at OUR id, so we never clobber a different request's claim. This lets
+ * the user retry the same action (e.g. after topping up) instead of being stuck
+ * behind a dangling claim until its TTL expires.
+ */
+export async function releaseIdempotency(
+  userId: string,
+  idempotencyKey: string,
+  id: string,
+): Promise<void> {
+  const key = idemKey(userId, idempotencyKey);
+  const current = await redis.get(key);
+  if (current === id) {
+    await redis.del(key);
+  }
+}
+
+/**
+ * Create a new queued job. The idempotency slot must already be CLAIMED via
+ * `claimIdempotency` (the route does this before reserving), so this only
+ * writes the job hash. The caller enqueues onto the worker list afterward.
  */
 export async function createJob(args: CreateJobArgs): Promise<Job> {
   const job: Job = {
@@ -52,6 +94,8 @@ export async function createJob(args: CreateJobArgs): Promise<Job> {
     userId: args.userId,
   });
   multi.expire(jobKey(job.id), JOB_TTL_SECONDS);
+  // Re-assert the idempotency mapping (the claim already created it; this keeps
+  // the TTL aligned with the job and is a no-op for the winner).
   multi.set(
     idemKey(args.userId, args.idempotencyKey),
     job.id,

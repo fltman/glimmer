@@ -22,6 +22,7 @@ import {
 } from "../ai/contentAware";
 import { NavigatorButton } from "./navigator/NavigatorButton";
 import { ViewControls } from "./navigator/ViewControls";
+import { AccountWidget } from "./account/AccountWidget";
 
 /**
  * Image ▸ Adjustments dropdown — Photoshop's `Image > Adjustments` menu.
@@ -215,7 +216,7 @@ export function Toolbar() {
 
   return (
     <div className="flex items-center gap-2 border-b border-edge bg-panel px-3 py-2">
-      <div className="mr-2 flex items-center gap-2">
+      <div className="mr-2 flex shrink-0 items-center gap-2">
         <div className="h-5 w-5 rounded bg-gradient-to-br from-accent to-fuchsia-500" />
         <span className="text-sm font-semibold tracking-tight">ai-ps</span>
       </div>
@@ -269,20 +270,22 @@ export function Toolbar() {
       <div className="mx-1 h-5 w-px bg-edge" />
 
       <button
-        className="btn"
+        className="btn px-2"
         onClick={() => actions.undo()}
         disabled={!history.canUndo}
         title="Undo (⌘Z)"
+        aria-label="Undo"
       >
-        ↶ Undo
+        ↶
       </button>
       <button
-        className="btn"
+        className="btn px-2"
         onClick={() => actions.redo()}
         disabled={!history.canRedo}
         title="Redo (⇧⌘Z)"
+        aria-label="Redo"
       >
-        ↷ Redo
+        ↷
       </button>
 
       <div className="ml-1 select-none rounded-md border border-edge bg-panelraised px-2 py-1 text-xs tabular-nums text-muted">
@@ -296,6 +299,9 @@ export function Toolbar() {
       <NavigatorButton disabled={!hasLayers} />
 
       <div className="flex-1" />
+
+      {/* Credit meter + account popover (live balance, dev top-up, usage). */}
+      <AccountWidget />
 
       <button className="btn btn-accent" onClick={onExport} disabled={!hasLayers}>
         Export PNG

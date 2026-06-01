@@ -44,7 +44,7 @@ export function LensBlurMenu() {
         }
         onClick={() => actions.beginLensBlur()}
       >
-        AI Lens Blur…
+        Lens Blur…
       </button>
 
       {/* Floating panel over the canvas, mounted out-of-tree so it overlays the
