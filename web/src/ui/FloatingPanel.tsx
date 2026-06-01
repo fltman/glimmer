@@ -4,6 +4,7 @@
  * as children; this shell owns the chrome: a drag handle, a title, and a close.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { X } from "lucide-react";
 
 export function FloatingPanel({
   title,
@@ -77,13 +78,13 @@ export function FloatingPanel({
         </span>
         <button
           onClick={onClose}
-          className="rounded px-1.5 text-muted hover:bg-edge hover:text-ink"
+          className="flex items-center rounded p-0.5 text-muted hover:bg-edge hover:text-ink"
           title="Close (Esc)"
         >
-          ✕
+          <X size={15} />
         </button>
       </div>
-      <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{children}</div>
     </div>
   );
 }

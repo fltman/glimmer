@@ -12,6 +12,7 @@
  * surface — everything else is summoned on demand.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Sparkles } from "lucide-react";
 import {
   useEngineSnapshot,
   useHistoryState,
@@ -181,7 +182,7 @@ export function Omnibar() {
                       active ? "bg-accent/25 text-ink" : "text-ink hover:bg-edge"
                     }`}
                   >
-                    <span className="text-accent">✦</span>
+                    <Sparkles size={15} className="shrink-0 text-accent" />
                     <span className="min-w-0 flex-1 truncate">
                       Ask the assistant — <span className="text-muted">“{row.text}”</span>
                     </span>
@@ -257,7 +258,7 @@ export function Omnibar() {
               : "border-edge hover:border-edge/80"
           }`}
         >
-          <span className="text-lg text-accent">✦</span>
+          <Sparkles size={18} className="shrink-0 text-accent" />
           <input
             ref={inputRef}
             value={query}

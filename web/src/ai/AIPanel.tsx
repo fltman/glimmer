@@ -15,6 +15,23 @@
  * specific tool; a local `view` toggles between that tool and the launcher grid.
  */
 import { useEffect, useState } from "react";
+import {
+  Sparkles,
+  ImagePlus,
+  Expand as ExpandIcon,
+  Wand2,
+  Sun,
+  Palette,
+  Scissors,
+  SunDim,
+  SprayCan,
+  Blend,
+  Maximize2,
+  Film,
+  ArrowLeft,
+  LayoutGrid,
+  type LucideIcon,
+} from "lucide-react";
 import { useWorkspace, workspaceStore } from "../state/workspace";
 import { AssistantPanel } from "./assistant/AssistantPanel";
 import { GenerateSection } from "./sections/GenerateSection";
@@ -45,23 +62,23 @@ type TabId =
 
 interface ToolMeta {
   label: string;
-  icon: string;
+  icon: LucideIcon;
   desc: string;
 }
 
 const META: Record<TabId, ToolMeta> = {
-  assistant: { label: "Assistant", icon: "✦", desc: "Describe any edit — I'll do it or plan the steps." },
-  generate: { label: "Generate", icon: "🖼️", desc: "Make a brand-new image from a text prompt." },
-  expand: { label: "Expand", icon: "⛶", desc: "Outpaint — extend the scene past the edges." },
-  edit: { label: "Edit", icon: "✏️", desc: "Change a region (or all) by describing it." },
-  relight: { label: "Relight", icon: "🔆", desc: "Relight from a chosen direction & colour." },
-  colormatch: { label: "Color Match", icon: "🎨", desc: "Match the grade of a reference image." },
-  cutout: { label: "Cutout", icon: "✂️", desc: "Remove the background to a clean cutout." },
-  reflection: { label: "Reflections", icon: "🪟", desc: "Erase glass glare & reflections." },
-  distractions: { label: "Cleanup", icon: "🧹", desc: "Find & remove distracting elements." },
-  harmonize: { label: "Harmonize", icon: "🩹", desc: "Blend a pasted subject into the scene." },
-  upscale: { label: "Upscale", icon: "🔍", desc: "Increase resolution, adding fine detail." },
-  presets: { label: "Presets", icon: "🎞️", desc: "One-click cinematic colour looks." },
+  assistant: { label: "Assistant", icon: Sparkles, desc: "Describe any edit — I'll do it or plan the steps." },
+  generate: { label: "Generate", icon: ImagePlus, desc: "Make a brand-new image from a text prompt." },
+  expand: { label: "Expand", icon: ExpandIcon, desc: "Outpaint — extend the scene past the edges." },
+  edit: { label: "Edit", icon: Wand2, desc: "Change a region (or all) by describing it." },
+  relight: { label: "Relight", icon: Sun, desc: "Relight from a chosen direction & colour." },
+  colormatch: { label: "Color Match", icon: Palette, desc: "Match the grade of a reference image." },
+  cutout: { label: "Cutout", icon: Scissors, desc: "Remove the background to a clean cutout." },
+  reflection: { label: "Reflections", icon: SunDim, desc: "Erase glass glare & reflections." },
+  distractions: { label: "Cleanup", icon: SprayCan, desc: "Find & remove distracting elements." },
+  harmonize: { label: "Harmonize", icon: Blend, desc: "Blend a pasted subject into the scene." },
+  upscale: { label: "Upscale", icon: Maximize2, desc: "Increase resolution, adding fine detail." },
+  presets: { label: "Presets", icon: Film, desc: "One-click cinematic colour looks." },
 };
 
 const GROUPS: { name: string; items: TabId[] }[] = [
@@ -75,13 +92,16 @@ const GROUPS: { name: string; items: TabId[] }[] = [
 function ToolLauncher({ onPick }: { onPick: (id: TabId) => void }) {
   const card = (id: TabId) => {
     const m = META[id];
+    const Icon = m.icon;
     return (
       <button
         key={id}
         onClick={() => onPick(id)}
         className="group flex items-start gap-2.5 rounded-lg border border-edge bg-panelraised/50 p-2.5 text-left transition-colors hover:border-accent/60 hover:bg-panelraised"
       >
-        <span className="text-base leading-none">{m.icon}</span>
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-edge bg-panel text-muted transition-colors group-hover:border-accent/40 group-hover:text-accent">
+          <Icon size={15} strokeWidth={1.75} />
+        </span>
         <span className="min-w-0">
           <span className="block text-xs font-semibold text-ink">{m.label}</span>
           <span className="mt-0.5 block text-[10px] leading-snug text-muted">
@@ -99,8 +119,8 @@ function ToolLauncher({ onPick }: { onPick: (id: TabId) => void }) {
         onClick={() => onPick("assistant")}
         className="flex items-center gap-3 rounded-xl border border-accent/40 bg-gradient-to-br from-accent/15 to-fuchsia-500/10 p-3 text-left transition-colors hover:from-accent/25 hover:to-fuchsia-500/15"
       >
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-accent to-fuchsia-500 text-lg text-white shadow">
-          ✦
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-accent to-fuchsia-500 text-white shadow">
+          <Sparkles size={18} strokeWidth={2} />
         </span>
         <span className="min-w-0">
           <span className="block text-sm font-semibold text-ink">Assistant</span>
@@ -140,7 +160,7 @@ export function AIPanel() {
   const title = onHome ? "AI tools" : META[tab].label;
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex min-h-0 flex-1 flex-col">
       {/* Slim header: context on the left, launcher toggle on the right. */}
       <div className="flex shrink-0 items-center justify-between border-b border-edge px-2.5 py-2">
         <div className="flex min-w-0 items-center gap-1.5">
@@ -148,22 +168,28 @@ export function AIPanel() {
             <button
               onClick={() => setView("home")}
               title="Back to AI tools"
-              className="rounded px-1 text-muted hover:bg-panelraised hover:text-ink"
+              className="flex items-center rounded p-0.5 text-muted hover:bg-panelraised hover:text-ink"
             >
-              ←
+              <ArrowLeft size={15} />
             </button>
           )}
           <span className="truncate text-xs font-semibold text-ink">{title}</span>
         </div>
         <button
           onClick={() => setView(onHome ? "tool" : "home")}
-          className={`rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors ${
+          className={`flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors ${
             onHome
               ? "border-accent/50 bg-accent/15 text-ink"
               : "border-edge text-muted hover:bg-panelraised hover:text-ink"
           }`}
         >
-          {onHome ? "Done" : "⊞ Tools"}
+          {onHome ? (
+            "Done"
+          ) : (
+            <>
+              <LayoutGrid size={12} /> Tools
+            </>
+          )}
         </button>
       </div>
 

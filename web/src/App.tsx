@@ -5,6 +5,20 @@
  * The canvas host is mounted once and lives between the rails and the panels.
  */
 import { useEffect, useRef, useState } from "react";
+import {
+  Sparkles,
+  SlidersHorizontal,
+  History as HistoryIcon,
+  PenTool,
+  SwatchBook,
+  Component,
+  ChevronLeft,
+  ChevronRight,
+  PanelsTopLeft,
+  PencilRuler,
+  Command,
+  type LucideIcon,
+} from "lucide-react";
 import { Toolbar } from "./ui/Toolbar";
 import { ToolRail } from "./ui/ToolRail";
 import { ToolOptions, ToolOptionsBody, toolHasOptions } from "./ui/ToolOptions";
@@ -417,12 +431,12 @@ export default function App() {
                 <button
                   onClick={() => workspaceStore.setRightDockOpen(false)}
                   title="Collapse panel dock"
-                  className="shrink-0 border-l border-edge px-2 text-muted hover:bg-edge hover:text-ink"
+                  className="flex shrink-0 items-center border-l border-edge px-1.5 text-muted hover:bg-edge hover:text-ink"
                 >
-                  ▶
+                  <ChevronRight size={15} />
                 </button>
               </div>
-              <div className="min-h-0 flex-[3] overflow-hidden">
+              <div className="flex min-h-0 flex-[3] flex-col overflow-hidden">
                 {tab === "ai" ? (
                   <AIPanel />
                 ) : tab === "adjust" ? (
@@ -487,8 +501,8 @@ function EmptyCanvasHero({ onOpen }: { onOpen: () => void }) {
     <div className="animate-fadein pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-6 pb-24">
       {/* Subtle glass card so the copy reads cleanly over the checkerboard. */}
       <div className="flex max-w-md flex-col items-center gap-5 rounded-2xl border border-edge/70 bg-panel/70 px-10 py-9 text-center shadow-2xl backdrop-blur-md">
-        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-fuchsia-500 text-2xl text-white shadow-lg">
-          ✦
+        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-fuchsia-500 text-white shadow-lg">
+          <Sparkles size={26} strokeWidth={2} />
         </div>
         <div className="space-y-2">
           <h1 className="text-xl font-semibold text-ink">Start with an image</h1>
@@ -516,14 +530,14 @@ function EmptyCanvasHero({ onOpen }: { onOpen: () => void }) {
   );
 }
 
-/** Panels reachable from the collapsed dock strip + their glyphs. */
-const DOCK_PANELS: { id: SidebarTab; glyph: string; label: string }[] = [
-  { id: "ai", glyph: "✦", label: "AI" },
-  { id: "adjust", glyph: "◐", label: "Adjustments" },
-  { id: "history", glyph: "↺", label: "History" },
-  { id: "paths", glyph: "✎", label: "Paths" },
-  { id: "swatches", glyph: "🎨", label: "Swatches" },
-  { id: "channels", glyph: "◫", label: "Channels" },
+/** Panels reachable from the collapsed dock strip + their icons. */
+const DOCK_PANELS: { id: SidebarTab; Icon: LucideIcon; label: string }[] = [
+  { id: "ai", Icon: Sparkles, label: "AI" },
+  { id: "adjust", Icon: SlidersHorizontal, label: "Adjustments" },
+  { id: "history", Icon: HistoryIcon, label: "History" },
+  { id: "paths", Icon: PenTool, label: "Paths" },
+  { id: "swatches", Icon: SwatchBook, label: "Swatches" },
+  { id: "channels", Icon: Component, label: "Channels" },
 ];
 
 /** Collapsed right dock — a thin icon strip; click an icon to open that panel. */
@@ -535,7 +549,7 @@ function DockStrip({ activeTab }: { activeTab: SidebarTab }) {
         title="Expand panel dock"
         className="flex h-8 w-8 items-center justify-center rounded-md text-muted hover:bg-panelraised hover:text-ink"
       >
-        ◀
+        <ChevronLeft size={16} />
       </button>
       <div className="my-1 h-px w-6 bg-edge" />
       {DOCK_PANELS.map((p) => (
@@ -543,13 +557,13 @@ function DockStrip({ activeTab }: { activeTab: SidebarTab }) {
           key={p.id}
           onClick={() => workspaceStore.setRightTab(p.id)}
           title={p.label}
-          className={`flex h-8 w-8 items-center justify-center rounded-md text-sm transition-colors ${
+          className={`flex h-8 w-8 items-center justify-center rounded-md transition-colors ${
             p.id === activeTab
               ? "bg-accent/20 text-ink ring-1 ring-accent/60"
               : "text-muted hover:bg-panelraised hover:text-ink"
           }`}
         >
-          {p.glyph}
+          <p.Icon size={16} strokeWidth={1.75} />
         </button>
       ))}
     </aside>
@@ -574,27 +588,27 @@ function FloatingControls({
         <button
           onClick={() => workspaceStore.toggleChrome()}
           title="Show panels (Tab)"
-          className="pointer-events-auto rounded-md border border-edge bg-panel/90 px-2 py-1 text-xs text-muted shadow-lg backdrop-blur hover:bg-edge hover:text-ink"
+          className="pointer-events-auto flex items-center gap-1.5 rounded-md border border-edge bg-panel/90 px-2 py-1.5 text-xs text-muted shadow-lg backdrop-blur hover:bg-edge hover:text-ink"
         >
-          ⤢ Show UI
+          <PanelsTopLeft size={13} /> Show UI
         </button>
       ) : (
         !leftRail && (
           <button
             onClick={() => workspaceStore.toggleLeftRail()}
             title="Show tool rail"
-            className="pointer-events-auto rounded-md border border-edge bg-panel/90 px-2 py-1 text-xs text-muted shadow-lg backdrop-blur hover:bg-edge hover:text-ink"
+            className="pointer-events-auto flex items-center gap-1.5 rounded-md border border-edge bg-panel/90 px-2 py-1.5 text-xs text-muted shadow-lg backdrop-blur hover:bg-edge hover:text-ink"
           >
-            ⧉ Tools
+            <PencilRuler size={13} /> Tools
           </button>
         )
       )}
       <button
         onClick={() => workspaceStore.openPalette()}
         title="Command palette (⌘K)"
-        className="pointer-events-auto rounded-md border border-edge bg-panel/90 px-2 py-1 text-xs font-medium text-muted shadow-lg backdrop-blur hover:bg-edge hover:text-ink"
+        className="pointer-events-auto flex items-center rounded-md border border-edge bg-panel/90 p-1.5 text-xs font-medium text-muted shadow-lg backdrop-blur hover:bg-edge hover:text-ink"
       >
-        ⌘K
+        <Command size={14} />
       </button>
     </div>
   );

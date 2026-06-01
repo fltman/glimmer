@@ -11,6 +11,37 @@
 import type React from "react";
 import { Fragment, useEffect, useRef, useState } from "react";
 import {
+  Move,
+  SquareDashed,
+  CircleDashed,
+  Lasso,
+  Wand2,
+  MousePointerClick,
+  Crop,
+  Scaling,
+  Paintbrush,
+  Eraser,
+  Stamp,
+  Bandage,
+  Sun,
+  Moon,
+  Droplet,
+  Fingerprint,
+  Triangle,
+  PaintBucket,
+  Blend,
+  Grid3x3,
+  PenTool,
+  Type,
+  Shapes,
+  Pipette,
+  Hand,
+  Square,
+  Circle,
+  Slash,
+  type LucideIcon,
+} from "lucide-react";
+import {
   toolStore,
   useToolState,
   type ToolId,
@@ -21,7 +52,7 @@ import { ColorControls } from "./color";
 
 interface ToolDef {
   id: ToolId;
-  glyph: string;
+  Icon: LucideIcon;
   label: string;
   /** Single-key shortcut (shown in the tooltip; bound in App). */
   key: string;
@@ -30,48 +61,48 @@ interface ToolDef {
 }
 
 export const TOOLS: ToolDef[] = [
-  { id: "move", glyph: "✥", label: "Move", key: "V", group: 0 },
-  { id: "marquee-rect", glyph: "▭", label: "Rectangle marquee", key: "M", group: 1 },
-  { id: "marquee-ellipse", glyph: "◯", label: "Ellipse marquee", key: "M", group: 1 },
-  { id: "lasso", glyph: "✑", label: "Lasso", key: "L", group: 1 },
-  { id: "magic-wand", glyph: "✶", label: "Magic wand", key: "W", group: 1 },
+  { id: "move", Icon: Move, label: "Move", key: "V", group: 0 },
+  { id: "marquee-rect", Icon: SquareDashed, label: "Rectangle marquee", key: "M", group: 1 },
+  { id: "marquee-ellipse", Icon: CircleDashed, label: "Ellipse marquee", key: "M", group: 1 },
+  { id: "lasso", Icon: Lasso, label: "Lasso", key: "L", group: 1 },
+  { id: "magic-wand", Icon: Wand2, label: "Magic wand", key: "W", group: 1 },
   // AI "Select Anything" (SAM, runs in-browser). Click an object to select it.
-  { id: "sam-select", glyph: "👆", label: "Magic Select — click a subject (AI)", key: "A", group: 1 },
-  { id: "crop", glyph: "⌗", label: "Crop", key: "C", group: 2 },
-  { id: "transform", glyph: "⤢", label: "Free transform", key: "T", group: 2 },
-  { id: "brush", glyph: "🖌", label: "Brush", key: "B", group: 3 },
-  { id: "eraser", glyph: "⌫", label: "Eraser", key: "E", group: 3 },
-  { id: "clone", glyph: "❖", label: "Clone stamp", key: "S", group: 3 },
-  { id: "heal", glyph: "✚", label: "Healing brush", key: "J", group: 3 },
+  { id: "sam-select", Icon: MousePointerClick, label: "Magic Select — click a subject (AI)", key: "A", group: 1 },
+  { id: "crop", Icon: Crop, label: "Crop", key: "C", group: 2 },
+  { id: "transform", Icon: Scaling, label: "Free transform", key: "T", group: 2 },
+  { id: "brush", Icon: Paintbrush, label: "Brush", key: "B", group: 3 },
+  { id: "eraser", Icon: Eraser, label: "Eraser", key: "E", group: 3 },
+  { id: "clone", Icon: Stamp, label: "Clone stamp", key: "S", group: 3 },
+  { id: "heal", Icon: Bandage, label: "Healing brush", key: "J", group: 3 },
   // Toning (dodge/burn) and focus (blur/sharpen/smudge) live in the rail as
   // grouped flyout buttons (handled specially below), mirroring the Shape tool.
-  { id: "dodge", glyph: "◐", label: "Dodge / Burn", key: "O", group: 3 },
-  { id: "blur-brush", glyph: "❍", label: "Blur / Sharpen / Smudge", key: "", group: 3 },
-  { id: "bucket", glyph: "🪣", label: "Paint bucket", key: "K", group: 4 },
-  { id: "gradient", glyph: "🌈", label: "Gradient", key: "G", group: 4 },
-  { id: "pattern-stamp", glyph: "▦", label: "Pattern stamp", key: "", group: 4 },
-  { id: "pen", glyph: "✒", label: "Pen (vector path)", key: "P", group: 5 },
-  { id: "text", glyph: "T", label: "Type", key: "Y", group: 5 },
-  // Shape lives in the rail too, but its glyph + flyout are handled specially.
-  { id: "shape", glyph: "▱", label: "Shape", key: "U", group: 5 },
-  { id: "eyedropper", glyph: "💧", label: "Eyedropper", key: "I", group: 6 },
-  { id: "hand", glyph: "✋", label: "Hand (pan)", key: "H", group: 6 },
+  { id: "dodge", Icon: Sun, label: "Dodge / Burn", key: "O", group: 3 },
+  { id: "blur-brush", Icon: Droplet, label: "Blur / Sharpen / Smudge", key: "", group: 3 },
+  { id: "bucket", Icon: PaintBucket, label: "Paint bucket", key: "K", group: 4 },
+  { id: "gradient", Icon: Blend, label: "Gradient", key: "G", group: 4 },
+  { id: "pattern-stamp", Icon: Grid3x3, label: "Pattern stamp", key: "", group: 4 },
+  { id: "pen", Icon: PenTool, label: "Pen (vector path)", key: "P", group: 5 },
+  { id: "text", Icon: Type, label: "Type", key: "Y", group: 5 },
+  // Shape lives in the rail too, but its icon + flyout are handled specially.
+  { id: "shape", Icon: Shapes, label: "Shape", key: "U", group: 5 },
+  { id: "eyedropper", Icon: Pipette, label: "Eyedropper", key: "I", group: 6 },
+  { id: "hand", Icon: Hand, label: "Hand (pan)", key: "H", group: 6 },
 ];
 
-/** Glyphs reused by both the rail buttons and the grouped flyouts. */
-const TOOL_GLYPH: Partial<Record<ToolId, string>> = {
-  dodge: "◐",
-  burn: "●",
-  smudge: "👆",
-  "blur-brush": "❍",
-  "sharpen-brush": "△",
+/** Icons reused by both the rail buttons and the grouped flyouts. */
+const TOOL_ICON: Partial<Record<ToolId, LucideIcon>> = {
+  dodge: Sun,
+  burn: Moon,
+  smudge: Fingerprint,
+  "blur-brush": Droplet,
+  "sharpen-brush": Triangle,
 };
 
-/** Per-shape glyphs for the shape-tool button + its flyout. */
-const SHAPE_GLYPH: Record<ShapeKind, string> = {
-  rect: "▱",
-  ellipse: "◯",
-  line: "╱",
+/** Per-shape icons for the shape-tool button + its flyout. */
+const SHAPE_ICON: Record<ShapeKind, LucideIcon> = {
+  rect: Square,
+  ellipse: Circle,
+  line: Slash,
 };
 const SHAPE_LABEL: Record<ShapeKind, string> = {
   rect: "Rectangle",
@@ -150,7 +181,7 @@ function GroupButton({
   title,
   shortcut,
 }: {
-  members: { id: ToolId; glyph: string; label: string }[];
+  members: { id: ToolId; Icon: LucideIcon; label: string }[];
   active: ToolId;
   title: string;
   /** Optional shortcut hint appended to the button tooltip. */
@@ -171,14 +202,14 @@ function GroupButton({
           selectTool(current.id);
           setOpen((o) => !o);
         }}
-        className={`relative flex h-9 w-9 items-center justify-center rounded-md text-base transition-colors ${
+        className={`relative flex h-9 w-9 items-center justify-center rounded-md transition-colors ${
           selected
             ? "bg-accent/20 text-ink ring-1 ring-accent/60"
             : "text-muted hover:bg-panelraised hover:text-ink"
         }`}
         title={`${title}${shortcut ? ` (${shortcut})` : ""} · click for more`}
       >
-        {current.glyph}
+        <current.Icon size={18} strokeWidth={1.75} />
         <span className="absolute bottom-0.5 right-0.5 h-0 w-0 border-b-[4px] border-l-[4px] border-b-muted border-l-transparent" />
       </button>
 
@@ -195,13 +226,13 @@ function GroupButton({
                 setOpen(false);
               }}
               title={m.label}
-              className={`flex h-8 w-8 items-center justify-center rounded text-base transition-colors ${
+              className={`flex h-8 w-8 items-center justify-center rounded transition-colors ${
                 m.id === active
                   ? "bg-accent/20 text-ink ring-1 ring-accent/60"
                   : "text-muted hover:bg-panel hover:text-ink"
               }`}
             >
-              {m.glyph}
+              <m.Icon size={17} strokeWidth={1.75} />
             </button>
           ))}
         </div>
@@ -216,6 +247,7 @@ function ShapeButton({ selected }: { selected: boolean }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   useFlyoutDismiss(open, setOpen, rootRef);
+  const ShapeIcon = SHAPE_ICON[shape.kind];
 
   return (
     <div ref={rootRef} className="relative">
@@ -224,14 +256,14 @@ function ShapeButton({ selected }: { selected: boolean }) {
           toolStore.setActive("shape");
           setOpen((o) => !o);
         }}
-        className={`relative flex h-9 w-9 items-center justify-center rounded-md text-base transition-colors ${
+        className={`relative flex h-9 w-9 items-center justify-center rounded-md transition-colors ${
           selected
             ? "bg-accent/20 text-ink ring-1 ring-accent/60"
             : "text-muted hover:bg-panelraised hover:text-ink"
         }`}
         title={`Shape — ${SHAPE_LABEL[shape.kind]} (U) · click for more`}
       >
-        {SHAPE_GLYPH[shape.kind]}
+        <ShapeIcon size={18} strokeWidth={1.75} />
         {/* Flyout affordance: a little corner tick like Photoshop's tool groups. */}
         <span className="absolute bottom-0.5 right-0.5 h-0 w-0 border-b-[4px] border-l-[4px] border-b-muted border-l-transparent" />
       </button>
@@ -241,24 +273,27 @@ function ShapeButton({ selected }: { selected: boolean }) {
           className="absolute left-full top-0 z-50 ml-1 flex gap-1 rounded-md border border-edge bg-panelraised p-1 shadow-lg"
           onPointerDown={(e) => e.stopPropagation()}
         >
-          {SHAPE_ORDER.map((k) => (
-            <button
-              key={k}
-              onClick={() => {
-                actions.setShapeKind(k);
-                toolStore.setActive("shape");
-                setOpen(false);
-              }}
-              title={SHAPE_LABEL[k]}
-              className={`flex h-8 w-8 items-center justify-center rounded text-base transition-colors ${
-                shape.kind === k
-                  ? "bg-accent/20 text-ink ring-1 ring-accent/60"
-                  : "text-muted hover:bg-panel hover:text-ink"
-              }`}
-            >
-              {SHAPE_GLYPH[k]}
-            </button>
-          ))}
+          {SHAPE_ORDER.map((k) => {
+            const KIcon = SHAPE_ICON[k];
+            return (
+              <button
+                key={k}
+                onClick={() => {
+                  actions.setShapeKind(k);
+                  toolStore.setActive("shape");
+                  setOpen(false);
+                }}
+                title={SHAPE_LABEL[k]}
+                className={`flex h-8 w-8 items-center justify-center rounded transition-colors ${
+                  shape.kind === k
+                    ? "bg-accent/20 text-ink ring-1 ring-accent/60"
+                    : "text-muted hover:bg-panel hover:text-ink"
+                }`}
+              >
+                <KIcon size={17} strokeWidth={1.75} />
+              </button>
+            );
+          })}
         </div>
       )}
     </div>
@@ -266,15 +301,15 @@ function ShapeButton({ selected }: { selected: boolean }) {
 }
 
 /** Tools fronted by the dodge/burn (toning) rail flyout. */
-const TONING_GROUP: { id: ToolId; glyph: string; label: string }[] = [
-  { id: "dodge", glyph: TOOL_GLYPH.dodge!, label: "Dodge (lighten)" },
-  { id: "burn", glyph: TOOL_GLYPH.burn!, label: "Burn (darken)" },
+const TONING_GROUP: { id: ToolId; Icon: LucideIcon; label: string }[] = [
+  { id: "dodge", Icon: TOOL_ICON.dodge!, label: "Dodge (lighten)" },
+  { id: "burn", Icon: TOOL_ICON.burn!, label: "Burn (darken)" },
 ];
 /** Tools fronted by the blur/sharpen/smudge (focus) rail flyout. */
-const FOCUS_GROUP: { id: ToolId; glyph: string; label: string }[] = [
-  { id: "blur-brush", glyph: TOOL_GLYPH["blur-brush"]!, label: "Blur" },
-  { id: "sharpen-brush", glyph: TOOL_GLYPH["sharpen-brush"]!, label: "Sharpen" },
-  { id: "smudge", glyph: TOOL_GLYPH.smudge!, label: "Smudge" },
+const FOCUS_GROUP: { id: ToolId; Icon: LucideIcon; label: string }[] = [
+  { id: "blur-brush", Icon: TOOL_ICON["blur-brush"]!, label: "Blur" },
+  { id: "sharpen-brush", Icon: TOOL_ICON["sharpen-brush"]!, label: "Sharpen" },
+  { id: "smudge", Icon: TOOL_ICON.smudge!, label: "Smudge" },
 ];
 
 export function ToolRail() {
@@ -326,14 +361,14 @@ export function ToolRail() {
               {dividerBefore && <div className="my-1 h-px w-6 bg-edge" />}
               <button
                 onClick={() => selectTool(t.id)}
-                className={`flex h-9 w-9 items-center justify-center rounded-md text-base transition-colors ${
+                className={`flex h-9 w-9 items-center justify-center rounded-md transition-colors ${
                   selected
                     ? "bg-accent/20 text-ink ring-1 ring-accent/60"
                     : "text-muted hover:bg-panelraised hover:text-ink"
                 }`}
                 title={t.key ? `${t.label} (${t.key})` : t.label}
               >
-                {t.glyph}
+                <t.Icon size={18} strokeWidth={1.75} />
               </button>
             </Fragment>
           );

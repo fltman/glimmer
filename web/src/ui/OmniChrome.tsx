@@ -7,6 +7,15 @@
  *   top-right: Tools · Layers · Export · credits · Classic-mode · ⌘K
  */
 import {
+  Sparkles,
+  PencilRuler,
+  Layers,
+  Download,
+  LayoutDashboard,
+  Command,
+  type LucideIcon,
+} from "lucide-react";
+import {
   useEngineSnapshot,
   useViewState,
 } from "../state/useEngine";
@@ -30,24 +39,27 @@ function PillButton({
   onClick,
   title,
   active,
-  children,
+  icon: Icon,
+  label,
 }: {
   onClick: () => void;
   title: string;
   active?: boolean;
-  children: React.ReactNode;
+  icon: LucideIcon;
+  label?: string;
 }) {
   return (
     <button
       onClick={onClick}
       title={title}
-      className={`pointer-events-auto rounded-md border px-2 py-1 text-xs shadow-lg backdrop-blur transition-colors ${
+      className={`pointer-events-auto flex items-center gap-1.5 rounded-md border px-2 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors ${
         active
           ? "border-accent/60 bg-accent/20 text-ink"
           : "border-edge bg-panel/90 text-muted hover:bg-edge hover:text-ink"
       }`}
     >
-      {children}
+      <Icon size={13} strokeWidth={2} />
+      {label && <span>{label}</span>}
     </button>
   );
 }
@@ -80,37 +92,44 @@ export function OmniChrome() {
           onClick={() => workspaceStore.openFloatingPanel("ai")}
           title="AI tools & assistant"
           active={ws.floatingPanel === "ai"}
-        >
-          ✦ AI
-        </PillButton>
+          icon={Sparkles}
+          label="AI"
+        />
         <PillButton
           onClick={() => workspaceStore.toggleTools()}
           title="Tools"
           active={ws.toolsOpen}
-        >
-          ⧉ Tools
-        </PillButton>
+          icon={PencilRuler}
+          label="Tools"
+        />
         <PillButton
           onClick={() => workspaceStore.openFloatingPanel("layers")}
           title="Layers"
           active={ws.floatingPanel === "layers"}
-        >
-          ▦ Layers
-        </PillButton>
+          icon={Layers}
+          label="Layers"
+        />
         {hasLayers && (
-          <PillButton onClick={() => void exportPngDownload()} title="Export PNG">
-            ⤓ Export
-          </PillButton>
+          <PillButton
+            onClick={() => void exportPngDownload()}
+            title="Export PNG"
+            icon={Download}
+            label="Export"
+          />
         )}
         <div className="pointer-events-auto">
           <AccountWidget />
         </div>
-        <PillButton onClick={() => workspaceStore.setMode("classic")} title="Classic docked UI">
-          ⛶
-        </PillButton>
-        <PillButton onClick={() => workspaceStore.openPalette()} title="Command palette (⌘K)">
-          ⌘K
-        </PillButton>
+        <PillButton
+          onClick={() => workspaceStore.setMode("classic")}
+          title="Classic docked workspace"
+          icon={LayoutDashboard}
+        />
+        <PillButton
+          onClick={() => workspaceStore.openPalette()}
+          title="Command palette (⌘K)"
+          icon={Command}
+        />
       </div>
     </>
   );
