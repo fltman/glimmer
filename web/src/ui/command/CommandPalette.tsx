@@ -127,7 +127,7 @@ export function CommandPalette() {
       onMouseDown={() => workspaceStore.closePalette()}
     >
       <div
-        className="flex max-h-[72vh] w-[600px] max-w-[92vw] flex-col overflow-hidden rounded-xl border border-edge bg-panelraised shadow-2xl"
+        className="animate-pop flex max-h-[72vh] w-[600px] max-w-[92vw] flex-col overflow-hidden rounded-xl border border-edge bg-panelraised shadow-2xl"
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2 border-b border-edge px-3.5 py-3">

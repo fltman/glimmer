@@ -63,7 +63,7 @@ export function FloatingPanel({
 
   return (
     <div
-      className="pointer-events-auto absolute z-40 flex max-h-[82vh] flex-col overflow-hidden rounded-xl border border-edge bg-panel/95 shadow-2xl backdrop-blur"
+      className="animate-pop pointer-events-auto absolute z-40 flex max-h-[82vh] flex-col overflow-hidden rounded-xl border border-edge bg-panel/95 shadow-2xl backdrop-blur"
       style={{ left: pos.x, top: pos.y, width }}
     >
       <div

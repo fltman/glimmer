@@ -63,7 +63,7 @@ export function OmniChrome() {
   return (
     <>
       {/* top-left: document identity (subtle) */}
-      <div className="pointer-events-none absolute left-3 top-3 z-30 flex items-center gap-2 rounded-md border border-edge bg-panel/80 px-2.5 py-1 text-[11px] text-muted shadow-lg backdrop-blur">
+      <div className="animate-fadein pointer-events-none absolute left-3 top-3 z-30 flex items-center gap-2 rounded-md border border-edge bg-panel/80 px-2.5 py-1 text-[11px] text-muted shadow-lg backdrop-blur">
         <div className="h-3.5 w-3.5 rounded bg-gradient-to-br from-accent to-fuchsia-500" />
         <span className="font-medium text-ink">{active?.name ?? "Untitled"}</span>
         {active && (
@@ -75,7 +75,7 @@ export function OmniChrome() {
       </div>
 
       {/* top-right: the essential summons */}
-      <div className="pointer-events-none absolute right-3 top-3 z-30 flex items-center gap-1.5">
+      <div className="animate-fadein pointer-events-none absolute right-3 top-3 z-30 flex items-center gap-1.5">
         <PillButton
           onClick={() => workspaceStore.toggleTools()}
           title="Tools"

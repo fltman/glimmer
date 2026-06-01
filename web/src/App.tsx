@@ -7,7 +7,7 @@
 import { useEffect } from "react";
 import { Toolbar } from "./ui/Toolbar";
 import { ToolRail } from "./ui/ToolRail";
-import { ToolOptions } from "./ui/ToolOptions";
+import { ToolOptions, ToolOptionsBody, toolHasOptions } from "./ui/ToolOptions";
 import { CanvasHost } from "./ui/CanvasHost";
 import { DocumentTabs } from "./ui/DocumentTabs";
 import { TextEditOverlay } from "./ui/text/TextEditOverlay";
@@ -20,7 +20,7 @@ import { PathsPanel } from "./ui/paths/PathsPanel";
 import { SwatchesPanel } from "./ui/swatches/SwatchesPanel";
 import { ChannelsPanel } from "./ui/channels/ChannelsPanel";
 import { engine, useEngineSnapshot, actions, isAgentBatching } from "./state/useEngine";
-import { toolStore, type ToolId, type ShapeKind } from "./state/tools";
+import { toolStore, useToolState, type ToolId, type ShapeKind } from "./state/tools";
 import {
   useWorkspace,
   workspaceStore,
@@ -245,6 +245,7 @@ export default function App() {
   }, [activeAdjId]);
 
   const omni = ws.mode === "omni";
+  const activeTool = useToolState().active;
 
   return (
     <div className="flex h-full flex-col">
@@ -268,12 +269,23 @@ export default function App() {
             {omni && <Omnibar />}
             {omni && ws.toolsOpen && (
               <>
-                <div className="pointer-events-auto absolute bottom-2 left-2 top-2 z-30 flex overflow-hidden rounded-xl border border-edge bg-panel/95 shadow-2xl backdrop-blur">
+                {/* Floating tool rail (clears the doc pill above + omnibar below). */}
+                <div className="animate-fadein pointer-events-auto absolute bottom-20 left-3 top-16 z-30 flex overflow-hidden rounded-xl border border-edge bg-panel/95 shadow-2xl backdrop-blur">
                   <ToolRail />
                 </div>
-                <div className="pointer-events-auto absolute left-1/2 top-2 z-20 max-w-[64vw] -translate-x-1/2 overflow-x-auto rounded-xl border border-edge bg-panel/95 shadow-2xl backdrop-blur">
-                  <ToolOptions />
-                </div>
+                {/* Contextual options — ONLY the active tool's controls, and only
+                    when the tool actually has options (move/hand/eyedropper don't). */}
+                {toolHasOptions(activeTool) && (
+                  // No overflow clipping here — the Text/Shape/Gradient/Brush
+                  // controls open color-picker / dynamics popovers BELOW their
+                  // buttons, which an overflow container would crop.
+                  <div className="animate-fadein pointer-events-auto absolute left-1/2 top-3 z-20 flex w-fit max-w-[90vw] -translate-x-1/2 items-center gap-3 rounded-xl border border-edge bg-panel/95 px-3 py-1.5 shadow-2xl backdrop-blur">
+                    <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-muted">
+                      {activeTool.replace("-", " ")}
+                    </span>
+                    <ToolOptionsBody />
+                  </div>
+                )}
               </>
             )}
             {omni && ws.floatingPanel && (

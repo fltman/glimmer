@@ -2,6 +2,39 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Subtle entrance for summoned omni-mode surfaces (omnibar results, floating
+   panels, tool rail/options) so they feel like they glide in rather than snap. */
+@keyframes aips-fadein {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes aips-pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.animate-fadein {
+  animation: aips-fadein 130ms ease-out both;
+}
+.animate-pop {
+  animation: aips-pop 140ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-fadein,
+  .animate-pop {
+    animation: none;
+  }
+}
+
 /* Dark UI base. The canvas owns all pixels; the chrome around it stays flat
    and unobtrusive so the image is the focus. */
 @layer base {

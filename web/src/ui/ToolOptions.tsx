@@ -22,6 +22,7 @@ import {
   type DodgeBurnRange,
   type GradientStopUI,
   type PatternDef,
+  type ToolId,
 } from "../state/tools";
 import {
   actions,
@@ -1519,7 +1520,21 @@ function ViewToggles() {
   );
 }
 
-export function ToolOptions() {
+/**
+ * Tools whose "options" are only a one-line usage hint. In the omni workspace we
+ * skip the floating options bar for these so the canvas stays clean (the hint
+ * isn't worth a panel); the classic bar still shows the hint inline.
+ */
+export function toolHasOptions(active: ToolId): boolean {
+  return active !== "move" && active !== "hand" && active !== "eyedropper";
+}
+
+/**
+ * The per-tool contextual controls ONLY — no outer bar chrome, no tool-name
+ * label, no global view toggles. Shared by the classic options bar and the omni
+ * floating options strip, so both show exactly the active tool's controls.
+ */
+export function ToolOptionsBody() {
   const { active, brush, feather, foreground } = useToolState();
   // The retouch brushes report as paint tools (shared gesture path) but have
   // their own option bars, so the generic brush bar must exclude them.
@@ -1527,11 +1542,7 @@ export function ToolOptions() {
   const sel = isSelectionTool(active);
 
   return (
-    <div className="flex items-center gap-4 border-b border-edge bg-panel px-3 py-1.5">
-      <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">
-        {active.replace("-", " ")}
-      </span>
-
+    <>
       {paint && (
         <div className="flex items-center gap-4">
           <Slider
@@ -1657,8 +1668,19 @@ export function ToolOptions() {
       {active === "smudge" && <SmudgeBar />}
       {active === "blur-brush" && <FocusBar sharpen={false} />}
       {active === "sharpen-brush" && <FocusBar sharpen={true} />}
+    </>
+  );
+}
 
-      {/* Persistent right-aligned View toggles (Rulers / Grid / Snap). */}
+/** Classic top options bar: active-tool controls + global Rulers/Grid/Snap. */
+export function ToolOptions() {
+  const { active } = useToolState();
+  return (
+    <div className="flex items-center gap-4 border-b border-edge bg-panel px-3 py-1.5">
+      <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">
+        {active.replace("-", " ")}
+      </span>
+      <ToolOptionsBody />
       <ViewToggles />
     </div>
   );

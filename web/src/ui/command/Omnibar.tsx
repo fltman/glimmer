@@ -144,10 +144,10 @@ export function Omnibar() {
 
   return (
     <div className="pointer-events-none absolute inset-x-0 bottom-6 z-30 flex justify-center px-4">
-      <div className="pointer-events-auto w-[640px] max-w-[94vw]">
+      <div className="animate-fadein pointer-events-auto w-[640px] max-w-[94vw]">
         {/* Results / suggestions float ABOVE the bar (bar sits at the bottom). */}
         {showResults && (
-          <div className="mb-2 max-h-[44vh] overflow-y-auto rounded-xl border border-edge bg-panelraised/95 p-1 shadow-2xl backdrop-blur">
+          <div className="animate-fadein mb-2 max-h-[44vh] overflow-y-auto rounded-xl border border-edge bg-panelraised/95 p-1 shadow-2xl backdrop-blur">
             {rows.map((row, i) => {
               const active = i === sel;
               if (row.kind === "ai") {
@@ -207,7 +207,7 @@ export function Omnibar() {
         )}
 
         {showSuggest && (
-          <div className="mb-2 flex flex-wrap items-center gap-1.5 rounded-xl border border-edge bg-panelraised/90 px-3 py-2 text-xs shadow-2xl backdrop-blur">
+          <div className="animate-fadein mb-2 flex flex-wrap items-center gap-1.5 rounded-xl border border-edge bg-panelraised/90 px-3 py-2 text-xs shadow-2xl backdrop-blur">
             <span className="text-muted">Try</span>
             {SUGGESTIONS.map((s) => (
               <button
