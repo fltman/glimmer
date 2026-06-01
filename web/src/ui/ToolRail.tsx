@@ -370,7 +370,7 @@ export function ToolRail() {
               {dividerBefore && <div className="my-1 h-px w-6 bg-edge" />}
               <button
                 onClick={() => selectTool(t.id)}
-                className={`flex h-9 w-9 items-center justify-center rounded-md transition-colors ${
+                className={`flex h-9 w-9 items-center justify-center rounded-md transition duration-100 active:scale-90 ${
                   selected
                     ? "bg-accent/20 text-ink ring-1 ring-accent/60"
                     : "text-muted hover:bg-panelraised hover:text-ink"

@@ -50,7 +50,7 @@
   }
 
   body {
-    @apply bg-[#0f1012] text-ink font-sans antialiased;
+    @apply bg-bg text-ink font-sans antialiased;
     overscroll-behavior: none;
   }
 
@@ -71,7 +71,7 @@
     @apply px-3 py-2 text-xs font-semibold uppercase tracking-wider text-muted;
   }
   .btn {
-    @apply inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border border-edge bg-panelraised px-2.5 py-1.5 text-xs font-medium text-ink transition-colors hover:bg-edge disabled:cursor-not-allowed disabled:opacity-40;
+    @apply inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border border-edge bg-panelraised px-2.5 py-1.5 text-xs font-medium text-ink transition duration-100 hover:bg-edge active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40 disabled:active:scale-100;
   }
   .btn-accent {
     @apply border-transparent bg-accent text-white hover:bg-accenthover;

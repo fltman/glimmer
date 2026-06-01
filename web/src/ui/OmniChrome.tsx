@@ -24,6 +24,7 @@ import { exportPng } from "../engine/export";
 import { useDocuments } from "../state/useEngine";
 import { useWorkspace, workspaceStore } from "../state/workspace";
 import { AccountWidget } from "./account/AccountWidget";
+import { Logo } from "./Logo";
 
 async function exportPngDownload() {
   const blob = await exportPng(engine);
@@ -52,7 +53,7 @@ function PillButton({
     <button
       onClick={onClick}
       title={title}
-      className={`pointer-events-auto flex items-center gap-1.5 rounded-md border px-2 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition-colors ${
+      className={`pointer-events-auto flex items-center gap-1.5 rounded-md border px-2 py-1.5 text-xs font-medium shadow-lg backdrop-blur transition duration-100 active:scale-95 ${
         active
           ? "border-accent/60 bg-accent/20 text-ink"
           : "border-edge bg-panel/90 text-muted hover:bg-edge hover:text-ink"
@@ -76,9 +77,7 @@ export function OmniChrome() {
     <>
       {/* top-left: document identity (subtle) */}
       <div className="animate-fadein pointer-events-none absolute left-3 top-3 z-30 flex items-center gap-2 rounded-md border border-edge bg-panel/80 py-1 pl-1.5 pr-2.5 text-[11px] text-muted shadow-lg backdrop-blur">
-        <span className="flex h-4 w-4 items-center justify-center rounded bg-gradient-to-br from-accent to-fuchsia-500 text-white">
-          <Sparkles size={10} strokeWidth={2.25} />
-        </span>
+        <Logo size="sm" showWordmark={false} />
         <span className="font-medium text-ink">{active?.name ?? "Untitled"}</span>
         {active && (
           <span className="tabular-nums">

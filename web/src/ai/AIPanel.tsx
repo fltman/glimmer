@@ -97,7 +97,7 @@ function ToolLauncher({ onPick }: { onPick: (id: TabId) => void }) {
       <button
         key={id}
         onClick={() => onPick(id)}
-        className="group flex items-start gap-2.5 rounded-lg border border-edge bg-panelraised/50 p-2.5 text-left transition-colors hover:border-accent/60 hover:bg-panelraised"
+        className="group flex items-start gap-2.5 rounded-lg border border-edge bg-panelraised/50 p-2.5 text-left transition duration-150 hover:-translate-y-0.5 hover:border-accent/60 hover:bg-panelraised hover:shadow-lg active:translate-y-0 active:scale-[0.99]"
       >
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-edge bg-panel text-muted transition-colors group-hover:border-accent/40 group-hover:text-accent">
           <Icon size={15} strokeWidth={1.75} />
@@ -117,7 +117,7 @@ function ToolLauncher({ onPick }: { onPick: (id: TabId) => void }) {
       {/* Assistant hero */}
       <button
         onClick={() => onPick("assistant")}
-        className="flex items-center gap-3 rounded-xl border border-accent/40 bg-gradient-to-br from-accent/15 to-fuchsia-500/10 p-3 text-left transition-colors hover:from-accent/25 hover:to-fuchsia-500/15"
+        className="flex items-center gap-3 rounded-xl border border-accent/40 bg-gradient-to-br from-accent/15 to-fuchsia-500/10 p-3 text-left transition duration-150 hover:-translate-y-0.5 hover:from-accent/25 hover:to-fuchsia-500/15 hover:shadow-lg active:translate-y-0 active:scale-[0.99]"
       >
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-accent to-fuchsia-500 text-white shadow">
           <Sparkles size={18} strokeWidth={1.75} />

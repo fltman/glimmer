@@ -19,7 +19,9 @@
  * Rows ahead of the cursor (the redo branch) are dimmed, Photoshop-style, and
  * become live again only once you apply a new command past them.
  */
+import { History as HistoryIcon } from "lucide-react";
 import { useHistoryEntries, actions } from "../../state/useEngine";
+import { EmptyState } from "../EmptyState";
 
 /** Tiny clock glyph for the base/Open state. */
 function BaseIcon() {
@@ -100,9 +102,11 @@ export function HistoryPanel() {
         })}
 
         {entries.length === 0 && (
-          <p className="px-3 py-4 text-xs text-muted">
-            No edits yet. Your actions will appear here.
-          </p>
+          <EmptyState
+            icon={HistoryIcon}
+            title="No history yet"
+            hint="Your edits will appear here as you work — click any step to jump back."
+          />
         )}
       </div>
     </div>

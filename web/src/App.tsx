@@ -514,13 +514,13 @@ function EmptyCanvasHero({ onOpen }: { onOpen: () => void }) {
         <div className="pointer-events-auto flex items-center gap-2.5">
           <button
             onClick={onOpen}
-            className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white shadow-lg transition-colors hover:bg-accenthover"
+            className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white shadow-lg transition duration-100 hover:bg-accenthover active:scale-[0.97]"
           >
             Open image
           </button>
           <button
             onClick={() => workspaceStore.openPalette()}
-            className="rounded-lg border border-edge bg-panelraised px-4 py-2 text-sm text-muted transition-colors hover:bg-edge hover:text-ink"
+            className="rounded-lg border border-edge bg-panelraised px-4 py-2 text-sm text-muted transition duration-100 hover:bg-edge hover:text-ink active:scale-[0.97]"
           >
             ⌘K commands
           </button>

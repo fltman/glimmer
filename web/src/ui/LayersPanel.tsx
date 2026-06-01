@@ -11,7 +11,9 @@
  * them here using a running "collapsed depth" gate.
  */
 import { useRef, useState } from "react";
+import { Layers } from "lucide-react";
 import { useEngineSnapshot, actions } from "../state/useEngine";
+import { EmptyState } from "./EmptyState";
 import {
   BLEND_MODE_LABELS,
   type BlendMode,
@@ -115,9 +117,11 @@ export function LayersPanel() {
       <div className="panel-title border-b border-edge">Layers</div>
       <div className="flex-1 overflow-y-auto">
         {snap.layers.length === 0 && (
-          <p className="px-3 py-4 text-xs text-muted">
-            No layers yet. Open an image or generate one.
-          </p>
+          <EmptyState
+            icon={Layers}
+            title="No layers yet"
+            hint="Open an image, paste one, or generate with AI to get started."
+          />
         )}
         {visible.map((l) => (
           <LayerRow

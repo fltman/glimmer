@@ -5,14 +5,16 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Dark pro-editor palette.
-        panel: "#1a1b1e",
-        panelraised: "#222327",
-        edge: "#2c2e33",
-        ink: "#e6e7ea",
-        muted: "#9a9da4",
-        accent: "#5b8cff",
-        accenthover: "#6f9bff",
+        // Dark pro-editor palette — cool, faintly violet-tinted surfaces for a
+        // premium feel; an indigo accent that pairs with the fuchsia brand gradient.
+        bg: "#0c0d11",
+        panel: "#16171c",
+        panelraised: "#1f2027",
+        edge: "#2c2e37",
+        ink: "#e8e9ef",
+        muted: "#969aa7",
+        accent: "#6d7dff",
+        accenthover: "#828ffd",
       },
       fontFamily: {
         sans: [

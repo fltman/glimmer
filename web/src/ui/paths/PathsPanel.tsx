@@ -20,7 +20,9 @@
  * never affects selection/fill/stroke targeting.
  */
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { PenTool } from "lucide-react";
 import { engine, actions, useColors } from "../../state/useEngine";
+import { EmptyState } from "../EmptyState";
 import type { PathDescription } from "../../engine/Paths";
 import { rgbCss } from "../color/colorMath";
 
@@ -243,10 +245,11 @@ export function PathsPanel() {
         })}
 
         {paths.length === 0 && (
-          <p className="px-3 py-4 text-xs leading-relaxed text-muted">
-            No paths yet. Use the Pen tool (click to add anchors, drag for curves,
-            click the first anchor to close). Committed paths appear here.
-          </p>
+          <EmptyState
+            icon={PenTool}
+            title="No paths yet"
+            hint="Draw with the Pen tool — click for anchors, drag for curves, click the first anchor to close."
+          />
         )}
       </div>
 
