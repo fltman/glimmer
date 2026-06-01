@@ -25,8 +25,12 @@ import {
   useWorkspace,
   workspaceStore,
   type SidebarTab,
+  type FloatPanel,
 } from "./state/workspace";
 import { CommandPalette } from "./ui/command/CommandPalette";
+import { Omnibar } from "./ui/command/Omnibar";
+import { OmniChrome } from "./ui/OmniChrome";
+import { FloatingPanel } from "./ui/FloatingPanel";
 
 /**
  * Single-key tool shortcuts (no modifier; ignored while typing). These map a
@@ -240,27 +244,55 @@ export default function App() {
     if (activeAdjId && !isAgentBatching()) setTab("adjust");
   }, [activeAdjId]);
 
+  const omni = ws.mode === "omni";
+
   return (
     <div className="flex h-full flex-col">
-      {!ws.chromeHidden && <Toolbar />}
-      {!ws.chromeHidden && <ToolOptions />}
+      {/* Classic docked chrome (hidden in omni mode + focus mode). */}
+      {!omni && !ws.chromeHidden && <Toolbar />}
+      {!omni && !ws.chromeHidden && <ToolOptions />}
       <div className="flex min-h-0 flex-1">
-        {!ws.chromeHidden && ws.leftRail && <ToolRail />}
-        {/* Center column (ALWAYS mounted — never remount <CanvasHost/> / the GL
-            context). The document tab strip sits ABOVE the canvas, OUTSIDE
-            <main> so it never shifts the canvas origin the type overlay uses. */}
+        {!omni && !ws.chromeHidden && ws.leftRail && <ToolRail />}
+        {/* Center column (ALWAYS mounted, IDENTICAL across modes — never remount
+            <CanvasHost/> / the GL context). */}
         <div className="flex min-w-0 flex-1 flex-col">
-          {!ws.chromeHidden && <DocumentTabs />}
+          {!omni && !ws.chromeHidden && <DocumentTabs />}
           <main className="relative min-h-0 min-w-0 flex-1">
             <CanvasHost />
             <TextEditOverlay />
             {/* Floating Liquify controls; render only while warping. */}
             <LiquifyPanel />
-            {/* Canvas-first launcher: ⌘K everywhere + a way back from focus mode. */}
-            <FloatingControls chromeHidden={ws.chromeHidden} leftRail={ws.leftRail} />
+
+            {/* ── OMNI MODE: full-screen canvas + omnibar; everything summoned ── */}
+            {omni && <OmniChrome />}
+            {omni && <Omnibar />}
+            {omni && ws.toolsOpen && (
+              <>
+                <div className="pointer-events-auto absolute bottom-2 left-2 top-2 z-30 flex overflow-hidden rounded-xl border border-edge bg-panel/95 shadow-2xl backdrop-blur">
+                  <ToolRail />
+                </div>
+                <div className="pointer-events-auto absolute left-1/2 top-2 z-20 max-w-[64vw] -translate-x-1/2 overflow-x-auto rounded-xl border border-edge bg-panel/95 shadow-2xl backdrop-blur">
+                  <ToolOptions />
+                </div>
+              </>
+            )}
+            {omni && ws.floatingPanel && (
+              <FloatingPanel
+                title={PANEL_TITLE[ws.floatingPanel]}
+                onClose={() => workspaceStore.closeFloatingPanel()}
+              >
+                {renderPanel(ws.floatingPanel)}
+              </FloatingPanel>
+            )}
+
+            {/* Classic focus-mode launcher (⌘K + way back from Tab). */}
+            {!omni && (
+              <FloatingControls chromeHidden={ws.chromeHidden} leftRail={ws.leftRail} />
+            )}
           </main>
         </div>
-        {!ws.chromeHidden &&
+        {!omni &&
+          !ws.chromeHidden &&
           (ws.rightDockOpen ? (
             <aside className="flex w-80 flex-col border-l border-edge bg-panel">
               <div className="flex shrink-0 items-stretch border-b border-edge">
@@ -318,6 +350,37 @@ export default function App() {
       <CommandPalette />
     </div>
   );
+}
+
+/** Titles for the floating (summoned) panels in omni mode. */
+const PANEL_TITLE: Record<FloatPanel, string> = {
+  ai: "Assistant & AI",
+  adjust: "Adjustments",
+  history: "History",
+  paths: "Paths",
+  swatches: "Swatches",
+  channels: "Channels",
+  layers: "Layers",
+};
+
+/** Render the panel a floating card hosts in omni mode. */
+function renderPanel(panel: FloatPanel) {
+  switch (panel) {
+    case "ai":
+      return <AIPanel />;
+    case "adjust":
+      return <AdjustmentsPanel />;
+    case "history":
+      return <HistoryPanel />;
+    case "paths":
+      return <PathsPanel />;
+    case "swatches":
+      return <SwatchesPanel />;
+    case "channels":
+      return <ChannelsPanel />;
+    case "layers":
+      return <LayersPanel />;
+  }
 }
 
 /** Panels reachable from the collapsed dock strip + their glyphs. */

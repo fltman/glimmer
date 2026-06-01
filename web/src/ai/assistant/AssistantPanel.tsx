@@ -29,6 +29,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentContext, AgentStep } from "@aips/shared-types";
 import { useEngineSnapshot, useHasSelection, setAgentBatching } from "../../state/useEngine";
+import { useWorkspace, workspaceStore } from "../../state/workspace";
 import {
   requestPlan,
   AgentRequestError,
@@ -362,8 +363,23 @@ export function AssistantPanel() {
   }
 
   // ── submit ──
-  async function onSend() {
-    const text = input.trim();
+  function onSend() {
+    void submit(input);
+  }
+
+  // Consume a message handed over by the omnibar (askAssistant) and run it.
+  const pendingMsg = useWorkspace().pendingAssistantMessage;
+  useEffect(() => {
+    if (!pendingMsg || busy) return;
+    const m = workspaceStore.consumeAssistantMessage();
+    if (m) void submit(m);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingMsg]);
+
+  // Run an instruction (from the composer OR the omnibar → askAssistant). Routes
+  // to conversational edit / prompt-to-layer / auto-edit by the same heuristics.
+  async function submit(raw: string) {
+    const text = raw.trim();
     if (!text || busy) return;
     setInput("");
     push({ role: "user", text });

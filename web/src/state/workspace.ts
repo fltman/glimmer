@@ -40,7 +40,25 @@ export type AiTab =
   | "upscale"
   | "presets";
 
+/** A panel that can be summoned as a floating card in omni mode. */
+export type FloatPanel = SidebarTab | "layers";
+
 export interface WorkspaceState {
+  /**
+   * The default, AI-first "omni" workspace (a full-screen canvas + one fused
+   * command/AI omnibar; panels & tools summoned on demand) vs. the classic
+   * docked Photoshop chrome (toolbar + rail + panel dock) for power users.
+   */
+  mode: "omni" | "classic";
+  /** Omni mode: which panel is floating over the canvas (null = none). */
+  floatingPanel: FloatPanel | null;
+  /** Omni mode: the floating tool rail is shown. */
+  toolsOpen: boolean;
+  /**
+   * A message to hand to the AI Assistant (set by the omnibar when you type a
+   * free-form instruction). The AssistantPanel consumes + runs it.
+   */
+  pendingAssistantMessage: string | null;
   /** Left tool rail visible. */
   leftRail: boolean;
   /** Right dock expanded (full panel) vs collapsed (thin icon strip). */
@@ -68,6 +86,10 @@ type Listener = () => void;
 
 class WorkspaceStore {
   private state: WorkspaceState = {
+    mode: "omni",
+    floatingPanel: null,
+    toolsOpen: false,
+    pendingAssistantMessage: null,
     leftRail: true,
     rightDockOpen: true,
     rightTab: "ai",
@@ -91,9 +113,49 @@ class WorkspaceStore {
     for (const cb of this.listeners) cb();
   }
 
+  // ── omni mode ──
+  setMode(mode: "omni" | "classic"): void {
+    this.set({ mode, floatingPanel: null, paletteOpen: false });
+  }
+  toggleMode(): void {
+    this.setMode(this.state.mode === "omni" ? "classic" : "omni");
+  }
+  openFloatingPanel(panel: FloatPanel): void {
+    this.set({ floatingPanel: panel, paletteOpen: false });
+  }
+  closeFloatingPanel(): void {
+    if (this.state.floatingPanel !== null) this.set({ floatingPanel: null });
+  }
+  toggleTools(): void {
+    this.set({ toolsOpen: !this.state.toolsOpen });
+  }
+  setToolsOpen(open: boolean): void {
+    this.set({ toolsOpen: open });
+  }
+  /** Hand a free-form instruction to the AI Assistant (omnibar → assistant). */
+  askAssistant(message: string): void {
+    this.set({
+      pendingAssistantMessage: message,
+      floatingPanel: "ai",
+      aiTab: "assistant",
+      rightTab: "ai",
+      rightDockOpen: true,
+      paletteOpen: false,
+    });
+  }
+  consumeAssistantMessage(): string | null {
+    const m = this.state.pendingAssistantMessage;
+    if (m !== null) this.set({ pendingAssistantMessage: null });
+    return m;
+  }
+
   // ── dock / rail / chrome ──
   setRightTab(tab: SidebarTab): void {
-    this.set({ rightTab: tab, rightDockOpen: true, chromeHidden: false });
+    if (this.state.mode === "omni") {
+      this.set({ rightTab: tab, floatingPanel: tab, paletteOpen: false });
+    } else {
+      this.set({ rightTab: tab, rightDockOpen: true, chromeHidden: false });
+    }
   }
   toggleRightDock(): void {
     this.set({ rightDockOpen: !this.state.rightDockOpen });
@@ -129,13 +191,17 @@ class WorkspaceStore {
 
   // ── routing for ⌘K deep-links ──
   openAi(aiTab: AiTab): void {
-    this.set({
-      aiTab,
-      rightTab: "ai",
-      rightDockOpen: true,
-      chromeHidden: false,
-      paletteOpen: false,
-    });
+    if (this.state.mode === "omni") {
+      this.set({ aiTab, rightTab: "ai", floatingPanel: "ai", paletteOpen: false });
+    } else {
+      this.set({
+        aiTab,
+        rightTab: "ai",
+        rightDockOpen: true,
+        chromeHidden: false,
+        paletteOpen: false,
+      });
+    }
   }
   setAiTab(aiTab: AiTab): void {
     this.set({ aiTab });

@@ -76,7 +76,10 @@ export function buildCommands(ctx: CommandCtx): Command[] {
       group: "Tools",
       hint: t.key,
       keywords: `tool ${t.id}`,
-      run: () => selectTool(t.id),
+      run: () => {
+        selectTool(t.id);
+        workspaceStore.setToolsOpen(true); // reveal the tool rail/options (omni)
+      },
     });
   }
 
@@ -189,6 +192,13 @@ export function buildCommands(ctx: CommandCtx): Command[] {
       hint: "Tab",
       keywords: "focus zen full screen hide chrome panels tab",
       run: () => workspaceStore.toggleChrome(),
+    },
+    {
+      id: "view:mode",
+      title: "Toggle omnibar / classic layout",
+      group: "View",
+      keywords: "omni classic docked layout workspace switch mode",
+      run: () => workspaceStore.toggleMode(),
     },
   );
 
