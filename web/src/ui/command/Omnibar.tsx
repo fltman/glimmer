@@ -26,7 +26,14 @@ type Row =
   | { kind: "ai"; text: string }
   | { kind: "cmd"; cmd: Command };
 
-const SUGGESTIONS = ["make it warmer", "add curves", "relight", "remove background", "vintage look"];
+// Empty canvas → things to GENERATE; with an image → things to do TO it.
+const GENERATE_SUGGESTIONS = [
+  "a sunset over mountains",
+  "a cute robot mascot",
+  "a watercolor forest cabin",
+  "a neon city street at night",
+];
+const EDIT_SUGGESTIONS = ["make it warmer", "add curves", "relight", "remove background", "vintage look"];
 
 async function exportPngDownload() {
   const blob = await exportPng(engine);
@@ -95,6 +102,17 @@ export function Omnibar() {
   }, [commands, query]);
 
   useEffect(() => setSel(defaultSel), [defaultSel, query]);
+
+  // On a blank canvas, focus the bar on mount so the workspace is instantly
+  // ready to type (generate/command). With content present we don't steal focus
+  // (single-key tool shortcuts keep working until the user clicks the bar).
+  useEffect(() => {
+    if (snap.layers.length === 0) {
+      const id = requestAnimationFrame(() => inputRef.current?.focus());
+      return () => cancelAnimationFrame(id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const run = (row: Row | undefined) => {
     if (!row) return;
@@ -209,26 +227,34 @@ export function Omnibar() {
         {showSuggest && (
           <div className="animate-fadein mb-2 flex flex-wrap items-center gap-1.5 rounded-xl border border-edge bg-panelraised/90 px-3 py-2 text-xs shadow-2xl backdrop-blur">
             <span className="text-muted">Try</span>
-            {SUGGESTIONS.map((s) => (
-              <button
-                key={s}
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  workspaceStore.askAssistant(s);
-                  setFocused(false);
-                }}
-                className="rounded-full border border-edge px-2.5 py-0.5 text-ink hover:bg-edge"
-              >
-                {s}
-              </button>
-            ))}
+            {(snap.layers.length === 0 ? GENERATE_SUGGESTIONS : EDIT_SUGGESTIONS).map(
+              (s) => {
+                const empty = snap.layers.length === 0;
+                return (
+                  <button
+                    key={s}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      // On a blank canvas, generate; otherwise edit the image.
+                      workspaceStore.askAssistant(empty ? `generate ${s}` : s);
+                      setFocused(false);
+                    }}
+                    className="rounded-full border border-edge px-2.5 py-0.5 text-ink transition-colors hover:bg-edge"
+                  >
+                    {s}
+                  </button>
+                );
+              },
+            )}
           </div>
         )}
 
         {/* The bar itself. */}
         <div
-          className={`flex items-center gap-2.5 rounded-2xl border bg-panelraised/95 px-4 py-3 shadow-2xl backdrop-blur transition-colors ${
-            focused ? "border-accent/70" : "border-edge"
+          className={`flex items-center gap-2.5 rounded-2xl border bg-panelraised/95 px-4 py-3 shadow-2xl backdrop-blur transition-all duration-150 ${
+            focused
+              ? "border-accent/70 ring-4 ring-accent/15"
+              : "border-edge hover:border-edge/80"
           }`}
         >
           <span className="text-lg text-accent">✦</span>

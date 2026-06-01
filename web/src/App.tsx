@@ -4,7 +4,7 @@
  *   left tool rail  |  center canvas  |  right panels
  * The canvas host is mounted once and lives between the rails and the panels.
  */
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Toolbar } from "./ui/Toolbar";
 import { ToolRail } from "./ui/ToolRail";
 import { ToolOptions, ToolOptionsBody, toolHasOptions } from "./ui/ToolOptions";
@@ -223,10 +223,48 @@ function useWorkspaceShortcuts() {
   }, []);
 }
 
+/**
+ * Open an image file the most intuitive way: if the current document is empty,
+ * the dropped/pasted/opened image BECOMES the document (sized to it, and the
+ * leftover blank tab is dropped); otherwise it's placed as a new layer in the
+ * current document.
+ */
+async function openImageFile(file: Blob): Promise<void> {
+  if (!file.type.startsWith("image/")) return;
+  const prevId = engine.getActiveDocumentId();
+  const empty = engine.getSnapshot().layers.length === 0;
+  if (empty) {
+    const newId = await actions.openImageAsDocument(file);
+    if (prevId && prevId !== newId) actions.closeDocument(prevId);
+  } else {
+    await engine.loadImageLayer(file);
+  }
+}
+
 export default function App() {
   useToolShortcuts();
   useEditorShortcuts();
   useWorkspaceShortcuts();
+
+  // Paste an image from the clipboard (⌘V) anywhere → open it.
+  useEffect(() => {
+    function onPaste(e: ClipboardEvent) {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (const it of items) {
+        if (it.kind === "file" && it.type.startsWith("image/")) {
+          const f = it.getAsFile();
+          if (f) {
+            e.preventDefault();
+            void openImageFile(f);
+            return;
+          }
+        }
+      }
+    }
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, []);
   const ws = useWorkspace();
   const tab = ws.rightTab;
   const setTab = (t: SidebarTab) => workspaceStore.setRightTab(t);
@@ -246,6 +284,9 @@ export default function App() {
 
   const omni = ws.mode === "omni";
   const activeTool = useToolState().active;
+  const [dragOver, setDragOver] = useState(false);
+  const openFileRef = useRef<HTMLInputElement | null>(null);
+  const isEmpty = snap.layers.length === 0;
 
   return (
     <div className="flex h-full flex-col">
@@ -258,11 +299,56 @@ export default function App() {
             <CanvasHost/> / the GL context). */}
         <div className="flex min-w-0 flex-1 flex-col">
           {!omni && !ws.chromeHidden && <DocumentTabs />}
-          <main className="relative min-h-0 min-w-0 flex-1">
+          <main
+            className="relative min-h-0 min-w-0 flex-1"
+            onDragOver={(e) => {
+              if (e.dataTransfer?.types.includes("Files")) {
+                e.preventDefault();
+                if (!dragOver) setDragOver(true);
+              }
+            }}
+            onDragLeave={(e) => {
+              // Only clear when the pointer actually leaves the <main> bounds.
+              if (e.currentTarget === e.target) setDragOver(false);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              const f = e.dataTransfer?.files?.[0];
+              if (f) void openImageFile(f);
+            }}
+          >
             <CanvasHost />
             <TextEditOverlay />
             {/* Floating Liquify controls; render only while warping. */}
             <LiquifyPanel />
+
+            {/* Hidden file input backing the "Open image" affordances. */}
+            <input
+              ref={openFileRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) void openImageFile(f);
+                e.target.value = "";
+              }}
+            />
+
+            {/* Drag-to-open overlay. */}
+            {dragOver && (
+              <div className="animate-fadein pointer-events-none absolute inset-3 z-50 flex items-center justify-center rounded-2xl border-2 border-dashed border-accent/70 bg-accent/10 backdrop-blur-sm">
+                <span className="rounded-lg border border-edge bg-panel/90 px-4 py-2 text-sm font-medium text-ink shadow-xl">
+                  Drop image to open
+                </span>
+              </div>
+            )}
+
+            {/* First-run guidance on an empty canvas (omni mode). */}
+            {omni && isEmpty && (
+              <EmptyCanvasHero onOpen={() => openFileRef.current?.click()} />
+            )}
 
             {/* ── OMNI MODE: full-screen canvas + omnibar; everything summoned ── */}
             {omni && <OmniChrome />}
@@ -393,6 +479,41 @@ function renderPanel(panel: FloatPanel) {
     case "layers":
       return <LayersPanel />;
   }
+}
+
+/** First-run invitation shown over an empty canvas in omni mode. */
+function EmptyCanvasHero({ onOpen }: { onOpen: () => void }) {
+  return (
+    <div className="animate-fadein pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-6 pb-24">
+      {/* Subtle glass card so the copy reads cleanly over the checkerboard. */}
+      <div className="flex max-w-md flex-col items-center gap-5 rounded-2xl border border-edge/70 bg-panel/70 px-10 py-9 text-center shadow-2xl backdrop-blur-md">
+        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-fuchsia-500 text-2xl text-white shadow-lg">
+          ✦
+        </div>
+        <div className="space-y-2">
+          <h1 className="text-xl font-semibold text-ink">Start with an image</h1>
+          <p className="text-sm leading-relaxed text-muted">
+            Drop a file anywhere, paste from your clipboard, or open one — or just
+            describe an image in the bar below and AI generates it.
+          </p>
+        </div>
+        <div className="pointer-events-auto flex items-center gap-2.5">
+          <button
+            onClick={onOpen}
+            className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white shadow-lg transition-colors hover:bg-accenthover"
+          >
+            Open image
+          </button>
+          <button
+            onClick={() => workspaceStore.openPalette()}
+            className="rounded-lg border border-edge bg-panelraised px-4 py-2 text-sm text-muted transition-colors hover:bg-edge hover:text-ink"
+          >
+            ⌘K commands
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /** Panels reachable from the collapsed dock strip + their glyphs. */
