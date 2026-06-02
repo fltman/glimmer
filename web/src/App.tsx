@@ -28,6 +28,7 @@ import { TextEditOverlay } from "./ui/text/TextEditOverlay";
 import { LiquifyPanel } from "./ui/liquify";
 import { LensBlurPanel } from "./ui/lensblur";
 import { ContentAwareFillModal } from "./ai/contentAware";
+import { ExportDialog } from "./ui/file/ExportDialog";
 import { LayersPanel } from "./ui/LayersPanel";
 import { AIPanel } from "./ai/AIPanel";
 import { AdjustmentsPanel } from "./ui/adjustments/AdjustmentsPanel";
@@ -345,6 +346,13 @@ export default function App() {
             {ws.contentAwareFillOpen && (
               <ContentAwareFillModal
                 onClose={() => workspaceStore.closeContentAwareFill()}
+              />
+            )}
+            {ws.exportDialogOpen && (
+              <ExportDialog
+                width={snap.width}
+                height={snap.height}
+                onClose={() => workspaceStore.closeExportDialog()}
               />
             )}
 

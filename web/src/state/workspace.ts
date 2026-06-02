@@ -81,6 +81,8 @@ export interface WorkspaceState {
   /** Content-Aware Fill modal open — lets ⌘K reach it in the omni workspace
    *  (it otherwise only lives in the classic toolbar's Edit menu). */
   contentAwareFillOpen: boolean;
+  /** Export-As dialog open (format / quality / matte) — classic File menu only. */
+  exportDialogOpen: boolean;
   /** True when the viewport is narrow enough to default to a collapsed dock. */
   compact: boolean;
 }
@@ -102,6 +104,7 @@ class WorkspaceStore {
     pendingFilter: null,
     pendingAdjustment: null,
     contentAwareFillOpen: false,
+    exportDialogOpen: false,
     compact: false,
   };
   private listeners = new Set<Listener>();
@@ -228,6 +231,12 @@ class WorkspaceStore {
   }
   closeContentAwareFill(): void {
     if (this.state.contentAwareFillOpen) this.set({ contentAwareFillOpen: false });
+  }
+  openExportDialog(): void {
+    this.set({ exportDialogOpen: true, paletteOpen: false });
+  }
+  closeExportDialog(): void {
+    if (this.state.exportDialogOpen) this.set({ exportDialogOpen: false });
   }
   clearPendingAdjustment(): void {
     if (this.state.pendingAdjustment !== null)

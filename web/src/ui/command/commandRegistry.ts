@@ -65,6 +65,28 @@ const PANELS: { id: SidebarTab; label: string }[] = [
   { id: "channels", label: "Channels" },
 ];
 
+/** Open a native file picker and hand the chosen file to `onPick`. Lets the
+ *  palette reach the toolbar's Open/Place/Open-Project actions (which otherwise
+ *  rely on hidden <input>s in the classic toolbar) without any App wiring. The
+ *  picker still opens because the palette's run happens within the gesture's
+ *  transient-activation window. */
+function pickFile(accept: string, onPick: (file: File) => void): void {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = accept;
+  input.style.display = "none";
+  input.addEventListener("change", () => {
+    const f = input.files?.[0];
+    if (f) onPick(f);
+    input.remove();
+  });
+  document.body.appendChild(input);
+  input.click();
+}
+
+/** Strip a file extension for use as a layer/document title. */
+const baseName = (name: string): string => name.replace(/\.[^.]+$/, "");
+
 export function buildCommands(ctx: CommandCtx): Command[] {
   const cmds: Command[] = [];
 
@@ -179,6 +201,20 @@ export function buildCommands(ctx: CommandCtx): Command[] {
       group: "View",
       keywords: "zoom reset 100",
       run: () => actions.resetView(),
+    },
+    {
+      id: "view:rotate-cw",
+      title: "Rotate view 15° clockwise",
+      group: "View",
+      keywords: "rotate canvas view turn cw",
+      run: () => actions.rotateView(15),
+    },
+    {
+      id: "view:rotate-ccw",
+      title: "Rotate view 15° counter-clockwise",
+      group: "View",
+      keywords: "rotate canvas view turn ccw",
+      run: () => actions.rotateView(-15),
     },
     {
       id: "view:rulers",
@@ -319,6 +355,34 @@ export function buildCommands(ctx: CommandCtx): Command[] {
     },
   );
 
+  // ── Select (refinements; classic Select menu only otherwise) ──
+  cmds.push(
+    {
+      id: "select:feather",
+      title: "Feather selection (2 px)",
+      group: "Select",
+      keywords: "feather soften selection edge blur",
+      enabled: ctx.hasLayers,
+      run: () => actions.featherSelection(2),
+    },
+    {
+      id: "select:expand",
+      title: "Grow selection (4 px)",
+      group: "Select",
+      keywords: "expand grow dilate selection",
+      enabled: ctx.hasLayers,
+      run: () => actions.expandSelection(4),
+    },
+    {
+      id: "select:contract",
+      title: "Shrink selection (4 px)",
+      group: "Select",
+      keywords: "contract shrink erode selection",
+      enabled: ctx.hasLayers,
+      run: () => actions.contractSelection(4),
+    },
+  );
+
   // ── File ──
   cmds.push(
     {
@@ -327,6 +391,33 @@ export function buildCommands(ctx: CommandCtx): Command[] {
       group: "File",
       keywords: "create blank",
       run: () => actions.newDocument({ width: 1024, height: 1024, title: "Untitled" }),
+    },
+    {
+      id: "file:open-image",
+      title: "Open image…",
+      group: "File",
+      keywords: "open import photo picture new document",
+      run: () =>
+        pickFile("image/*", (f) => void actions.openImageAsDocument(f, baseName(f.name))),
+    },
+    {
+      id: "file:place-image",
+      title: "Place image as layer…",
+      group: "File",
+      keywords: "place import add layer photo",
+      enabled: ctx.hasLayers,
+      run: () =>
+        pickFile("image/*", (f) => void actions.placeImageLayer(f, baseName(f.name))),
+    },
+    {
+      id: "file:open-project",
+      title: "Open project (.aips)…",
+      group: "File",
+      keywords: "open load project aips",
+      run: () =>
+        pickFile(".aips,application/json", (f) =>
+          void actions.openAipsAsDocument(f, baseName(f.name)),
+        ),
     },
     {
       id: "file:save",
@@ -343,6 +434,14 @@ export function buildCommands(ctx: CommandCtx): Command[] {
       enabled: ctx.hasLayers,
       keywords: "download save png",
       run: () => ctx.onExport(),
+    },
+    {
+      id: "file:export-as",
+      title: "Export as… (format / quality)",
+      group: "File",
+      enabled: ctx.hasLayers,
+      keywords: "export jpeg webp quality matte download save",
+      run: () => workspaceStore.openExportDialog(),
     },
   );
 

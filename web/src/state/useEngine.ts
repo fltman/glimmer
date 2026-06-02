@@ -476,6 +476,10 @@ export const actions = {
   openImageAsDocument(src: Blob | ImageBitmap | ImageData, title?: string) {
     return engine.openImageAsDocument(src, title);
   },
+  /** Place an image (Blob/ImageBitmap/ImageData) as a new layer in the doc. */
+  placeImageLayer(src: Blob | ImageBitmap | ImageData, name?: string) {
+    return engine.loadImageLayer(src, name);
+  },
   /** Open an .aips project File/Blob/JSON as a NEW document. */
   openAipsAsDocument(input: Blob | File | string, title?: string) {
     return engine.openAipsAsDocument(input, title);
