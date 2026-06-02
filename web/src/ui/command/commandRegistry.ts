@@ -121,6 +121,24 @@ export function buildCommands(ctx: CommandCtx): Command[] {
     enabled: ctx.hasLayers,
     run: () => void actions.beginLiquify(),
   });
+  // Lens Blur (depth-aware bokeh) — also classic-toolbar-only otherwise.
+  cmds.push({
+    id: "filt:lens-blur",
+    title: "Lens Blur…",
+    group: "Filters",
+    keywords: "lens blur bokeh depth focus background",
+    enabled: ctx.hasLayers,
+    run: () => void actions.beginLensBlur(),
+  });
+  // Content-Aware Fill — removes the selection + reconstructs the background.
+  cmds.push({
+    id: "edit:content-aware-fill",
+    title: "Content-Aware Fill…",
+    group: "Filters",
+    keywords: "content aware fill remove inpaint heal patch",
+    enabled: ctx.hasLayers,
+    run: () => workspaceStore.openContentAwareFill(),
+  });
 
   // ── AI tools (deep-link the AI dock) ──
   for (const a of AI_TABS) {

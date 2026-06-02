@@ -26,6 +26,8 @@ import { CanvasHost } from "./ui/CanvasHost";
 import { DocumentTabs } from "./ui/DocumentTabs";
 import { TextEditOverlay } from "./ui/text/TextEditOverlay";
 import { LiquifyPanel } from "./ui/liquify";
+import { LensBlurPanel } from "./ui/lensblur";
+import { ContentAwareFillModal } from "./ai/contentAware";
 import { LayersPanel } from "./ui/LayersPanel";
 import { AIPanel } from "./ai/AIPanel";
 import { AdjustmentsPanel } from "./ui/adjustments/AdjustmentsPanel";
@@ -334,8 +336,17 @@ export default function App() {
           >
             <CanvasHost />
             <TextEditOverlay />
-            {/* Floating Liquify controls; render only while warping. */}
+            {/* Floating modal-session controls; each self-gates on its engine
+                session, so they're safe to always mount. Mounting here (not just
+                in the classic toolbar) makes Liquify / Lens Blur reachable in the
+                omni workspace via ⌘K. */}
             <LiquifyPanel />
+            <LensBlurPanel />
+            {ws.contentAwareFillOpen && (
+              <ContentAwareFillModal
+                onClose={() => workspaceStore.closeContentAwareFill()}
+              />
+            )}
 
             {/* Hidden file input backing the "Open image" affordances. */}
             <input

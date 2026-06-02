@@ -78,6 +78,9 @@ export interface WorkspaceState {
   pendingFilter: FilterType | null;
   /** Adjustment to add (one-shot, same pattern) — lets ⌘K add an adjustment. */
   pendingAdjustment: AdjustmentType | null;
+  /** Content-Aware Fill modal open — lets ⌘K reach it in the omni workspace
+   *  (it otherwise only lives in the classic toolbar's Edit menu). */
+  contentAwareFillOpen: boolean;
   /** True when the viewport is narrow enough to default to a collapsed dock. */
   compact: boolean;
 }
@@ -98,6 +101,7 @@ class WorkspaceStore {
     paletteOpen: false,
     pendingFilter: null,
     pendingAdjustment: null,
+    contentAwareFillOpen: false,
     compact: false,
   };
   private listeners = new Set<Listener>();
@@ -218,6 +222,12 @@ class WorkspaceStore {
       rightTab: "adjust",
       paletteOpen: false,
     });
+  }
+  openContentAwareFill(): void {
+    this.set({ contentAwareFillOpen: true, paletteOpen: false });
+  }
+  closeContentAwareFill(): void {
+    if (this.state.contentAwareFillOpen) this.set({ contentAwareFillOpen: false });
   }
   clearPendingAdjustment(): void {
     if (this.state.pendingAdjustment !== null)
