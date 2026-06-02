@@ -1,9 +1,9 @@
 /**
- * Brand lockup — a gradient "spark" mark + the ai·ps wordmark. One component so
- * the mark stays identical everywhere it appears (toolbar, doc pill, dialogs).
+ * Brand lockup — the Glimmer mark + wordmark. One component so the mark stays
+ * identical everywhere it appears (toolbar, doc pill, dialogs). The mark is the
+ * app's generated emblem (web/public/glimmer-icon.png); the wordmark stays as
+ * crisp text so it reads at toolbar size.
  */
-import { Sparkles } from "lucide-react";
-
 export function Logo({
   size = "md",
   showWordmark = true,
@@ -14,13 +14,14 @@ export function Logo({
   const sm = size === "sm";
   return (
     <span className="flex select-none items-center gap-2">
-      <span
-        className={`flex items-center justify-center bg-gradient-to-br from-accent to-fuchsia-500 text-white shadow-sm ring-1 ring-white/10 ${
-          sm ? "h-4 w-4 rounded" : "h-5 w-5 rounded-md"
+      <img
+        src="/glimmer-icon.png"
+        alt="Glimmer"
+        draggable={false}
+        className={`object-cover shadow-sm ring-1 ring-white/10 ${
+          sm ? "h-5 w-5 rounded" : "h-6 w-6 rounded-md"
         }`}
-      >
-        <Sparkles size={sm ? 10 : 12} strokeWidth={2.25} />
-      </span>
+      />
       {showWordmark && (
         <span
           className={`font-semibold tracking-tight text-ink ${sm ? "text-[13px]" : "text-sm"}`}
