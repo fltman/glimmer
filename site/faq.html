@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Glimmer — FAQ</title>
+    <meta name="description" content="Frequently asked questions about Glimmer: pricing, privacy, AI models, self-hosting, browser support and how it compares to a traditional editor." />
+    <meta name="theme-color" content="#0c0d11" />
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png" />
+    <link rel="apple-touch-icon" href="assets/apple-touch-icon.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="assets/styles.css" />
+  </head>
+  <body>
+    <header class="nav">
+      <div class="wrap nav-inner">
+        <a class="brand" href="index.html"><img src="assets/glimmer-icon.png" alt="" /><span>Glimmer</span></a>
+        <button class="nav-toggle" aria-label="Menu">☰</button>
+        <nav class="nav-links">
+          <a href="index.html#features">Features</a>
+          <a href="index.html#ai">AI suite</a>
+          <a href="docs.html">Docs</a>
+          <a href="faq.html" class="active">FAQ</a>
+          <a class="btn btn-ghost" href="https://github.com/fltman/glimmer" target="_blank" rel="noopener">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <section class="section">
+      <div class="wrap">
+        <div class="center" style="margin-bottom:40px">
+          <span class="eyebrow">FAQ</span>
+          <h1 style="font-size:clamp(2rem,4vw,2.8rem)">Frequently asked questions</h1>
+          <p class="lead">Short answers. For the full guide, see the <a href="docs.html">docs</a>.</p>
+        </div>
+
+        <div class="faq">
+          <details open>
+            <summary>What is Glimmer?</summary>
+            <div class="a"><p>Glimmer is an AI-first image editor that runs in your browser. It’s a genuine layer-based editor built on a custom WebGL2 engine — brushes, masks, adjustment layers, the works — with a generative AI suite (generate, edit, cutout, outpaint, relight and more) and a chat assistant woven directly into the canvas.</p></div>
+          </details>
+
+          <details>
+            <summary>Is it free? Is it open source?</summary>
+            <div class="a"><p>The source is public on <a href="https://github.com/fltman/glimmer" target="_blank" rel="noopener">GitHub</a> and built to be self-hosted. You run your own stack and bring your own AI provider key, so your only cost is the provider usage you choose to spend.</p></div>
+          </details>
+
+          <details>
+            <summary>Do I need an API key, and what does it cost?</summary>
+            <div class="a"><p>The AI features call models through <b>OpenRouter</b>, so you provide an OpenRouter key in your server’s <code>.env</code>. You’re billed by OpenRouter for what you use; Glimmer keeps a per-job credit ledger so you can see and cap spend. The non-AI editor — layers, brushes, adjustments, crop, export — needs no key at all.</p></div>
+          </details>
+
+          <details>
+            <summary>Which AI models does it use?</summary>
+            <div class="a"><p>By default, Google’s Gemini image model via OpenRouter for generation &amp; editing, and a text model for the assistant’s planning. Background cutout and “magic select” run in your browser with on-device ML when possible (with a server fallback). Models are configured by environment variable, so you can swap them.</p></div>
+          </details>
+
+          <details>
+            <summary>Where do my images go? Is it private?</summary>
+            <div class="a"><p>You host everything. The editing engine runs entirely in your browser. AI actions upload only the needed region to <em>your</em> storage (MinIO) and call the provider from <em>your</em> server — provider keys never reach the browser. Local-only operations (cutout, magic-select) don’t leave your machine.</p></div>
+          </details>
+
+          <details>
+            <summary>Can I use it as a normal editor, without AI?</summary>
+            <div class="a"><p>Absolutely. Open or paste an image and use the full toolset — selections, layers &amp; masks, brushes, clone/heal, dodge/burn, adjustment layers, filters, crop, transform, type, shapes — none of it requires an AI key.</p></div>
+          </details>
+
+          <details>
+            <summary>Is this a real editor or just a wrapper around a model?</summary>
+            <div class="a"><p>A real editor. The core is a hand-written WebGL2 compositor with linear-light blending, tiled documents, the full blend-mode set, GPU brushes, layer masks and smart filters. AI is a first-class <em>tool</em> alongside everything else — each AI result is a non-destructive layer you can mask, blend and undo.</p></div>
+          </details>
+
+          <details>
+            <summary>What’s the difference between the “omni” and “classic” layouts?</summary>
+            <div class="a"><p><b>Omni</b> (the default) is canvas-first: a full-screen canvas with one omnibar and minimal floating chrome, ideal for laptops. <b>Classic</b> is the familiar docked layout with a menu bar and side panels. They share the same document — switch any time. Everything in the classic menus is also reachable via the ⌘K palette.</p></div>
+          </details>
+
+          <details>
+            <summary>What browsers does it support?</summary>
+            <div class="a"><p>A modern desktop browser with WebGL2 — current Chrome, Edge, Firefox or Safari. The on-device AI (cutout / magic-select) prefers WebGPU and falls back to WebAssembly. Glimmer is designed for a desktop/laptop workflow.</p></div>
+          </details>
+
+          <details>
+            <summary>Does it work on mobile or tablet?</summary>
+            <div class="a"><p>It runs, but Glimmer is built for a pointer + keyboard workflow on a larger screen. Phones aren’t a target right now.</p></div>
+          </details>
+
+          <details>
+            <summary>How do exports and project files work?</summary>
+            <div class="a"><p>Flatten and download as PNG, JPEG or WebP (with a quality choice via “Export as…”). To keep your layers, save the whole document as an <code>.aips</code> project and re-open it later.</p></div>
+          </details>
+
+          <details>
+            <summary>How do I run my own instance?</summary>
+            <div class="a"><p>Clone the repo, copy <code>.env.example</code> to <code>.env</code> and add your <code>OPENROUTER_API_KEY</code>, then <code>docker compose up</code> for the API, workers and storage, and run the web client with pnpm. The full walkthrough is in the <a href="docs.html#self-hosting">self-hosting docs</a>.</p></div>
+          </details>
+
+          <details>
+            <summary>What’s it built with?</summary>
+            <div class="a"><p>A pnpm monorepo: React + TypeScript + a custom WebGL2 engine on the front end, a Fastify API, Python Celery workers for the heavy AI/image jobs, and Postgres + Redis + MinIO behind Docker Compose. Routing to providers (OpenRouter, with optional specialists) goes through one capability interface.</p></div>
+          </details>
+        </div>
+
+        <div class="cta-band" style="margin-top:48px">
+          <h2 style="font-size:1.6rem">Still curious?</h2>
+          <p class="lead" style="margin:0 auto">Dig into the full documentation or read the source.</p>
+          <div class="hero-cta" style="margin-top:18px">
+            <a class="btn btn-primary" href="docs.html">Read the docs</a>
+            <a class="btn btn-ghost" href="https://github.com/fltman/glimmer" target="_blank" rel="noopener">GitHub</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <div class="wrap row">
+        <a class="brand" href="index.html"><img src="assets/glimmer-icon.png" alt="" style="width:24px;height:24px" /><span style="font-size:0.95rem">Glimmer</span></a>
+        <span class="sp"></span>
+        <a href="index.html">Home</a><a href="docs.html">Docs</a><a href="https://github.com/fltman/glimmer" target="_blank" rel="noopener">GitHub</a>
+      </div>
+      <div class="wrap" style="margin-top:14px;color:var(--muted-2);font-size:0.84rem">© <span id="year">2026</span> Glimmer · An AI-first image editor for the web.</div>
+    </footer>
+    <script src="assets/app.js"></script>
+  </body>
+</html>

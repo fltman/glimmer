@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Glimmer — AI-first image editor for the web</title>
+    <meta name="description" content="Glimmer is an AI-first image editor on the web: a real layer-based editor with a custom WebGL2 engine, generative fill, text-to-image, background cutout, outpaint and a chat assistant — all from one canvas-first workspace." />
+    <meta name="theme-color" content="#0c0d11" />
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png" />
+    <link rel="apple-touch-icon" href="assets/apple-touch-icon.png" />
+    <meta property="og:title" content="Glimmer — AI-first image editor for the web" />
+    <meta property="og:description" content="A real layer-based editor with a custom WebGL2 engine + a generative AI suite, in one canvas-first workspace." />
+    <meta property="og:image" content="assets/glimmer-logo.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="assets/styles.css" />
+  </head>
+  <body>
+    <!-- NAV -->
+    <header class="nav">
+      <div class="wrap nav-inner">
+        <a class="brand" href="index.html">
+          <img src="assets/glimmer-icon.png" alt="" />
+          <span>Glimmer</span>
+        </a>
+        <button class="nav-toggle" aria-label="Menu">☰</button>
+        <nav class="nav-links">
+          <a href="index.html#features">Features</a>
+          <a href="index.html#ai">AI suite</a>
+          <a href="index.html#how">How it works</a>
+          <a href="docs.html">Docs</a>
+          <a href="faq.html">FAQ</a>
+          <a class="btn btn-ghost nav-gh" href="https://github.com/fltman/glimmer" target="_blank" rel="noopener">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 .5A11.5 11.5 0 0 0 .5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.34-1.3-1.7-1.3-1.7-1.06-.72.08-.71.08-.71 1.17.08 1.79 1.2 1.79 1.2 1.04 1.79 2.73 1.27 3.4.97.1-.76.4-1.27.74-1.56-2.55-.29-5.23-1.28-5.23-5.7 0-1.26.45-2.29 1.2-3.1-.13-.29-.52-1.46.1-3.05 0 0 .98-.31 3.2 1.18a11.1 11.1 0 0 1 5.83 0c2.2-1.5 3.18-1.18 3.18-1.18.63 1.59.24 2.76.12 3.05.75.81 1.2 1.84 1.2 3.1 0 4.43-2.69 5.41-5.25 5.69.42.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12 11.5 11.5 0 0 0 12 .5Z"/></svg>
+            GitHub
+          </a>
+        </nav>
+      </div>
+    </header>
+
+    <!-- HERO -->
+    <section class="hero">
+      <div class="wrap">
+        <img class="hero-mark" src="assets/glimmer-icon.png" alt="Glimmer" />
+        <div style="margin-top:22px"><span class="eyebrow">AI-first image editor</span></div>
+        <h1>Edit, generate &amp; retouch<br /><span class="grad">from a single canvas.</span></h1>
+        <p class="lead" style="margin:14px auto 0">Glimmer is a real layer-based editor with a custom WebGL2 engine — and a generative AI suite woven right into the canvas. Describe an edit, generate a layer, cut out a subject, or reach for any pro tool with one keystroke.</p>
+        <div class="hero-cta">
+          <a class="btn btn-primary" href="docs.html#getting-started">Read the docs</a>
+          <a class="btn btn-ghost" href="https://github.com/fltman/glimmer" target="_blank" rel="noopener">View source</a>
+        </div>
+        <p class="hero-sub">Self-hostable · OpenRouter-powered · MIT-spirited open source</p>
+      </div>
+
+      <!-- Hero workspace mockup -->
+      <div class="wrap" style="margin-top:46px">
+        <div class="mock mock--tall" role="img" aria-label="Glimmer's canvas-first workspace">
+          <div class="mock-photo reflect"></div>
+          <div class="mock-chip tl"><img src="assets/glimmer-icon.png" alt="" /> Untitled · 1408×768 · 100%</div>
+          <div class="mock-pillrow">
+            <span class="mock-pill on">✦ AI</span>
+            <span class="mock-pill">Tools</span>
+            <span class="mock-pill">Layers</span>
+            <span class="mock-pill">Export</span>
+            <span class="mock-pill">⌘K</span>
+          </div>
+          <div class="mock-omnibar focus">
+            <svg class="spark" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l1.6 5.2L19 9l-5.4 1.8L12 16l-1.6-5.2L5 9l5.4-1.8L12 2z"/></svg>
+            <span>Describe an edit, or type a command…</span>
+            <span class="hint">⏎ run · ⌘⏎ ask AI · ⌘K palette</span>
+          </div>
+        </div>
+        <p class="hero-sub center" style="margin-top:12px">The canvas-first “omni” workspace — one bar does generation, editing, and every command.</p>
+      </div>
+    </section>
+
+    <!-- FEATURES -->
+    <section class="section" id="features">
+      <div class="wrap">
+        <div class="center" style="margin-bottom:40px">
+          <span class="eyebrow">Why Glimmer</span>
+          <h2>A pro editor that thinks in AI</h2>
+          <p class="lead">Not a wrapper around a model, and not a toy. A genuine non-destructive editor where AI is a first-class tool next to brushes, masks and adjustment layers.</p>
+        </div>
+        <div class="grid cols-3">
+          <div class="card">
+            <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2 2-5z"/></svg></div>
+            <h3>Generative AI suite</h3>
+            <p>Text-to-image, generative edit &amp; fill, background cutout, outpaint/expand, relight, colour-match, reflection &amp; distraction removal — each lands as a non-destructive layer.</p>
+          </div>
+          <div class="card">
+            <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 15l5-5 4 4 3-3 6 6"/></svg></div>
+            <h3>Real WebGL2 engine</h3>
+            <p>Linear-light compositing, tiled documents, the full blend-mode set, layer masks, smart filters and GPU-accelerated brushes. React never touches a pixel.</p>
+          </div>
+          <div class="card">
+            <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/></svg></div>
+            <h3>Chat assistant</h3>
+            <p>“Make the sky a warm sunset.” “Add a red bird.” The assistant edits the whole image, generates new layers, or — with Auto-edit — plans and applies a sequence of steps.</p>
+          </div>
+          <div class="card">
+            <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h10"/></svg></div>
+            <h3>Layers &amp; masks</h3>
+            <p>Raster, text, smart objects, groups, clipping and adjustment layers — with non-destructive layer masks, opacity and blend modes on every one.</p>
+          </div>
+          <div class="card">
+            <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg></div>
+            <h3>Command-first UX</h3>
+            <p>One ⌘K palette runs any tool, adjustment, filter or AI action by name — so the chrome stays out of the way on a small laptop screen.</p>
+          </div>
+          <div class="card">
+            <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z"/><path d="M2 12h20"/><path d="M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20z"/></svg></div>
+            <h3>Yours to host</h3>
+            <p>A Docker-Compose stack (API + workers + Postgres + Redis + MinIO) on OpenRouter. Provider keys stay server-side — the browser only ever talks to your API.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- AI SUITE -->
+    <section class="section" id="ai">
+      <div class="wrap grid cols-2" style="align-items:center;gap:40px">
+        <div>
+          <span class="eyebrow">The AI suite</span>
+          <h2>Twelve ways to let AI do the heavy lifting</h2>
+          <p>Every AI action is one click from the launcher or one phrase to the assistant — and every result is a layer you can mask, blend, or undo.</p>
+          <div class="pill-list">
+            <span class="pill">Generate</span><span class="pill">Edit / fill</span><span class="pill">Expand / outpaint</span>
+            <span class="pill">Relight</span><span class="pill">Colour match</span><span class="pill">Cutout</span>
+            <span class="pill">Reflections</span><span class="pill">Cleanup</span><span class="pill">Harmonize</span>
+            <span class="pill">Upscale</span><span class="pill">Magic select</span><span class="pill">Content-aware fill</span>
+          </div>
+          <p style="margin-top:18px"><a class="btn btn-ghost" href="docs.html#ai-suite">All AI tools →</a></p>
+        </div>
+        <div class="mock" aria-label="AI tools launcher">
+          <div class="mock-photo"></div>
+          <div class="mock-panel" style="width:62%;max-width:none;top:14px;bottom:14px;right:14px">
+            <div class="head"><span>AI tools</span><span style="color:var(--accent-hover)">Done</span></div>
+            <div class="body" style="gap:7px">
+              <div class="mock-tool" style="background:linear-gradient(135deg,rgba(109,125,255,.18),rgba(217,107,255,.14))">
+                <div class="t">✦ Assistant</div><div class="d">Describe what you want — it edits, generates or plans the steps.</div>
+              </div>
+              <div class="mock-cat">Create</div>
+              <div class="mock-grid2">
+                <div class="mock-tool"><div class="t">Generate</div><div class="d">New image from a prompt.</div></div>
+                <div class="mock-tool"><div class="t">Expand</div><div class="d">Outpaint past the edges.</div></div>
+              </div>
+              <div class="mock-cat">Light &amp; colour</div>
+              <div class="mock-grid2">
+                <div class="mock-tool"><div class="t">Edit</div><div class="d">Change a region by describing it.</div></div>
+                <div class="mock-tool"><div class="t">Relight</div><div class="d">Relight from a direction.</div></div>
+              </div>
+              <div class="mock-cat">Retouch &amp; remove</div>
+              <div class="mock-grid2">
+                <div class="mock-tool"><div class="t">Cutout</div><div class="d">Clean background removal.</div></div>
+                <div class="mock-tool"><div class="t">Cleanup</div><div class="d">Erase distractions.</div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- HOW IT WORKS -->
+    <section class="section" id="how">
+      <div class="wrap">
+        <div class="center" style="margin-bottom:40px">
+          <span class="eyebrow">How it works</span>
+          <h2>From blank canvas to finished image</h2>
+        </div>
+        <div class="grid cols-2" style="gap:44px;align-items:start">
+          <div class="steps">
+            <div class="step"><div class="n"></div><div><h3>Start with anything</h3><p>Open or drop an image, paste from the clipboard, or just describe one — Glimmer generates it as your first layer.</p></div></div>
+            <div class="step"><div class="n"></div><div><h3>Talk or reach for a tool</h3><p>Ask the assistant in plain language, or summon any tool, adjustment or filter from the ⌘K palette — the canvas stays front and centre.</p></div></div>
+            <div class="step"><div class="n"></div><div><h3>Work non-destructively</h3><p>Every AI result and every edit is a layer with masks, opacity and blend modes. Nothing is baked in until you say so.</p></div></div>
+            <div class="step"><div class="n"></div><div><h3>Export</h3><p>Flatten to PNG, JPEG or WebP — or save the full layered project as <code>.aips</code> to pick up later.</p></div></div>
+          </div>
+          <div class="mock" aria-label="Chat assistant generating a layer">
+            <div class="mock-photo reflect"></div>
+            <div class="mock-panel" style="top:14px;bottom:14px;right:14px;width:60%;max-width:none">
+              <div class="head"><span>Assistant &amp; AI</span><span>✕</span></div>
+              <div class="body">
+                <div class="bubble ai">Hi — I’m your editing assistant. Tell me what you want and I’ll edit, generate, or plan the steps.</div>
+                <div class="bubble me">generate a sunset over a mountain lake</div>
+                <div class="bubble ai">Generating a new layer…<br /><span style="color:var(--ok)">✓ Done — applied 1 layer.</span></div>
+                <div class="mini-input">e.g. make the sky a warm sunset — or: add a red bird</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PRO DEPTH -->
+    <section class="section" style="padding-top:0">
+      <div class="wrap grid cols-2" style="align-items:center;gap:40px">
+        <div class="mock" aria-label="Tool rail and contextual options">
+          <div class="mock-photo"></div>
+          <div class="mock-options"><b>BRUSH</b> Size <span class="mock-slider"></span> 48px &nbsp; Hardness <span class="mock-slider"></span> 80%</div>
+          <div class="mock-rail">
+            <i class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21l4-1 11-11-3-3L4 17l-1 4z"/></svg></i>
+            <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2" stroke-dasharray="3 3"/></svg></i>
+            <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8" stroke-dasharray="3 3"/></svg></i>
+            <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 16c4 4 10 2 12-2"/></svg></i>
+            <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h6v6H4zM14 13h6v6h-6z"/></svg></i>
+            <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/></svg></i>
+            <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v18M3 12h18"/></svg></i>
+            <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/></svg></i>
+            <div class="div"></div>
+            <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14"/></svg></i>
+            <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 7l10 10M17 7L7 17"/></svg></i>
+          </div>
+        </div>
+        <div>
+          <span class="eyebrow">Photoshop-depth, where you need it</span>
+          <h2>The pro tools are all here</h2>
+          <p>A two-column tool rail with contextual options for every tool, 14 adjustment layers with live Curves &amp; Levels editors, smart filters, type on a path, the pen tool, liquify, lens blur, channels, paths and a full history.</p>
+          <ul style="color:#c7cad5">
+            <li>Marquee, lasso, magic wand &amp; AI “magic select”, with feather / grow / shrink and add / subtract / intersect.</li>
+            <li>Brush, clone, heal, dodge / burn, smudge, blur / sharpen — each with a live brush-size cursor.</li>
+            <li>Crop that actually crops (trims pixels), free transform, and a switchable classic docked layout.</li>
+          </ul>
+          <p style="margin-top:14px"><a class="btn btn-ghost" href="docs.html#tools">Browse the toolset →</a></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- CTA -->
+    <section class="section" style="padding-top:0">
+      <div class="wrap">
+        <div class="cta-band">
+          <img src="assets/glimmer-icon.png" alt="" style="width:64px;height:64px;border-radius:16px;margin:0 auto 16px;box-shadow:var(--shadow-sm)" />
+          <h2>Run your own Glimmer</h2>
+          <p class="lead" style="margin:0 auto">Clone the repo, drop in an OpenRouter key, and <code>docker compose up</code>. Everything — engine, API, workers, storage — is yours.</p>
+          <div class="hero-cta" style="margin-top:22px">
+            <a class="btn btn-primary" href="docs.html#self-hosting">Self-hosting guide</a>
+            <a class="btn btn-ghost" href="https://github.com/fltman/glimmer" target="_blank" rel="noopener">github.com/fltman/glimmer</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- FOOTER -->
+    <footer class="footer">
+      <div class="wrap row">
+        <a class="brand" href="index.html"><img src="assets/glimmer-icon.png" alt="" style="width:24px;height:24px" /><span style="font-size:0.95rem">Glimmer</span></a>
+        <span class="sp"></span>
+        <a href="docs.html">Docs</a>
+        <a href="faq.html">FAQ</a>
+        <a href="https://github.com/fltman/glimmer" target="_blank" rel="noopener">GitHub</a>
+      </div>
+      <div class="wrap" style="margin-top:14px;color:var(--muted-2);font-size:0.84rem">© <span id="year">2026</span> Glimmer · An AI-first image editor for the web.</div>
+    </footer>
+    <script src="assets/app.js"></script>
+  </body>
+</html>

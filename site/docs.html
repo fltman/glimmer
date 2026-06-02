@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Glimmer Docs — guide &amp; reference</title>
+    <meta name="description" content="The Glimmer documentation: the workspace, command palette, tools, layers, the AI suite, the chat assistant, export, keyboard shortcuts and self-hosting." />
+    <meta name="theme-color" content="#0c0d11" />
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png" />
+    <link rel="apple-touch-icon" href="assets/apple-touch-icon.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="assets/styles.css" />
+  </head>
+  <body>
+    <header class="nav">
+      <div class="wrap nav-inner">
+        <a class="brand" href="index.html"><img src="assets/glimmer-icon.png" alt="" /><span>Glimmer</span></a>
+        <button class="nav-toggle" aria-label="Menu">☰</button>
+        <nav class="nav-links">
+          <a href="index.html#features">Features</a>
+          <a href="index.html#ai">AI suite</a>
+          <a href="docs.html" class="active">Docs</a>
+          <a href="faq.html">FAQ</a>
+          <a class="btn btn-ghost" href="https://github.com/fltman/glimmer" target="_blank" rel="noopener">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <div class="wrap">
+      <div class="center" style="padding-top:48px">
+        <span class="eyebrow">Documentation</span>
+        <h1 style="font-size:clamp(2rem,4vw,2.8rem)">Everything in Glimmer</h1>
+        <p class="lead">A guide to the workspace, the tools, the AI suite and self-hosting — plus a full keyboard reference.</p>
+      </div>
+
+      <div class="docs">
+        <!-- SIDEBAR -->
+        <aside class="docs-side">
+          <div class="group">Getting started</div>
+          <a href="#getting-started">Quick start</a>
+          <a href="#workspace">The workspace</a>
+          <a href="#palette">Command palette</a>
+          <div class="group">Editing</div>
+          <a href="#tools">Tools</a>
+          <a href="#selections">Selections</a>
+          <a href="#layers">Layers &amp; masks</a>
+          <a href="#crop">Crop &amp; transform</a>
+          <a href="#adjustments">Adjustments &amp; filters</a>
+          <div class="group">AI</div>
+          <a href="#ai-suite">The AI suite</a>
+          <a href="#assistant">Chat assistant</a>
+          <div class="group">Output</div>
+          <a href="#export">Export &amp; projects</a>
+          <div class="group">Run it</div>
+          <a href="#self-hosting">Self-hosting</a>
+          <div class="group">Reference</div>
+          <a href="#shortcuts">Keyboard shortcuts</a>
+        </aside>
+
+        <!-- MAIN -->
+        <main class="docs-main">
+          <section id="getting-started">
+            <h2>Quick start</h2>
+            <p>Glimmer opens on an empty canvas. There are four ways to begin:</p>
+            <ul>
+              <li><b>Generate</b> — type a description in the bar at the bottom (the <em>omnibar</em>) and press <kbd>⏎</kbd>. The assistant generates an image as your first layer.</li>
+              <li><b>Open</b> — click <em>Open image</em>, or drag a file anywhere onto the canvas.</li>
+              <li><b>Paste</b> — copy an image elsewhere and press <kbd>⌘</kbd><kbd>V</kbd>.</li>
+              <li><b>New blank document</b> — run <em>New document</em> from the ⌘K palette.</li>
+            </ul>
+            <div class="note tip">Tip: on the empty canvas the omnibar is already focused — just start typing what you want to make.</div>
+          </section>
+
+          <section id="workspace">
+            <h2>The workspace</h2>
+            <p>Glimmer has two layouts that share the same engine and document — switch any time; nothing is lost.</p>
+            <h3>Omni (default)</h3>
+            <p>A full-screen canvas with a single floating <b>omnibar</b> and minimal corner chrome. The omnibar fuses the AI prompt and the command palette: type a sentence to talk to the assistant, or a keyword to run a command. Everything else — tools, panels, options — is summoned on demand and floats over the canvas. Press <kbd>Tab</kbd> to hide all chrome for a full-bleed view.</p>
+            <div class="frame" style="margin:18px 0">
+              <div class="mock" style="border:0;border-radius:0">
+                <div class="mock-photo reflect"></div>
+                <div class="mock-chip tl"><img src="assets/glimmer-icon.png" alt="" /> Untitled · 1408×768 · 100%</div>
+                <div class="mock-pillrow"><span class="mock-pill on">✦ AI</span><span class="mock-pill">Tools</span><span class="mock-pill">Layers</span><span class="mock-pill">⌘K</span></div>
+                <div class="mock-omnibar focus"><svg class="spark" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l1.6 5.2L19 9l-5.4 1.8L12 16l-1.6-5.2L5 9l5.4-1.8L12 2z"/></svg><span>Describe an edit, or type a command…</span><span class="hint">⏎ run · ⌘⏎ ask AI · ⌘K</span></div>
+              </div>
+            </div>
+            <h3>Classic</h3>
+            <p>The familiar docked layout: a top menu bar (File / Edit / Image / Filter / Liquify / Lens Blur / Select), the tool rail, and a right-hand dock with tabs for the assistant, adjustments, history, paths, swatches and channels. Toggle it from the corner chrome (or run <em>Toggle omnibar / classic layout</em>).</p>
+            <div class="note">Anything in the classic menus is also reachable in omni mode through the ⌘K palette — so you never need the menu bar to find a feature.</div>
+          </section>
+
+          <section id="palette">
+            <h2>Command palette</h2>
+            <p>Press <kbd>⌘</kbd><kbd>K</kbd> (or click the ⌘K chip) to open the palette. Type to fuzzy-search <b>any</b> action by name — tools, adjustments, filters, AI tools, panels, view toggles, selection ops and file commands — then <kbd>⏎</kbd> to run it. This is what lets the chrome stay hidden on a small screen.</p>
+            <div class="frame" style="margin:18px 0">
+              <div class="mock" style="border:0;border-radius:0">
+                <div class="mock-photo"></div>
+                <div class="mock-cmd">
+                  <div class="search">⌘K&nbsp; <span style="color:var(--ink)">cutout</span></div>
+                  <div class="row on"><span class="g">AI</span> Cutout — remove background <span class="k">↵</span></div>
+                  <div class="row"><span class="g">Filters</span> Liquify…</div>
+                  <div class="row"><span class="g">Adjust</span> Curves</div>
+                  <div class="row"><span class="g">Select</span> Feather selection… <span class="k">⇧⌘D</span></div>
+                  <div class="row"><span class="g">View</span> Fit to screen</div>
+                </div>
+              </div>
+            </div>
+            <p>The omnibar shares the same registry: a keyword that tightly matches a command runs it; a full sentence goes to the assistant. Force the assistant any time with <kbd>⌘</kbd><kbd>⏎</kbd>.</p>
+          </section>
+
+          <section id="tools">
+            <h2>Tools</h2>
+            <p>The tool rail is a two-column grid; grouped tools (dodge/burn, blur/sharpen/smudge, shapes) open a flyout. Pick a tool and its options appear in the contextual bar. Brush-like tools show a live ring cursor at the brush size; the clone/heal tools show a “set source” target while you hold <kbd>⌥</kbd>.</p>
+            <table class="tbl">
+              <thead><tr><th>Group</th><th>Tools</th></tr></thead>
+              <tbody>
+                <tr><td>Move</td><td>Move <kbd>V</kbd>, Hand/pan <kbd>H</kbd></td></tr>
+                <tr><td>Select</td><td>Rectangle &amp; ellipse marquee <kbd>M</kbd>, Lasso <kbd>L</kbd>, Magic wand <kbd>W</kbd>, Magic Select (AI) <kbd>A</kbd></td></tr>
+                <tr><td>Frame</td><td>Crop <kbd>C</kbd>, Free transform <kbd>T</kbd></td></tr>
+                <tr><td>Paint</td><td>Brush <kbd>B</kbd>, Eraser <kbd>E</kbd>, Paint bucket <kbd>K</kbd>, Gradient <kbd>G</kbd>, Pattern stamp</td></tr>
+                <tr><td>Retouch</td><td>Clone stamp <kbd>S</kbd>, Healing brush <kbd>J</kbd>, Dodge / Burn <kbd>O</kbd>, Blur / Sharpen / Smudge</td></tr>
+                <tr><td>Vector &amp; type</td><td>Pen <kbd>P</kbd>, Type <kbd>Y</kbd>, Shape <kbd>U</kbd></td></tr>
+                <tr><td>Sample</td><td>Eyedropper <kbd>I</kbd></td></tr>
+              </tbody>
+            </table>
+            <h3>Modifier keys</h3>
+            <ul>
+              <li><b>Shift</b> — constrain proportions: a square/circle marquee, a square or start-ratio crop, 45° lines &amp; gradients.</li>
+              <li><b>⌥ / Alt</b> — draw/resize from the centre (marquee &amp; crop); set the clone source; convert a pen anchor to a corner while dragging its handle.</li>
+            </ul>
+          </section>
+
+          <section id="selections">
+            <h2>Selections</h2>
+            <p>Selections constrain painting, fills, adjustments and AI edits to a region. Build them with the marquee, lasso, magic wand, or the AI <b>Magic Select</b> (click a subject). Modifiers at the moment of click set the operator:</p>
+            <ul>
+              <li><b>Shift</b> = add · <b>⌥</b> = subtract · <b>Shift+⌥</b> = intersect</li>
+            </ul>
+            <p>Refine a live selection from the ⌘K palette or the Select menu:</p>
+            <div class="pill-list">
+              <span class="pill">Select all ⌘A</span><span class="pill">Deselect ⌘D</span><span class="pill">Inverse ⇧⌘I</span>
+              <span class="pill">Feather…</span><span class="pill">Grow…</span><span class="pill">Shrink…</span>
+            </div>
+            <p style="margin-top:14px">With a selection active you can <b>copy</b> <kbd>⌘</kbd><kbd>C</kbd>, <b>cut</b> <kbd>⌘</kbd><kbd>X</kbd>, <b>paste in place</b> <kbd>⌘</kbd><kbd>V</kbd>, make a <b>layer via copy</b> <kbd>⌘</kbd><kbd>J</kbd>, or clear the pixels with <kbd>⌫</kbd>.</p>
+          </section>
+
+          <section id="layers">
+            <h2>Layers &amp; masks</h2>
+            <p>The Layers panel manages a real layer stack — raster, text, smart objects, groups, clipping and adjustment layers. Every layer has opacity, a blend mode and an optional non-destructive layer mask.</p>
+            <div class="grid cols-2" style="gap:22px;align-items:center;margin:18px 0">
+              <div class="mock" style="aspect-ratio:16/12;min-height:0">
+                <div class="mock-photo"></div>
+                <div class="mock-panel" style="position:absolute;inset:14px;width:auto;max-width:none">
+                  <div class="head"><span>Layers</span></div>
+                  <div class="body">
+                    <div class="mock-layer active"><span class="sw"></span> Generated · 1408×768</div>
+                    <div style="display:flex;gap:6px;flex-wrap:wrap;font-size:10px;color:var(--muted)">
+                      <span class="pill" style="padding:3px 8px">+ Layer</span><span class="pill" style="padding:3px 8px">Duplicate</span><span class="pill" style="padding:3px 8px">+ Mask</span><span class="pill" style="padding:3px 8px">Group</span><span class="pill" style="padding:3px 8px">Delete</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div>
+                <ul>
+                  <li><b>+ Layer</b> adds a blank layer; <b>Duplicate</b> copies the active one.</li>
+                  <li><b>+ Mask</b> adds a layer mask from the current selection — paint it to hide/reveal, fully non-destructively.</li>
+                  <li>Reorder, group / ungroup, clip, and toggle visibility.</li>
+                  <li>Adjustment layers (below) re-render live over everything beneath them.</li>
+                </ul>
+              </div>
+            </div>
+          </section>
+
+          <section id="crop">
+            <h2>Crop &amp; transform</h2>
+            <p>Pick <b>Crop</b> <kbd>C</kbd> and drag a region (rule-of-thirds guides appear). <kbd>Shift</kbd> constrains the ratio, <kbd>⌥</kbd> resizes from the centre; <kbd>⏎</kbd> applies and <kbd>Esc</kbd> cancels. Cropping genuinely trims the pixels and resizes the document, then re-centres the view.</p>
+            <div class="frame" style="margin:18px 0">
+              <div class="mock" style="border:0;border-radius:0">
+                <div class="mock-photo reflect"></div>
+                <div class="mock-options"><b>CROP</b> Aspect · Free · 1:1 · 16:9 &nbsp; Shift = ratio · ⌥ = centre · ⏎ apply</div>
+                <div class="mock-crop"><span class="handle nw"></span><span class="handle ne"></span><span class="handle sw"></span><span class="handle se"></span></div>
+              </div>
+            </div>
+            <p><b>Free transform</b> <kbd>T</kbd> scales and rotates the active layer (<kbd>Shift</kbd> keeps aspect); smart objects transform losslessly.</p>
+          </section>
+
+          <section id="adjustments">
+            <h2>Adjustments &amp; filters</h2>
+            <p><b>14 adjustment layers</b> — non-destructive, with live editors for Curves &amp; Levels:</p>
+            <div class="pill-list">
+              <span class="pill">Brightness / Contrast</span><span class="pill">Levels</span><span class="pill">Curves</span><span class="pill">Exposure</span>
+              <span class="pill">Vibrance</span><span class="pill">Hue / Saturation</span><span class="pill">Colour Balance</span><span class="pill">Black &amp; White</span>
+              <span class="pill">Photo Filter</span><span class="pill">Channel Mixer</span><span class="pill">Invert</span><span class="pill">Posterize</span>
+              <span class="pill">Threshold</span><span class="pill">Gradient Map</span>
+            </div>
+            <p style="margin-top:16px"><b>Filters</b> run as smart filters and include blur, sharpen / unsharp mask, add noise, oil paint, chromatic aberration, find edges and more — plus the modal <b>Liquify</b> (push / bloat / pucker / twirl / smudge) and depth-aware <b>Lens Blur</b> (bokeh), reachable from the ⌘K palette in either layout.</p>
+          </section>
+
+          <section id="ai-suite">
+            <h2>The AI suite</h2>
+            <p>Open the AI launcher (the ✦ AI chip) and pick a tool, or run any of these from ⌘K. Each returns a non-destructive layer. Provider calls run server-side via OpenRouter.</p>
+            <table class="tbl">
+              <thead><tr><th>Tool</th><th>What it does</th></tr></thead>
+              <tbody>
+                <tr><td><b>Generate</b></td><td>Make a brand-new image from a text prompt.</td></tr>
+                <tr><td><b>Edit / fill</b></td><td>Change a selected region (or the whole image) by describing it — generative fill &amp; replace.</td></tr>
+                <tr><td><b>Expand</b></td><td>Outpaint — extend the scene naturally past the canvas edges.</td></tr>
+                <tr><td><b>Relight</b></td><td>Relight the image from a chosen direction &amp; colour.</td></tr>
+                <tr><td><b>Colour Match</b></td><td>Match the grade of a reference image.</td></tr>
+                <tr><td><b>Cutout</b></td><td>Background removal to a clean alpha cutout (runs in-browser when it can).</td></tr>
+                <tr><td><b>Reflections</b></td><td>Erase glass glare &amp; reflections.</td></tr>
+                <tr><td><b>Cleanup</b></td><td>Find &amp; remove distracting objects.</td></tr>
+                <tr><td><b>Harmonize</b></td><td>Blend a pasted subject into the scene’s light &amp; colour.</td></tr>
+                <tr><td><b>Upscale</b></td><td>Increase resolution with detail.</td></tr>
+                <tr><td><b>Magic Select</b></td><td>Click a subject to select it (segment-anything, in-browser).</td></tr>
+                <tr><td><b>Content-Aware Fill</b></td><td>Remove the selection &amp; reconstruct the background behind it.</td></tr>
+              </tbody>
+            </table>
+            <div class="note">Inpaint &amp; outpaint use a crop → dual-signal → re-align → colour-match → feathered blend-back pipeline so results drop in seamlessly and the original layer stays untouched.</div>
+          </section>
+
+          <section id="assistant">
+            <h2>Chat assistant</h2>
+            <p>The assistant turns plain language into edits. Three modes:</p>
+            <ul>
+              <li><b>Edit the whole image</b> — “make the sky a warm sunset”, “give it a vintage look”.</li>
+              <li><b>Generate a layer</b> — “add a red bird”, “generate a sunset over a mountain lake”.</li>
+              <li><b>Auto-edit</b> — turn it on and the assistant plans a sequence of adjustments and applies them step by step, showing each one.</li>
+            </ul>
+            <p>Press <kbd>⏎</kbd> to send, <kbd>⇧</kbd><kbd>⏎</kbd> for a new line. Every step is a layer you can undo.</p>
+          </section>
+
+          <section id="export">
+            <h2>Export &amp; projects</h2>
+            <ul>
+              <li><b>Export PNG</b> — one-click flatten &amp; download.</li>
+              <li><b>Export as…</b> — choose PNG, JPEG or WebP (with quality) from the ⌘K palette.</li>
+              <li><b>Save project (.aips)</b> — the full layered document, to re-open later.</li>
+              <li><b>Open / Place</b> — open an image as a new document, or place one as a layer.</li>
+            </ul>
+          </section>
+
+          <section id="self-hosting">
+            <h2>Self-hosting</h2>
+            <p>Glimmer is a monorepo: a React + custom-WebGL2 <code>web/</code> client, a Fastify <code>api/</code>, Python Celery <code>workers/</code>, and a Docker-Compose stack (Postgres, Redis, MinIO). Provider keys live only on the server — the browser only ever talks to your API.</p>
+            <ol style="color:#c7cad5;padding-left:20px">
+              <li>Clone <a href="https://github.com/fltman/glimmer" target="_blank" rel="noopener">github.com/fltman/glimmer</a>.</li>
+              <li><code>cp .env.example .env</code> and set <code>OPENROUTER_API_KEY</code>.</li>
+              <li><code>docker compose up</code> in <code>infra/</code> to bring up the API, workers and storage.</li>
+              <li><code>pnpm --filter @aips/web dev</code> for the web client.</li>
+            </ol>
+            <div class="note">In self-host “dev mode” auth is frictionless and credits are effectively unlimited. For production, set <code>AUTH_DEV_MODE=false</code> and a strong <code>JWT_SECRET</code> — the API refuses to boot otherwise.</div>
+          </section>
+
+          <section id="shortcuts">
+            <h2>Keyboard shortcuts</h2>
+            <table class="tbl">
+              <thead><tr><th>Action</th><th>Shortcut</th></tr></thead>
+              <tbody>
+                <tr><td>Command palette</td><td><kbd>⌘</kbd><kbd>K</kbd></td></tr>
+                <tr><td>Ask the assistant (from the omnibar)</td><td><kbd>⌘</kbd><kbd>⏎</kbd></td></tr>
+                <tr><td>Hide / show all chrome</td><td><kbd>Tab</kbd></td></tr>
+                <tr><td>Undo / Redo</td><td><kbd>⌘</kbd><kbd>Z</kbd> · <kbd>⇧</kbd><kbd>⌘</kbd><kbd>Z</kbd></td></tr>
+                <tr><td>Select all / Deselect</td><td><kbd>⌘</kbd><kbd>A</kbd> · <kbd>⌘</kbd><kbd>D</kbd></td></tr>
+                <tr><td>Inverse selection</td><td><kbd>⇧</kbd><kbd>⌘</kbd><kbd>I</kbd></td></tr>
+                <tr><td>Copy / Cut / Paste in place</td><td><kbd>⌘</kbd><kbd>C</kbd> · <kbd>⌘</kbd><kbd>X</kbd> · <kbd>⌘</kbd><kbd>V</kbd></td></tr>
+                <tr><td>Layer via copy</td><td><kbd>⌘</kbd><kbd>J</kbd></td></tr>
+                <tr><td>Clear selected pixels</td><td><kbd>⌫</kbd></td></tr>
+                <tr><td>Apply / cancel crop &amp; transform</td><td><kbd>⏎</kbd> · <kbd>Esc</kbd></td></tr>
+                <tr><td>Swap / reset colours</td><td><kbd>X</kbd> · <kbd>D</kbd></td></tr>
+                <tr><td>Tools</td><td><kbd>V</kbd> <kbd>M</kbd> <kbd>L</kbd> <kbd>W</kbd> <kbd>A</kbd> <kbd>C</kbd> <kbd>T</kbd> <kbd>B</kbd> <kbd>E</kbd> <kbd>S</kbd> <kbd>J</kbd> <kbd>O</kbd> <kbd>K</kbd> <kbd>G</kbd> <kbd>P</kbd> <kbd>Y</kbd> <kbd>U</kbd> <kbd>I</kbd> <kbd>H</kbd></td></tr>
+              </tbody>
+            </table>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <footer class="footer">
+      <div class="wrap row">
+        <a class="brand" href="index.html"><img src="assets/glimmer-icon.png" alt="" style="width:24px;height:24px" /><span style="font-size:0.95rem">Glimmer</span></a>
+        <span class="sp"></span>
+        <a href="index.html">Home</a><a href="faq.html">FAQ</a><a href="https://github.com/fltman/glimmer" target="_blank" rel="noopener">GitHub</a>
+      </div>
+      <div class="wrap" style="margin-top:14px;color:var(--muted-2);font-size:0.84rem">© <span id="year">2026</span> Glimmer · An AI-first image editor for the web.</div>
+    </footer>
+    <script src="assets/app.js"></script>
+  </body>
+</html>
