@@ -79,12 +79,7 @@
             <h3>Omni (default)</h3>
             <p>A full-screen canvas with a single floating <b>omnibar</b> and minimal corner chrome. The omnibar fuses the AI prompt and the command palette: type a sentence to talk to the assistant, or a keyword to run a command. Everything else — tools, panels, options — is summoned on demand and floats over the canvas. Press <kbd>Tab</kbd> to hide all chrome for a full-bleed view.</p>
             <div class="frame" style="margin:18px 0">
-              <div class="mock" style="border:0;border-radius:0">
-                <div class="mock-photo reflect"></div>
-                <div class="mock-chip tl"><img src="assets/glimmer-icon.png" alt="" /> Untitled · 1408×768 · 100%</div>
-                <div class="mock-pillrow"><span class="mock-pill on">✦ AI</span><span class="mock-pill">Tools</span><span class="mock-pill">Layers</span><span class="mock-pill">⌘K</span></div>
-                <div class="mock-omnibar focus"><svg class="spark" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l1.6 5.2L19 9l-5.4 1.8L12 16l-1.6-5.2L5 9l5.4-1.8L12 2z"/></svg><span>Describe an edit, or type a command…</span><span class="hint">⏎ run · ⌘⏎ ask AI · ⌘K</span></div>
-              </div>
+              <img src="assets/screens/workspace.webp" alt="The omni workspace" loading="lazy" />
             </div>
             <h3>Classic</h3>
             <p>The familiar docked layout: a top menu bar (File / Edit / Image / Filter / Liquify / Lens Blur / Select), the tool rail, and a right-hand dock with tabs for the assistant, adjustments, history, paths, swatches and channels. Toggle it from the corner chrome (or run <em>Toggle omnibar / classic layout</em>).</p>
@@ -95,17 +90,7 @@
             <h2>Command palette</h2>
             <p>Press <kbd>⌘</kbd><kbd>K</kbd> (or click the ⌘K chip) to open the palette. Type to fuzzy-search <b>any</b> action by name — tools, adjustments, filters, AI tools, panels, view toggles, selection ops and file commands — then <kbd>⏎</kbd> to run it. This is what lets the chrome stay hidden on a small screen.</p>
             <div class="frame" style="margin:18px 0">
-              <div class="mock" style="border:0;border-radius:0">
-                <div class="mock-photo"></div>
-                <div class="mock-cmd">
-                  <div class="search">⌘K&nbsp; <span style="color:var(--ink)">cutout</span></div>
-                  <div class="row on"><span class="g">AI</span> Cutout — remove background <span class="k">↵</span></div>
-                  <div class="row"><span class="g">Filters</span> Liquify…</div>
-                  <div class="row"><span class="g">Adjust</span> Curves</div>
-                  <div class="row"><span class="g">Select</span> Feather selection… <span class="k">⇧⌘D</span></div>
-                  <div class="row"><span class="g">View</span> Fit to screen</div>
-                </div>
-              </div>
+              <img src="assets/screens/command-palette.webp" alt="The command palette" loading="lazy" />
             </div>
             <p>The omnibar shares the same registry: a keyword that tightly matches a command runs it; a full sentence goes to the assistant. Force the assistant any time with <kbd>⌘</kbd><kbd>⏎</kbd>.</p>
           </section>
@@ -150,18 +135,7 @@
             <h2>Layers &amp; masks</h2>
             <p>The Layers panel manages a real layer stack — raster, text, smart objects, groups, clipping and adjustment layers. Every layer has opacity, a blend mode and an optional non-destructive layer mask.</p>
             <div class="grid cols-2" style="gap:22px;align-items:center;margin:18px 0">
-              <div class="mock" style="aspect-ratio:16/12;min-height:0">
-                <div class="mock-photo"></div>
-                <div class="mock-panel" style="position:absolute;inset:14px;width:auto;max-width:none">
-                  <div class="head"><span>Layers</span></div>
-                  <div class="body">
-                    <div class="mock-layer active"><span class="sw"></span> Generated · 1408×768</div>
-                    <div style="display:flex;gap:6px;flex-wrap:wrap;font-size:10px;color:var(--muted)">
-                      <span class="pill" style="padding:3px 8px">+ Layer</span><span class="pill" style="padding:3px 8px">Duplicate</span><span class="pill" style="padding:3px 8px">+ Mask</span><span class="pill" style="padding:3px 8px">Group</span><span class="pill" style="padding:3px 8px">Delete</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
+              <div class="frame"><img src="assets/screens/layers.webp" alt="The Layers panel" loading="lazy" /></div>
               <div>
                 <ul>
                   <li><b>+ Layer</b> adds a blank layer; <b>Duplicate</b> copies the active one.</li>
@@ -177,11 +151,7 @@
             <h2>Crop &amp; transform</h2>
             <p>Pick <b>Crop</b> <kbd>C</kbd> and drag a region (rule-of-thirds guides appear). <kbd>Shift</kbd> constrains the ratio, <kbd>⌥</kbd> resizes from the centre; <kbd>⏎</kbd> applies and <kbd>Esc</kbd> cancels. Cropping genuinely trims the pixels and resizes the document, then re-centres the view.</p>
             <div class="frame" style="margin:18px 0">
-              <div class="mock" style="border:0;border-radius:0">
-                <div class="mock-photo reflect"></div>
-                <div class="mock-options"><b>CROP</b> Aspect · Free · 1:1 · 16:9 &nbsp; Shift = ratio · ⌥ = centre · ⏎ apply</div>
-                <div class="mock-crop"><span class="handle nw"></span><span class="handle ne"></span><span class="handle sw"></span><span class="handle se"></span></div>
-              </div>
+              <img src="assets/screens/crop.webp" alt="Crop with rule-of-thirds guides" loading="lazy" />
             </div>
             <p><b>Free transform</b> <kbd>T</kbd> scales and rotates the active layer (<kbd>Shift</kbd> keeps aspect); smart objects transform losslessly.</p>
           </section>

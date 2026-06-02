@@ -27,11 +27,12 @@ python3 -m http.server 5190
 
 ## Product visuals
 
-The feature/screen visuals are **faithful HTML/CSS mockups** built from the
-app's real design tokens (see the `.mock*` classes in `styles.css`). They stay
-crisp at any size and update in code — no re-screenshotting. To use real
-screenshots instead, drop PNGs into `assets/screens/` and swap a `.mock`
-block for `<figure class="shot"><div class="frame"><img src="assets/screens/…"></div></figure>`.
+The overview and docs use **real screenshots** of the app, captured from the
+running editor and stored in `assets/screens/*.webp` (1600px, ~60–130 KB each).
+To refresh them after a UI change: capture each screen, crop off the browser
+chrome, drop the WebP into `assets/screens/`, and it's picked up by the existing
+`<div class="frame"><img …></div>` in the HTML. (The `.mock*` classes in
+`styles.css` are the original CSS UI mockups, kept as a fallback.)
 
 ## Keep it in sync
 

@@ -56,22 +56,7 @@
 
       <!-- Hero workspace mockup -->
       <div class="wrap" style="margin-top:46px">
-        <div class="mock mock--tall" role="img" aria-label="Glimmer's canvas-first workspace">
-          <div class="mock-photo reflect"></div>
-          <div class="mock-chip tl"><img src="assets/glimmer-icon.png" alt="" /> Untitled · 1408×768 · 100%</div>
-          <div class="mock-pillrow">
-            <span class="mock-pill on">✦ AI</span>
-            <span class="mock-pill">Tools</span>
-            <span class="mock-pill">Layers</span>
-            <span class="mock-pill">Export</span>
-            <span class="mock-pill">⌘K</span>
-          </div>
-          <div class="mock-omnibar focus">
-            <svg class="spark" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l1.6 5.2L19 9l-5.4 1.8L12 16l-1.6-5.2L5 9l5.4-1.8L12 2z"/></svg>
-            <span>Describe an edit, or type a command…</span>
-            <span class="hint">⏎ run · ⌘⏎ ask AI · ⌘K palette</span>
-          </div>
-        </div>
+        <div class="frame"><img src="assets/screens/workspace.webp" alt="Glimmer's canvas-first workspace with a generated photo" loading="lazy" /></div>
         <p class="hero-sub center" style="margin-top:12px">The canvas-first “omni” workspace — one bar does generation, editing, and every command.</p>
       </div>
     </section>
@@ -134,32 +119,7 @@
           </div>
           <p style="margin-top:18px"><a class="btn btn-ghost" href="docs.html#ai-suite">All AI tools →</a></p>
         </div>
-        <div class="mock" aria-label="AI tools launcher">
-          <div class="mock-photo"></div>
-          <div class="mock-panel" style="width:62%;max-width:none;top:14px;bottom:14px;right:14px">
-            <div class="head"><span>AI tools</span><span style="color:var(--accent-hover)">Done</span></div>
-            <div class="body" style="gap:7px">
-              <div class="mock-tool" style="background:linear-gradient(135deg,rgba(109,125,255,.18),rgba(217,107,255,.14))">
-                <div class="t">✦ Assistant</div><div class="d">Describe what you want — it edits, generates or plans the steps.</div>
-              </div>
-              <div class="mock-cat">Create</div>
-              <div class="mock-grid2">
-                <div class="mock-tool"><div class="t">Generate</div><div class="d">New image from a prompt.</div></div>
-                <div class="mock-tool"><div class="t">Expand</div><div class="d">Outpaint past the edges.</div></div>
-              </div>
-              <div class="mock-cat">Light &amp; colour</div>
-              <div class="mock-grid2">
-                <div class="mock-tool"><div class="t">Edit</div><div class="d">Change a region by describing it.</div></div>
-                <div class="mock-tool"><div class="t">Relight</div><div class="d">Relight from a direction.</div></div>
-              </div>
-              <div class="mock-cat">Retouch &amp; remove</div>
-              <div class="mock-grid2">
-                <div class="mock-tool"><div class="t">Cutout</div><div class="d">Clean background removal.</div></div>
-                <div class="mock-tool"><div class="t">Cleanup</div><div class="d">Erase distractions.</div></div>
-              </div>
-            </div>
-          </div>
-        </div>
+        <div class="frame"><img src="assets/screens/ai-tools.webp" alt="The AI tools launcher" loading="lazy" /></div>
       </div>
     </section>
 
@@ -177,18 +137,7 @@
             <div class="step"><div class="n"></div><div><h3>Work non-destructively</h3><p>Every AI result and every edit is a layer with masks, opacity and blend modes. Nothing is baked in until you say so.</p></div></div>
             <div class="step"><div class="n"></div><div><h3>Export</h3><p>Flatten to PNG, JPEG or WebP — or save the full layered project as <code>.aips</code> to pick up later.</p></div></div>
           </div>
-          <div class="mock" aria-label="Chat assistant generating a layer">
-            <div class="mock-photo reflect"></div>
-            <div class="mock-panel" style="top:14px;bottom:14px;right:14px;width:60%;max-width:none">
-              <div class="head"><span>Assistant &amp; AI</span><span>✕</span></div>
-              <div class="body">
-                <div class="bubble ai">Hi — I’m your editing assistant. Tell me what you want and I’ll edit, generate, or plan the steps.</div>
-                <div class="bubble me">generate a sunset over a mountain lake</div>
-                <div class="bubble ai">Generating a new layer…<br /><span style="color:var(--ok)">✓ Done — applied 1 layer.</span></div>
-                <div class="mini-input">e.g. make the sky a warm sunset — or: add a red bird</div>
-              </div>
-            </div>
-          </div>
+          <div class="frame"><img src="assets/screens/assistant.webp" alt="The chat assistant generating a layer" loading="lazy" /></div>
         </div>
       </div>
     </section>
@@ -196,23 +145,7 @@
     <!-- PRO DEPTH -->
     <section class="section" style="padding-top:0">
       <div class="wrap grid cols-2" style="align-items:center;gap:40px">
-        <div class="mock" aria-label="Tool rail and contextual options">
-          <div class="mock-photo"></div>
-          <div class="mock-options"><b>BRUSH</b> Size <span class="mock-slider"></span> 48px &nbsp; Hardness <span class="mock-slider"></span> 80%</div>
-          <div class="mock-rail">
-            <i class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21l4-1 11-11-3-3L4 17l-1 4z"/></svg></i>
-            <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2" stroke-dasharray="3 3"/></svg></i>
-            <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8" stroke-dasharray="3 3"/></svg></i>
-            <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 16c4 4 10 2 12-2"/></svg></i>
-            <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h6v6H4zM14 13h6v6h-6z"/></svg></i>
-            <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/></svg></i>
-            <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v18M3 12h18"/></svg></i>
-            <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/></svg></i>
-            <div class="div"></div>
-            <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14"/></svg></i>
-            <i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 7l10 10M17 7L7 17"/></svg></i>
-          </div>
-        </div>
+        <div class="frame"><img src="assets/screens/tools.webp" alt="The tool rail and contextual brush options" loading="lazy" /></div>
         <div>
           <span class="eyebrow">Photoshop-depth, where you need it</span>
           <h2>The pro tools are all here</h2>
