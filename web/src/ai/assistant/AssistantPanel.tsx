@@ -413,7 +413,7 @@ export function AssistantPanel() {
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex min-h-0 flex-1 flex-col">
       {/* Mode hint + Auto-edit toggle */}
       <div className="flex items-center justify-between gap-2 border-b border-edge px-1 pb-2">
         <span className="text-[10px] leading-tight text-muted/70">

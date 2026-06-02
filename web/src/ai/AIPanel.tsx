@@ -199,7 +199,7 @@ export function AIPanel() {
           <ToolLauncher onPick={pick} />
         </div>
       ) : tab === "assistant" ? (
-        <div className="min-h-0 flex-1 px-3">
+        <div className="flex min-h-0 flex-1 flex-col px-3">
           <AssistantPanel />
         </div>
       ) : (
