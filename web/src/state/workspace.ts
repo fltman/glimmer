@@ -43,6 +43,9 @@ export type AiTab =
 /** A panel that can be summoned as a floating card in omni mode. */
 export type FloatPanel = SidebarTab | "layers";
 
+/** Which selection refinement the omni px-prompt dialog is editing. */
+export type SelectionRefineOp = "feather" | "expand" | "contract";
+
 export interface WorkspaceState {
   /**
    * The default, AI-first "omni" workspace (a full-screen canvas + one fused
@@ -83,6 +86,8 @@ export interface WorkspaceState {
   contentAwareFillOpen: boolean;
   /** Export-As dialog open (format / quality / matte) — classic File menu only. */
   exportDialogOpen: boolean;
+  /** Open selection-refine prompt (feather/grow/shrink px), or null. */
+  selectionRefine: SelectionRefineOp | null;
   /** True when the viewport is narrow enough to default to a collapsed dock. */
   compact: boolean;
 }
@@ -105,6 +110,7 @@ class WorkspaceStore {
     pendingAdjustment: null,
     contentAwareFillOpen: false,
     exportDialogOpen: false,
+    selectionRefine: null,
     compact: false,
   };
   private listeners = new Set<Listener>();
@@ -237,6 +243,12 @@ class WorkspaceStore {
   }
   closeExportDialog(): void {
     if (this.state.exportDialogOpen) this.set({ exportDialogOpen: false });
+  }
+  openSelectionRefine(op: SelectionRefineOp): void {
+    this.set({ selectionRefine: op, paletteOpen: false });
+  }
+  closeSelectionRefine(): void {
+    if (this.state.selectionRefine !== null) this.set({ selectionRefine: null });
   }
   clearPendingAdjustment(): void {
     if (this.state.pendingAdjustment !== null)

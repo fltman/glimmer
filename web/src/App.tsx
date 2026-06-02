@@ -29,6 +29,7 @@ import { LiquifyPanel } from "./ui/liquify";
 import { LensBlurPanel } from "./ui/lensblur";
 import { ContentAwareFillModal } from "./ai/contentAware";
 import { ExportDialog } from "./ui/file/ExportDialog";
+import { SelectionRefineDialog } from "./ui/select";
 import { LayersPanel } from "./ui/LayersPanel";
 import { AIPanel } from "./ai/AIPanel";
 import { AdjustmentsPanel } from "./ui/adjustments/AdjustmentsPanel";
@@ -353,6 +354,12 @@ export default function App() {
                 width={snap.width}
                 height={snap.height}
                 onClose={() => workspaceStore.closeExportDialog()}
+              />
+            )}
+            {ws.selectionRefine && (
+              <SelectionRefineDialog
+                op={ws.selectionRefine}
+                onClose={() => workspaceStore.closeSelectionRefine()}
               />
             )}
 

@@ -359,27 +359,27 @@ export function buildCommands(ctx: CommandCtx): Command[] {
   cmds.push(
     {
       id: "select:feather",
-      title: "Feather selection (2 px)",
+      title: "Feather selection…",
       group: "Select",
       keywords: "feather soften selection edge blur",
       enabled: ctx.hasLayers,
-      run: () => actions.featherSelection(2),
+      run: () => workspaceStore.openSelectionRefine("feather"),
     },
     {
       id: "select:expand",
-      title: "Grow selection (4 px)",
+      title: "Grow selection…",
       group: "Select",
       keywords: "expand grow dilate selection",
       enabled: ctx.hasLayers,
-      run: () => actions.expandSelection(4),
+      run: () => workspaceStore.openSelectionRefine("expand"),
     },
     {
       id: "select:contract",
-      title: "Shrink selection (4 px)",
+      title: "Shrink selection…",
       group: "Select",
       keywords: "contract shrink erode selection",
       enabled: ctx.hasLayers,
-      run: () => actions.contractSelection(4),
+      run: () => workspaceStore.openSelectionRefine("contract"),
     },
   );
 
