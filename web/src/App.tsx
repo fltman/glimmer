@@ -529,17 +529,18 @@ function EmptyCanvasHero({ onOpen }: { onOpen: () => void }) {
   return (
     <div className="animate-fadein pointer-events-none absolute inset-0 z-10 flex items-center justify-center px-6 pb-24">
       {/* Subtle glass card so the copy reads cleanly over the checkerboard. */}
-      <div className="flex max-w-md flex-col items-center gap-5 rounded-2xl border border-edge/70 bg-panel/70 px-10 py-9 text-center shadow-2xl backdrop-blur-md">
-        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-fuchsia-500 text-white shadow-lg">
-          <Sparkles size={26} strokeWidth={1.75} />
-        </div>
-        <div className="space-y-2">
-          <h1 className="text-xl font-semibold text-ink">Start with an image</h1>
-          <p className="text-sm leading-relaxed text-muted">
-            Drop a file anywhere, paste from your clipboard, or open one — or just
-            describe an image in the bar below and AI generates it.
-          </p>
-        </div>
+      <div className="flex max-w-md flex-col items-center gap-5 rounded-2xl border border-edge/70 bg-panel/80 px-10 py-9 text-center shadow-2xl backdrop-blur-md">
+        {/* The Glimmer logo (generated in-app) is the hero. */}
+        <img
+          src="/glimmer-logo.png"
+          alt="Glimmer — AI Image Editor"
+          draggable={false}
+          className="w-56 max-w-full rounded-xl shadow-lg ring-1 ring-white/5"
+        />
+        <p className="max-w-sm text-sm leading-relaxed text-muted">
+          Drop a file anywhere, paste from your clipboard, or open one — or just
+          describe an image in the bar below and AI generates it.
+        </p>
         <div className="pointer-events-auto flex items-center gap-2.5">
           <button
             onClick={onOpen}
