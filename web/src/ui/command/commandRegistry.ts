@@ -110,6 +110,18 @@ export function buildCommands(ctx: CommandCtx): Command[] {
     });
   }
 
+  // Liquify — a modal warp session on the active raster layer. It lives only in
+  // the classic toolbar menu otherwise, so without this it's unreachable in the
+  // omni workspace. The floating LiquifyPanel takes over once the session opens.
+  cmds.push({
+    id: "filt:liquify",
+    title: "Liquify…",
+    group: "Filters",
+    keywords: "liquify warp push pucker bloat twirl smudge distort",
+    enabled: ctx.hasLayers,
+    run: () => void actions.beginLiquify(),
+  });
+
   // ── AI tools (deep-link the AI dock) ──
   for (const a of AI_TABS) {
     cmds.push({
